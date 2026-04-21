@@ -1,0 +1,317 @@
+==============================================================================
+ PULL + SANITY REPORT  (v4)
+==============================================================================
+
+## LILY
+  rows read                                878,827
+  rows kept                                872,740  (99.3%)
+  dropped because:
+    vp_m_s: missing                                      4,826
+    ngr_cps: out of range [0,500]                          597
+    msus_si: missing                                       383
+    vp_m_s: out of range [1000,7500]                       235
+    rhob: out of range [1.0,4.0]                            25
+    msus_si: out of range [1e-08,1.0]                       20
+    rhob: missing                                            1
+    rhob: depth out of range                                 0
+    ngr_cps: missing                                         0
+    ngr_cps: depth out of range                              0
+    vp_m_s: depth out of range                               0
+    msus_si: depth out of range                              0
+
+## NLOG — file-level (Tier 1)
+  wells scanned                              6,698
+    with LAS                                 2,072
+    with strat.json                          6,509
+    used                                     1,522
+    feet-depth auto-converted                  422
+  rows written                           7,663,755
+
+## Location metadata
+  coords missing                             2,065
+
+## Feature availability in NLOG output
+    rhob             wells=   991   rows= 1,008,754
+    gr_api           wells= 1,250   rows= 2,524,829
+    nphi             wells=   775   rows=   513,079
+    dt_us_ft         wells= 1,274   rows= 1,795,446
+    pef              wells=    98   rows=    70,006
+    cali_in          wells=   317   rows=   362,886
+    sp_mv            wells=   185   rows=   191,540
+    res_deep_log     wells=   343   rows=   318,695
+    res_shal_log     wells=   223   rows=   180,867
+    drho             wells=   630   rows=   662,447
+    vsh              wells=    18   rows=    15,504
+    vcl              wells=    16   rows=     2,654
+    vsnd             wells=     6   rows=        19
+    vdol             wells=     7   rows=       455
+    vsilt            wells=     5   rows=       784
+    phie             wells=    60   rows=    10,004
+    sw               wells=    35   rows=     5,786
+
+## Alias hits (how often each raw mnemonic was used)
+    gr_api         ← GR             1274
+    dt_us_ft       ← DT             1180
+    rhob           ← RHOB           1017
+    nphi           ← NPHI            869
+    drho           ← DRHO            642
+    cali_in        ← CALI            298
+    res_deep_log   ← ILD             237
+    sp_mv          ← SP              199
+    dt_us_ft       ← DTC             132
+    res_shal_log   ← LLS             113
+    pef            ← PEF              90
+    res_shal_log   ← ILM              83
+    res_deep_log   ← LLD              76
+    phie           ← PHIE             62
+    sw             ← SW               58
+    res_deep_log   ← RT               38
+    vcl            ← VCL              33
+    cali_in        ← CAL              26
+    res_shal_log   ← RS               19
+    vsh            ← VSH              18
+    pef            ← PE               12
+    dt_us_ft       ← DTCO             11
+    res_shal_log   ← SFLU             10
+    res_deep_log   ← RD                7
+    vsnd           ← VSND              7
+    vdol           ← VDOL              7
+    vsilt          ← VSILT             5
+    res_shal_log   ← MSFL              3
+    dt_us_ft       ← DTP               1
+
+## NLOG formation hits (interval count)
+    ZE        7,611
+    KN        4,546
+    RN        3,582
+    RB        2,929
+    NL        2,804
+    CK        2,426
+    RO        1,781
+    NU        1,330
+    NM          926
+    DC          825
+    AT          807
+    SL          557
+    SG          329
+    SK          124
+
+## Sub-unit (stratUnitId) hits — mapped
+    CKGR       → chalk           588,243
+    KNNC       → claystone       151,137
+    ZEZ2H      → halite          133,760
+    NLFFY      → clay            127,342
+    RBSHM      → claystone        74,063
+    KNGLU      → claystone        70,973
+    ZESA       → anhydrite        62,949
+    ATAL       → claystone        62,843
+    RBSHR      → claystone        57,913
+    NUOT       → clay             55,066
+    ROSL       → sandstone        51,492
+    ZEZ3H      → halite           46,916
+    CKTX       → chalk            42,159
+    NUBA       → clay             34,072
+    ROCL       → claystone        32,132
+    KNGLL      → claystone        30,354
+    ROSLU      → sandstone        29,142
+    NLFFC      → clay             28,311
+    SLDNA      → claystone        27,543
+    NLFFB      → clay             25,098
+    ZESAL      → anhydrite        24,870
+    RBMVC      → sandstone        24,477
+    NUMS       → clay             23,335
+    ZEZ1W      → halite           22,730
+    RNMUL      → carbonate        22,387
+    RBMVL      → sandstone        21,824
+    NLFFS      → clay             21,779
+    ROSLL      → sandstone        21,761
+    KNGLM      → claystone        21,363
+    NLLFC      → clay             19,751
+
+## Sub-unit codes NOT in dictionary (fell back to formation)
+  (review with Charlie — these are where the fine split is missing)
+  total rows affected: 481,274
+    NU            226,572
+    NL             32,788
+    CK             31,850
+    ZE             30,648
+    DC             16,055
+    NM             13,008
+    SLDB            3,989
+    ATWD            3,968
+    DCCB            3,956
+    DCCKB           3,943
+    NLLF            3,919
+    DCHP            3,876
+    SLCFM           3,830
+    DCC             3,491
+    SGGS            3,477
+    SGSKN           3,152
+    NUPZ            2,914
+    DCHS            2,860
+    SLCM            2,817
+    SGLUS           2,787
+
+## Strat 2-char prefixes not in NLOG_FORMATIONS (dropped)
+    N                   484
+    NN                  437
+    CLZL                 22
+    XXD                  12
+    FAUL                 12
+    XXE                   9
+    OBBS                  8
+    RV                    7
+    RVVE                  6
+    OB                    5
+
+## Curves seen in NLOG LAS files (top 25)
+    GR               1274
+    DT               1182
+    RHOB             1017
+    NPHI              869
+    DRHO              642
+    SON               474
+    DEPT:2            413
+    CALI              298
+    ILD               237
+    SP                199
+    LLD               184
+    LLS               163
+    DTC               132
+    MSFL              125
+    PEF                90
+    ILM                83
+    SFLU               67
+    SN                 63
+    PHIE               62
+    SW                 58
+    MLL                57
+    RT                 56
+    SFL                46
+    LITH               45
+    NEUT               44
+
+## Clipping events (values outside physical range — dropped)
+    dt_us_ft         shear-suspect         303,112
+    nphi             above                  91,400
+    sp_mv            above                  14,189
+    nphi             below                   8,323
+    dt_us_ft         above                   6,963
+    vcl              above                   4,641
+    sp_mv            below                   4,365
+    sw               above                   4,042
+    phie             above                   3,943
+    pef              above                   3,015
+    cali_in          below                   2,657
+    rhob             below                   2,606
+    drho             above                   2,246
+    res_deep_log     above                   1,637
+    vsnd             above                   1,221
+    dt_us_ft         below                   1,161
+    vdol             above                     789
+    drho             below                     676
+    res_shal_log     below                     563
+    rhob             above                     161
+
+## Tier 2 — statistical sanity
+  duplicate rows removed                    78,785
+  large depth gaps flagged                       1
+
+  implausible gradients (dropped):
+    rhob                218,856
+    gr_api                    0
+    nphi                      0
+    dt_us_ft            674,715
+    drho                      0
+    cali_in                   0
+    sp_mv                     0
+    res_deep_log              0
+    res_shal_log              0
+    vsh                       0
+    phie                      0
+    sw                        0
+    pef                       0
+    vsilt                     0
+    vcl                       0
+    vsnd                      0
+    vdol                      0
+
+  flat (stuck-tool) intervals (dropped):
+    rhob                 40,138
+    gr_api               29,281
+    nphi                 68,593
+    dt_us_ft            100,301
+    drho                 26,046
+    cali_in             158,953
+    sp_mv                11,165
+    res_deep_log         58,690
+    res_shal_log         27,540
+    vsh                  11,416
+    phie                 44,815
+    sw                   66,742
+    pef                  18,555
+    vsilt                    42
+    vcl                   1,570
+    vsnd                     20
+    vdol                      0
+
+  population-outlier wells (> 5.0× MAD from corpus median):
+    LILY/dt_us_ft          (45 wells)
+        318-U1356-A
+        318-U1358-B
+        339-U1387-C
+        344-U1380-C
+        349-U1435-A
+    LILY/msus_si           (3 wells)
+        376-U1527-A
+        376-U1527-C
+        376-U1531-C
+    LILY/rhob              (9 wells)
+        329-U1365-E
+        329-U1368-F
+        330-U1375-B
+        336-U1382-A
+        336-U1383-C
+    NLOG/drho              (30 wells)
+        ALE-01
+        BER-02
+        BRK-16-S1
+        D12-A-02-S1
+        E18-03
+    NLOG/dt_us_ft          (45 wells)
+        A15-02
+        A15-03
+        A15-04
+        A18-02
+        B10-02
+    NLOG/gr_api            (13 wells)
+        AMO-04
+        EMC-01-S1
+        F03-FB-103-S1
+        G13-03-S1
+        KWK-01
+    NLOG/nphi              (20 wells)
+        A08-01
+        ALE-01
+        B10-03
+        B13-03
+        B17-05
+    NLOG/pef               (2 wells)
+        F04-03
+        G18-02
+    NLOG/res_deep_log      (4 wells)
+        K07-FA-103
+        K10-B-07-S2
+        K14-13
+        L14-04
+    NLOG/res_shal_log      (3 wells)
+        K10-02
+        L07-12-S1
+        P01-07
+    NLOG/rhob              (1 wells)
+        MNG-01
+    NLOG/vsilt             (1 wells)
+        M07-05-S1
+    NLOG/vsnd              (2 wells)
+        L10-D-05
+        L10-K-02
