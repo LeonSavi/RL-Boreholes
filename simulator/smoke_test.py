@@ -16,7 +16,7 @@ import torch
 from .distributions import DistributionBank, CellDistribution, _nearest_psd
 from .map_generator import generate_map, SimConfig, MapGenerator
 from .autoencoder import BoreholeAutoencoder, AEConfig
-from .train import boreholes_from_map, compute_standardisation_stats, standardise
+from ..train_encoder import boreholes_from_map, compute_standardisation_stats, standardise
 
 
 def build_fake_bank() -> DistributionBank:
@@ -24,9 +24,10 @@ def build_fake_bank() -> DistributionBank:
     types the stratigraphy module can produce."""
     variables = [
         "rhob", "gr_api", "dt_us_ft", "nphi", "pef",
-        "cali_in", "res_deep_log", "sp_mv", "drho", "msus_si",
+        "cali_in", "res_deep_log", "sp_mv", "drho",
+         # "msus_si", removed
     ]
-    depth_bins = [0, 300, 800, 1500, 3000]
+    depth_bins = [0, 400, 800, 1200, 1600, 2000, 2400, 2800, 3200, 3600, 4000, 4400, 4800, 5200, 5600, 6000]
     bank = DistributionBank(variables, depth_bins)
 
     # rough means per rock type for each variable
