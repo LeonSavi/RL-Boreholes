@@ -25,19 +25,35 @@ import numpy as np
 # you refit from data later.
 DUTCH_COLUMN = [
     # (formation, thickness_mean, thickness_std, {rock_type: probability})
-    ("NU",  300,  150, {"clay": 0.85, "sandstone": 0.15}),
-    ("NM",   80,   40, {"clay": 0.95, "sandstone": 0.05}),
-    ("NL",  200,  100, {"clay": 0.70, "sandstone": 0.30}),
-    ("CK",  400,  200, {"chalk": 0.95, "claystone": 0.05}),
-    ("KN",  250,  150, {"claystone": 0.80, "sandstone": 0.20}),
-    ("SL",   80,   50, {"claystone": 0.95, "sandstone": 0.05}),
-    ("SG",   40,   30, {"claystone": 0.90, "sandstone": 0.10}),
-    ("AT",   80,   50, {"claystone": 0.95, "sandstone": 0.05}),
-    ("RN",  150,   80, {"claystone": 0.55, "carbonate": 0.30, "sandstone": 0.15}),
-    ("RB",  300,  150, {"sandstone": 0.65, "claystone": 0.35}),
-    ("ZE",  600,  400, {"halite": 0.55, "anhydrite": 0.20, "carbonate": 0.25}),
-    ("RO",  400,  200, {"sandstone": 0.65, "claystone": 0.35}),
-    ("DC",  500,  250, {"claystone": 0.80, "sandstone": 0.20}),
+    #
+    # Rock type facies probabilities updated for the refined
+    # rock_type_fine scheme (v5): sandstone → sandstone_clean /
+    # sandstone_shaly, claystone → claystone_cool / claystone_hot,
+    # halite → halite_pure, carbonate → dolomite for ZE/RN where the
+    # carbonates are dolomitic.  Probabilities are set from the
+    # stratigraphic interpretation — e.g. Rotliegend is mostly
+    # Slochteren clean reservoir sand with some Ten Boer hot shale.
+    ("NU",  300,  150, {"clay": 0.85, "sandstone_shaly": 0.15}),
+    ("NM",   80,   40, {"clay": 0.95, "sandstone_shaly": 0.05}),
+    ("NL",  200,  100, {"clay": 0.70, "sandstone_shaly": 0.30}),
+    ("CK",  400,  200, {"chalk": 0.95, "claystone_cool": 0.05}),
+    ("KN",  250,  150, {"claystone_cool": 0.55, "claystone": 0.25,
+                       "sandstone_shaly": 0.20}),
+    ("SL",   80,   50, {"claystone_cool": 0.80, "claystone": 0.15,
+                       "sandstone_shaly": 0.05}),
+    ("SG",   40,   30, {"claystone_hot": 0.50, "claystone_cool": 0.40,
+                       "sandstone_shaly": 0.10}),  # Kimmeridge-like source rocks
+    ("AT",   80,   50, {"claystone_cool": 0.60, "claystone_hot": 0.35,
+                       "sandstone_shaly": 0.05}),  # Altena
+    ("RN",  150,   80, {"claystone": 0.45, "dolomite": 0.30,
+                       "anhydrite": 0.10, "sandstone_shaly": 0.15}),
+    ("RB",  300,  150, {"sandstone_shaly": 0.60, "claystone_hot": 0.30,
+                       "sandstone_clean": 0.10}),  # Buntsandstein mostly muddy
+    ("ZE",  600,  400, {"halite_pure": 0.50, "anhydrite": 0.20,
+                       "dolomite": 0.25, "claystone": 0.05}),
+    ("RO",  400,  200, {"sandstone_clean": 0.55, "claystone_hot": 0.35,
+                       "sandstone_shaly": 0.10}),  # Slochteren + Ten Boer
+    ("DC",  500,  250, {"claystone_hot": 0.80, "sandstone_shaly": 0.20}),  # coal measures
 ]
 
 

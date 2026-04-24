@@ -144,17 +144,26 @@ class BoreholeAutoencoder(nn.Module):
 
 
 def standardise(x: np.ndarray, stats: dict[str, tuple[float, float]],
-                variables: list[str]) -> np.ndarray:
-    """Per-variable z-score using training stats.
+                variables: list[str], clip: float = 4.0) -> np.ndarray:
+    """Per-variable z-score using training stats, then winsorise to ±clip σ.
 
     x has shape (..., V, D).  stats[var] = (mean, std).
+
+    Clipping is important for training stability: some variables
+    (res_deep_log, pef, sp_mv) have heavy tails in the real data.
+    Without clipping, an occasional batch hits a ±5σ value, produces
+    a huge MSE, and the gradient (even if clipped to norm=1.0) still
+    points in a direction that destroys weights for other variables.
+    ±4σ preserves 99.99% of legitimate data and clips the pathological
+    tail.
     """
     out = x.copy()
     for i, v in enumerate(variables):
         m, s = stats.get(v, (0.0, 1.0))
         if s < 1e-8:
             s = 1.0
-        out[..., i, :] = (out[..., i, :] - m) / s
+        z = (out[..., i, :] - m) / s
+        out[..., i, :] = np.clip(z, -clip, clip)
     return out
 
 

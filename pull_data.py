@@ -90,47 +90,139 @@ PERIOD_TO_ERA = {
 }
 
 STRAT_UNIT_TO_FINE_ROCK = {
-    "ROSL":  "sandstone", "ROSLU": "sandstone", "ROSLV": "sandstone",
-    "ROCLT": "claystone", "ROCL":  "claystone",
-    "ROSS":  "sandstone", "ROSSF": "claystone",
-    # ─── Zechstein (ZE) ─── ~255 Ma, evaporites
+    # ────────────────────────────────────────────────────────────────────
+    # REFINED rock_type_fine scheme (v5).
     #
-    # IMPORTANT: group-level codes ('ZEZ1', 'ZEZ2', ...) are DELIBERATELY
-    # not mapped here. A stratUnitId of just 'ZEZ1' means the interpreter
-    # tagged the interval as the Werra cycle without specifying whether
-    # it's halite (H), anhydrite (A), or carbonate (C) — the cycle as a
-    # whole is mixed (~50% halite, 20% anhydrite, 25% carbonate).
-    # Lumping those rows into 'halite' contaminates the halite
-    # distribution with anhydrite and carbonate physics, which is what
-    # the halite correlations showed (rhob×nphi coming out positive
-    # instead of zero). Rows with group-only codes fall through to
-    # classify_strat_unit's formation fallback, which now sends them to
-    # 'other' (see NLOG_FORMATION_TO_ROCK below).
-    "ZEZ1C": "carbonate", "ZEZ1A": "anhydrite", "ZEZ1H": "halite",
-    "ZEZ2C": "carbonate", "ZEZ2A": "anhydrite", "ZEZ2H": "halite",
-    "ZEZ3C": "carbonate", "ZEZ3A": "anhydrite", "ZEZ3H": "halite",
-    "ZEZ4A": "anhydrite", "ZEZ4H": "halite",
-    "ZESA":  "anhydrite", "ZESAU": "anhydrite", "ZESAL": "anhydrite",
-    "RBM":   "sandstone", "RBMH":  "sandstone", "RBMV":  "sandstone",
-    "RBMD":  "sandstone", "RBSH":  "claystone", "RBSHS": "claystone",
-    "RNRO":  "claystone", "RNROC": "carbonate", "RNROE": "anhydrite",
-    "RNMU":  "carbonate", "RNMUE": "anhydrite", "RNMUC": "carbonate",
-    "RNKPU": "claystone", "RNKPL": "claystone",
-    "CKEK":  "chalk",     "CKTX":  "chalk",     "CKGR":  "chalk",
-    "KNNC":  "claystone", "KNNS":  "sandstone", "KNGL":  "claystone",
-    "ATAL":  "claystone", "ATWDL": "claystone",
-    "NUBA":  "clay",      "NUIE":  "clay",      "NLFF":  "clay",      "NMDO":  "clay",
-    "SLDNA": "claystone",
-    "NUOT":  "clay",      "NUMS":  "clay",      "NLLFC": "clay",
-    "NMRF":  "clay",      "NMRFC": "clay",
-    "DCCU":  "claystone", "DCCR":  "claystone",
-    "RNSOC": "carbonate",
-    "ATRT":  "claystone", "ATWDU": "claystone",
-    "SGKI":  "claystone", "SLDNR": "claystone", "SLDND": "claystone",
-    "SLDN":  "claystone", "SLCL":  "claystone",
-    "RNKP":  "claystone", "RNKPS": "claystone",
-    "DCDT":  "claystone", "DCDG":  "claystone", "DCHL":  "claystone", "DCGE":  "claystone",
-    "ZEUC":  "carbonate",
+    # The earlier flat scheme lumped too many petrophysically-distinct
+    # lithologies.  Within "sandstone" the gamma-ray ranged 21-113 API;
+    # within "claystone" it ranged 31-137 API; within "halite" 6-70 API.
+    # These spreads made the autoencoder unable to reconstruct gr_api.
+    #
+    # Split logic (geological, not gamma-threshold-arbitrary):
+    #
+    #   sandstone_clean   — reservoir-quality quartz-dominant sandstones
+    #                       (Slochteren, post-rift marine sands).  Low Vsh,
+    #                       gamma ~20-50 API, high porosity when undeformed.
+    #   sandstone_shaly   — clay-rich sandstones (Silverpit, Buntsandstein,
+    #                       fluvial coal-measure sands).  Gamma ~60-110 API.
+    #
+    #   claystone_cool    — marine marls, nannofossil clays, clean claystones.
+    #                       Gamma ~40-80 API.  No organic enrichment, no
+    #                       potassium feldspar.
+    #   claystone_hot     — organic-rich or K-rich shales (Carboniferous coal
+    #                       measures, Rotliegend Ten Boer, Posidonia-type).
+    #                       Gamma ~80-150+ API.  Often source rocks.
+    #
+    #   halite_pure       — confirmed monomineralic halite members (H-suffix
+    #                       codes from Zechstein). Gamma ~5-15 API.
+    #   halite            — retained as fallback for mixed/unclear halite.
+    #
+    #   dolomite          — Zechstein carbonate members and Muschelkalk
+    #                       dolomites (C-suffix Zechstein codes + RN carbs).
+    #                       Dolomitic: higher PEF (3.1), distinct NPHI
+    #                       signature vs limestone.
+    #   carbonate         — retained as fallback for unclear carbonate.
+    #
+    # The "fallback" versions (claystone, sandstone, halite, carbonate)
+    # are what pull_data uses when the sub-unit code is only 2 or 3 chars
+    # (too vague to assign a refined type).  Keeps behaviour safe.
+    # ────────────────────────────────────────────────────────────────────
+
+    # ─── Rotliegend (RO) — Permian, gas reservoir interval ──────────
+    "ROSL":   "sandstone_clean",   # Slochteren generic
+    "ROSLU":  "sandstone_clean",   # Upper Slochteren
+    "ROSLV":  "sandstone_clean",   # Lower Slochteren / Volpriehausen
+    "ROSS":   "sandstone_shaly",   # Silverpit sandier parts — muddier than Slochteren
+    "ROSSF":  "claystone_hot",     # Silverpit fine-grained
+    "ROCLT":  "claystone_hot",     # Ten Boer Claystone — seal rock, gamma ~100
+    "ROCL":   "claystone_hot",     # Rotliegend claystones generally
+
+    # ─── Zechstein (ZE) — Permian, evaporites ───────────────────────
+    # (group-only codes ZEZ1, ZEZ2, ... deliberately absent — they drop
+    #  to 'other' via the formation fallback to avoid contamination)
+    "ZEZ1C":  "dolomite",          # Werra Carbonate
+    "ZEZ1A":  "anhydrite",
+    "ZEZ1H":  "halite_pure",       # Werra Halite
+    "ZEZ2C":  "dolomite",          # Stassfurt (Hauptdolomit) — type dolomite
+    "ZEZ2A":  "anhydrite",         # Basal Anhydrite
+    "ZEZ2H":  "halite_pure",
+    "ZEZ3C":  "dolomite",
+    "ZEZ3A":  "anhydrite",
+    "ZEZ3H":  "halite_pure",
+    "ZEZ4A":  "anhydrite",
+    "ZEZ4H":  "halite_pure",
+    "ZESA":   "anhydrite",         # Z Anhydrite unit — ~63k rows
+    "ZESAU":  "anhydrite",
+    "ZESAL":  "anhydrite",
+    "ZEUC":   "dolomite",          # Upper Carbonate
+
+    # ─── Buntsandstein (RB) — Triassic, continental sands + mud ─────
+    "RBM":    "sandstone_shaly",   # Main Buntsandstein — fluvial, muddy
+    "RBMH":   "sandstone_shaly",   # Hardegsen
+    "RBMV":   "sandstone_shaly",   # Volpriehausen (within Bunt)
+    "RBMD":   "sandstone_shaly",   # Detfurth
+    "RBSH":   "claystone_hot",     # Solling Claystone — continental red-beds
+    "RBSHS":  "claystone_hot",
+    "RBSHM":  "claystone_hot",     # seen in data: mean=92 API, hot
+    "RBSHR":  "claystone_hot",     # seen in data: mean=94 API, hot
+
+    # ─── Muschelkalk / Keuper (RN) — Triassic carbonates + clay ─────
+    "RNRO":   "claystone",         # Röt Formation — mixed
+    "RNROC":  "dolomite",          # Röt Carbonate
+    "RNROE":  "anhydrite",         # Röt Evaporite
+    "RNMU":   "dolomite",          # Muschelkalk — carbonate (dolomitic)
+    "RNMUE":  "anhydrite",
+    "RNMUC":  "dolomite",
+    "RNSOC":  "dolomite",          # Solling Carbonate (probably)
+    "RNKPU":  "claystone",         # Keuper — continental red/green mud
+    "RNKPL":  "claystone",
+    "RNKP":   "claystone",
+    "RNKPS":  "claystone",
+
+    # ─── Chalk (CK) — Late Cretaceous ───────────────────────────────
+    "CKEK":   "chalk",             # Ekofisk — classic reservoir chalk
+    "CKTX":   "chalk",             # Texel
+    "CKGR":   "chalk",             # Ommelanden + others
+
+    # ─── Rijnland (KN) — Early Cretaceous marine ────────────────────
+    "KNNC":   "claystone",         # seen in data: mean=78 API, moderate
+    "KNNS":   "sandstone_shaly",   # Rijnland marine sands, muddier than reservoir-grade
+    "KNGL":   "claystone_cool",    # Vlieland claystone — low gamma in data
+    "KNGLU":  "claystone_cool",    # seen in data: mean=56 API — clearly cool
+    "KNGLL":  "claystone_cool",    # seen in data: mean=74 API — borderline, treat as cool
+
+    # ─── Altena (AT) — Early Jurassic marine shale ──────────────────
+    "ATAL":   "claystone_hot",     # Aalburg — rich shale, seen at mean=85
+    "ATWDL":  "claystone_cool",    # Werkendam Lower
+    "ATWDU":  "claystone_cool",    # Werkendam Upper
+    "ATRT":   "claystone",         # Altena Röt mixed
+
+    # ─── Schieland / Germanic Triassic (SL, SG) — Upper Jurassic ────
+    "SLDNA":  "claystone_cool",    # Delfland — seen at mean=76, moderate
+    "SLDNR":  "claystone_cool",
+    "SLDND":  "claystone_cool",
+    "SLDN":   "claystone_cool",
+    "SLCL":   "claystone_cool",
+    "SGKI":   "claystone_hot",     # Kimmeridge — classic source rock, hot
+
+    # ─── Cenozoic (NU, NM, NL) — Tertiary/Quaternary ────────────────
+    "NUBA":   "clay",              # Breda
+    "NUIE":   "clay",              # IJsselmeer
+    "NLFF":   "clay",              # Lower North Sea
+    "NMDO":   "clay",              # Dongen
+    "NUOT":   "clay",              # Oosterhout
+    "NUMS":   "clay",              # Middle North Sea
+    "NLLFC":  "clay",              # Landen
+    "NMRF":   "clay",              # Rupel
+    "NMRFC":  "clay",
+
+    # ─── Carboniferous (DC) — coal measures ─────────────────────────
+    "DCCU":   "claystone_hot",     # Upper Carboniferous — coal-bearing = very hot gamma
+    "DCCR":   "claystone_hot",     # Caumer subgroup
+    "DCDT":   "claystone_hot",
+    "DCDG":   "claystone_hot",
+    "DCHL":   "claystone_hot",     # Hellevoetsluis
+    "DCGE":   "claystone_hot",     # Geverik — organic-rich shale
 }
 
 

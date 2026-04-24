@@ -30,9 +30,6 @@ from simulator.autoencoder import (
     standardise,
 )
 
-DISTR_FOLDER = "data/clean/distributions.pkl"
-CHECKPOINTS = "checkpoints/"
-
 
 def boreholes_from_map(map_data: dict, variables: list[str]) -> np.ndarray:
     """Extract all boreholes from a generated map as (n_boreholes, V, D)."""
@@ -115,7 +112,7 @@ def train(
     out_path: Path,
     steps: int = 5000,
     batch_size: int = 128,
-    lr: float = 3e-4,
+    lr: float = 3e-5,
     latent_dim: int = 128,
     mask_prob: float = 0.3,
     log_every: int = 50,
@@ -144,11 +141,17 @@ def train(
     )
     model = BoreholeAutoencoder(ae_cfg).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-5)
-    loss_fn = nn.MSELoss()
+    # SmoothL1 (Huber with δ=1) is more robust to heavy-tailed residuals
+    # than MSE.  MSE would punish a ±4σ error 16× more than a ±1σ error;
+    # Huber switches to linear beyond δ=1, so it's only 4× more.  Combined
+    # with the ±4σ winsorisation in standardise(), this stabilises the
+    # loss surface enough for the optimiser to descend instead of bouncing.
+    loss_fn = nn.SmoothL1Loss(beta=1.0)
 
     print(f"model params: {sum(p.numel() for p in model.parameters()):,}")
 
-    batches = stream_batches(gen, variables, stats, batch_size, device)
+    batches = stream_batches(gen, variables, stats, batch_size, device,
+                             maps_per_refill=8)
 
     loss_running = 0.0
     for step in range(1, steps + 1):
@@ -160,6 +163,11 @@ def train(
         loss = loss_fn(recon, x)
         opt.zero_grad()
         loss.backward()
+        # gradient clipping: prevents catastrophic updates on batches with
+        # outlier values (heavy-tailed variables like sp_mv and
+        # res_deep_log would occasionally send the loss to 2+ and
+        # destabilise training without this).
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
         opt.step()
 
         loss_running = 0.95 * loss_running + 0.05 * loss.item() if step > 1 else loss.item()
@@ -167,19 +175,37 @@ def train(
         if step % log_every == 0 or step == 1:
             print(f"  step {step:>5d}  loss={loss.item():.4f}  (ema {loss_running:.4f})")
 
+        # every 500 steps: show per-variable breakdown so we can see which
+        # variables the model is struggling with.  Uses SmoothL1 (Huber)
+        # to match the training loss.
+        if step % 500 == 0:
+            with torch.no_grad():
+                per_var = []
+                for i, v in enumerate(variables):
+                    l = nn.functional.smooth_l1_loss(
+                        recon[:, i, :], x[:, i, :], beta=1.0).item()
+                    per_var.append((v, l))
+            print(f"    per-variable: " + "  ".join(
+                f"{v}={l:.2f}" for v, l in per_var))
+
     out_path.parent.mkdir(parents=True, exist_ok=True)
     save_checkpoint(model, stats, variables, out_path)
     print(f"checkpoint -> {out_path}")
 
 
+DISTR_DEFAULT = Path("data/clean/distributions.pkl")
+CHECKPOINT_DEFAULT = Path("checkpoints/ae.pt")
+
+
 def main():
     p = argparse.ArgumentParser()
-
-    p.add_argument("--distributions", type=Path, default= DISTR_FOLDER)
-    p.add_argument("--out", type=Path, default=CHECKPOINTS)
+    p.add_argument("--distributions", type=Path, default=DISTR_DEFAULT,
+                   help=f"path to fitted DistributionBank (default: {DISTR_DEFAULT})")
+    p.add_argument("--out", type=Path, default=CHECKPOINT_DEFAULT,
+                   help=f"path to save checkpoint (default: {CHECKPOINT_DEFAULT})")
     p.add_argument("--steps", type=int, default=5000)
     p.add_argument("--batch-size", type=int, default=128)
-    p.add_argument("--lr", type=float, default=3e-4)
+    p.add_argument("--lr", type=float, default=3e-5)
     p.add_argument("--latent-dim", type=int, default=128)
     p.add_argument("--mask-prob", type=float, default=0.3)
     args = p.parse_args()

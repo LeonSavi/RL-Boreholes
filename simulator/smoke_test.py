@@ -16,32 +16,45 @@ import torch
 from .distributions import DistributionBank, CellDistribution, _nearest_psd
 from .map_generator import generate_map, SimConfig, MapGenerator
 from .autoencoder import BoreholeAutoencoder, AEConfig
-from ..train_encoder import boreholes_from_map, compute_standardisation_stats, standardise
+from .train import boreholes_from_map, compute_standardisation_stats, standardise
 
 
 def build_fake_bank() -> DistributionBank:
     """Create a DistributionBank with synthetic distributions for the rock
     types the stratigraphy module can produce."""
     variables = [
-        "rhob", "gr_api", "dt_us_ft", "nphi", "pef",
-        "cali_in", "res_deep_log", "sp_mv", "drho",
-         # "msus_si", removed
+        "rhob", "gr_api", "dt_us_ft", "nphi", "pef", "res_deep_log",
     ]
     depth_bins = [0, 400, 800, 1200, 1600, 2000, 2400, 2800, 3200, 3600, 4000, 4400, 4800, 5200, 5600, 6000]
     bank = DistributionBank(variables, depth_bins)
 
-    # rough means per rock type for each variable
     rock_profiles = {
-        "sandstone":  {"rhob": 2.4, "gr_api": 50,  "dt_us_ft": 80,  "nphi": 0.18, "pef": 2.1},
-        "claystone":  {"rhob": 2.55, "gr_api": 120, "dt_us_ft": 90,  "nphi": 0.32, "pef": 3.5},
-        "clay":       {"rhob": 2.1, "gr_api": 110, "dt_us_ft": 140, "nphi": 0.40, "pef": 3.0},
-        "chalk":      {"rhob": 2.35, "gr_api": 15,  "dt_us_ft": 100, "nphi": 0.30, "pef": 4.9},
-        "halite":     {"rhob": 2.10, "gr_api": 2,   "dt_us_ft": 67,  "nphi": 0.0,  "pef": 4.6},
-        "anhydrite":  {"rhob": 2.95, "gr_api": 5,   "dt_us_ft": 50,  "nphi": 0.01, "pef": 5.1},
-        "carbonate":  {"rhob": 2.70, "gr_api": 25,  "dt_us_ft": 65,  "nphi": 0.15, "pef": 5.0},
+        "sandstone_clean": {"rhob": 2.40, "gr_api": 35,  "dt_us_ft": 80,
+                            "nphi": 0.15, "pef": 2.0},
+        "sandstone_shaly": {"rhob": 2.50, "gr_api": 80,  "dt_us_ft": 85,
+                            "nphi": 0.22, "pef": 2.5},
+        "claystone_cool":  {"rhob": 2.50, "gr_api": 65,  "dt_us_ft": 90,
+                            "nphi": 0.28, "pef": 3.2},
+        "claystone_hot":   {"rhob": 2.55, "gr_api": 120, "dt_us_ft": 95,
+                            "nphi": 0.35, "pef": 3.6},
+        "claystone":       {"rhob": 2.52, "gr_api": 90,  "dt_us_ft": 92,
+                            "nphi": 0.30, "pef": 3.4},
+        "clay":            {"rhob": 2.1,  "gr_api": 85,  "dt_us_ft": 140,
+                            "nphi": 0.40, "pef": 3.0},
+        "chalk":           {"rhob": 2.35, "gr_api": 20,  "dt_us_ft": 100,
+                            "nphi": 0.30, "pef": 4.9},
+        "halite_pure":     {"rhob": 2.10, "gr_api": 5,   "dt_us_ft": 67,
+                            "nphi": 0.0,  "pef": 4.6},
+        "halite":          {"rhob": 2.15, "gr_api": 15,  "dt_us_ft": 70,
+                            "nphi": 0.05, "pef": 4.7},
+        "anhydrite":       {"rhob": 2.95, "gr_api": 10,  "dt_us_ft": 50,
+                            "nphi": 0.01, "pef": 5.1},
+        "dolomite":        {"rhob": 2.82, "gr_api": 25,  "dt_us_ft": 62,
+                            "nphi": 0.10, "pef": 3.1},
+        "carbonate":       {"rhob": 2.70, "gr_api": 25,  "dt_us_ft": 65,
+                            "nphi": 0.15, "pef": 5.0},
     }
-    defaults = {"cali_in": 8.5, "res_deep_log": 1.5, "sp_mv": 0.0,
-                "drho": 0.0, "msus_si": 1e-4}
+    defaults = {"res_deep_log": 1.5}
 
     rng = np.random.default_rng(0)
     for rock, prof in rock_profiles.items():

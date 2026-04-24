@@ -49,7 +49,8 @@ class SimConfig:
     # LILY-only experiments.
     variables: tuple[str, ...] = (
         "rhob", "gr_api", "dt_us_ft", "nphi", "pef",
-        "cali_in", "res_deep_log", "sp_mv", "drho",
+        #"cali_in",
+          "res_deep_log", # "sp_mv", #"drho",
     )
     # how spatially smooth the noise-field perturbations are (in cells).
     # smaller = more fine-grained variation; larger = broader features.

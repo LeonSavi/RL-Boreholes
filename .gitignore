@@ -13,6 +13,7 @@ data/clean/*.parquet
 *.json
 
 *.csv
+*.csv*
 *.xlsx
 !boreholes.xlsx
 !data/nlog/boreholes.xlsx
@@ -22,7 +23,7 @@ data/clean/*.parquet
 test.ipynb
 temp.ipynb
 
-*.pkl# Large data artefacts — never commit
+*.pkl
 data/clean/*.pkl
 data/clean/*.parquet
 checkpoints/
