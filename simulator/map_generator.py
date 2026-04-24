@@ -38,9 +38,18 @@ class SimConfig:
     n_y: int = 32
     n_depth: int = 200
     max_depth: float = 2000.0
+    # Default variable set.  msus_si (magnetic susceptibility) is
+    # LILY-only — NLOG wells do not measure it, so most rock types have
+    # no KDE for it anywhere in the bank, which means maps generated for
+    # NLOG-dominant rocks like sandstone fill msus_si with NaN (→ 0).
+    # After standardisation you get mean=0, std=0 across the whole
+    # training set, and the autoencoder gets a channel with zero signal
+    # that also wouldn't exist in real NLOG boreholes at inference time.
+    # Dropping msus_si from the default.  Re-add it if you want
+    # LILY-only experiments.
     variables: tuple[str, ...] = (
         "rhob", "gr_api", "dt_us_ft", "nphi", "pef",
-        "cali_in", "res_deep_log", "sp_mv", "drho", "msus_si",
+        "cali_in", "res_deep_log", "sp_mv", "drho",
     )
     # how spatially smooth the noise-field perturbations are (in cells).
     # smaller = more fine-grained variation; larger = broader features.

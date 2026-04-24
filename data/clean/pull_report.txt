@@ -1,5 +1,5 @@
 ==============================================================================
- PULL + SANITY REPORT  (v4)
+ PULL + SANITY REPORT  (v5: boreholes.xlsx + hc_result)
 ==============================================================================
 
 ## LILY
@@ -27,8 +27,41 @@
     feet-depth auto-converted                  422
   rows written                           7,663,755
 
-## Location metadata
-  coords missing                             2,065
+## boreholes.xlsx (location + hc_result)
+  rows read                                  6,698
+  matched to NLOG folders                      717
+  unmatched NLOG folders                     1,348
+  columns used:
+    id               'Borehole name'
+    x                'X Dutch National Grid'
+    y                'Y Dutch National Grid'
+    onshore          'On offshore'
+    result_code      'Result code'
+    result_label     'Result'
+    field            'Field name'
+    objective        'Borehole objective code'
+
+## Location metadata (xlsx → details.json fallback)
+  coords missing                             1,348
+    offshore         wells=   716
+    onshore          wells=     1
+
+## Hydrocarbon result labels (from boreholes.xlsx)
+    dry              wells=   254
+    gas              wells=   245
+    other            wells=    74
+    oil              wells=    55
+    show             wells=    47
+    gas+oil          wells=    41
+    water            wells=     1
+
+## Pooled discovery label (hc_discovery)
+  positive = gas | oil | gas+oil
+  negative = dry | water | abandoned
+  unknown  = show | other | unlabelled
+    positive   wells=   341
+    negative   wells=   255
+    unknown    wells= 1,469
 
 ## Feature availability in NLOG output
     rhob             wells=   991   rows= 1,008,754
@@ -120,24 +153,27 @@
     ZESAL      → anhydrite        24,870
     RBMVC      → sandstone        24,477
     NUMS       → clay             23,335
-    ZEZ1W      → halite           22,730
     RNMUL      → carbonate        22,387
     RBMVL      → sandstone        21,824
     NLFFS      → clay             21,779
     ROSLL      → sandstone        21,761
     KNGLM      → claystone        21,363
     NLLFC      → clay             19,751
+    RBSH       → claystone        18,681
 
 ## Sub-unit codes NOT in dictionary (fell back to formation)
-  (review with Charlie — these are where the fine split is missing)
-  total rows affected: 481,274
+  total rows affected: 542,256
     NU            226,572
     NL             32,788
     CK             31,850
     ZE             30,648
+    ZEZ1W          22,730
     DC             16,055
     NM             13,008
+    ZEZ2            4,750
+    ZEZ3            4,560
     SLDB            3,989
+    ZEZ1            3,984
     ATWD            3,968
     DCCB            3,956
     DCCKB           3,943
@@ -147,10 +183,6 @@
     DCC             3,491
     SGGS            3,477
     SGSKN           3,152
-    NUPZ            2,914
-    DCHS            2,860
-    SLCM            2,817
-    SGLUS           2,787
 
 ## Strat 2-char prefixes not in NLOG_FORMATIONS (dropped)
     N                   484
@@ -163,6 +195,26 @@
     RV                    7
     RVVE                  6
     OB                    5
+
+## Zechstein group-level codes (reclassified to 'other')
+  these rows have only ZEZ1/ZEZ2/... (no H/A/C member suffix)
+  so we cannot assign halite/anhydrite/carbonate safely
+  total rows affected: 93,031
+    ZE             30,648
+    ZEZ1W          22,730
+    ZEZ2            4,750
+    ZEZ3            4,560
+    ZEZ1            3,984
+    ZEZ2M           2,834
+    ZEZ4            2,483
+    ZEZ1T           2,477
+    ZEZ1G           2,394
+    ZEZ1F           2,183
+    ZEZ1M           2,129
+    ZEZ4R           1,941
+    ZEZ4S           1,625
+    ZECP            1,231
+    ZEZ3G           1,071
 
 ## Curves seen in NLOG LAS files (top 25)
     GR               1274

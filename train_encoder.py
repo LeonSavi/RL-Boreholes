@@ -30,15 +30,8 @@ from simulator.autoencoder import (
     standardise,
 )
 
-if not Path("data/clean/distributions.pkl").exists():
-    bank = DistributionBank.fit(
-        "data/clean/samples.parquet",
-        variables=["rhob", "gr_api", "dt_us_ft", "nphi", "pef",
-                "cali_in", "res_deep_log", "sp_mv", "drho", "msus_si"],
-        depth_bins=[0, 300, 800, 1500, 3000, 6000],
-    )
-    bank.save("data/clean/distributions.pkl")
-    print(bank.summary())
+DISTR_FOLDER = "data/clean/distributions.pkl"
+CHECKPOINTS = "checkpoints/"
 
 
 def boreholes_from_map(map_data: dict, variables: list[str]) -> np.ndarray:
@@ -81,24 +74,40 @@ def stream_batches(
     stats: dict,
     batch_size: int = 128,
     device: str = "cpu",
+    maps_per_refill: int = 4,
 ) -> Iterator[torch.Tensor]:
-    """Yield batches of standardised boreholes from a stream of generated maps."""
-    buf = []
+    """Yield batches of standardised boreholes, shuffled across multiple maps.
+
+    Key design decision: each map produces ~1024 correlated boreholes
+    (they share one stratigraphic sequence). If we emit sequential
+    batches from the same map, consecutive gradient steps overfit to that
+    map's lithology and then get whiplashed when the next map arrives.
+    Loss oscillates instead of descending.
+
+    Fix: generate `maps_per_refill` maps (~4-8k boreholes), shuffle the
+    pooled boreholes, then emit batches. This decorrelates the batches
+    and lets the model see diverse stratigraphies per gradient step.
+    """
+    rng = np.random.default_rng(0)
     while True:
-        map_data = next(gen)
-        boreholes = boreholes_from_map(map_data, variables)  # (1024, V, D)
-        # NaN guard — replace with 0 after standardisation (z=0 means mean)
-        boreholes = standardise(boreholes, stats, variables)
-        boreholes = np.nan_to_num(boreholes, nan=0.0)
-        buf.append(boreholes)
-        total = sum(b.shape[0] for b in buf)
-        while total >= batch_size:
-            stacked = np.concatenate(buf, axis=0)
-            batch = stacked[:batch_size]
-            rest = stacked[batch_size:]
-            buf = [rest] if rest.shape[0] > 0 else []
-            total = rest.shape[0]
+        # pool boreholes from several maps
+        pooled = []
+        for _ in range(maps_per_refill):
+            map_data = next(gen)
+            bh = boreholes_from_map(map_data, variables)  # (nxny, V, D)
+            bh = standardise(bh, stats, variables)
+            bh = np.nan_to_num(bh, nan=0.0)
+            pooled.append(bh)
+        pooled = np.concatenate(pooled, axis=0)  # (maps_per_refill * nxny, V, D)
+        # shuffle so consecutive batches come from different maps
+        perm = rng.permutation(len(pooled))
+        pooled = pooled[perm]
+        # emit all full-size batches
+        n_full = len(pooled) // batch_size
+        for i in range(n_full):
+            batch = pooled[i * batch_size : (i + 1) * batch_size]
             yield torch.from_numpy(batch).to(device)
+        # remainder gets dropped — acceptable, next refill brings fresh data
 
 
 def train(
@@ -165,8 +174,9 @@ def train(
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--distributions", type=Path, required=True)
-    p.add_argument("--out", type=Path, required=True)
+
+    p.add_argument("--distributions", type=Path, default= DISTR_FOLDER)
+    p.add_argument("--out", type=Path, default=CHECKPOINTS)
     p.add_argument("--steps", type=int, default=5000)
     p.add_argument("--batch-size", type=int, default=128)
     p.add_argument("--lr", type=float, default=3e-4)

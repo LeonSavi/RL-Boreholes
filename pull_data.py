@@ -27,6 +27,8 @@ x_rd             float     NLOG x (Dutch RD) or NaN
 y_rd             float     NLOG y (Dutch RD) or NaN
 location_type    string    'onshore' | 'offshore' | <NA>
 hc_result        string    hydrocarbon label from boreholes.xlsx or <NA>
+hc_discovery     boolean   True=gas|oil|gas+oil, False=dry|water|abandoned,
+                           <NA>=show|other|unknown (deliberately three-way)
 field_name       string    NLOG field name (e.g. 'Groningen') or <NA>
 """
 from __future__ import annotations
@@ -59,7 +61,15 @@ NLOG_FORMATIONS = ["NU", "CK", "KN", "RN", "RB", "ZE", "RO",
 
 NLOG_FORMATION_TO_ROCK = {
     "NU": "clay",       "CK": "chalk",     "KN": "claystone",
-    "RN": "claystone",  "RB": "sandstone", "ZE": "halite",
+    "RN": "claystone",  "RB": "sandstone",
+    # ZE (Zechstein) is DELIBERATELY 'other' — Zechstein as a whole is
+    # mixed (~50% halite, 20% anhydrite, 25% carbonate, 5% claystone).
+    # Rows with only 'ZE' formation-level code but no sub-unit cannot
+    # safely be assigned to any one lithology. Only stratUnitId-level
+    # codes (ZEZ1H=halite, ZEZ1A=anhydrite, ZEZ1C=carbonate) produce
+    # typed rows; ambiguous Zechstein intervals drop to 'other' and get
+    # filtered out of the simulator fit.
+    "ZE": "other",
     "RO": "sandstone",  "NM": "clay",      "NL": "clay",
     "DC": "claystone",  "AT": "claystone", "SL": "claystone",
     "SG": "claystone",  "SK": "claystone",
@@ -83,11 +93,23 @@ STRAT_UNIT_TO_FINE_ROCK = {
     "ROSL":  "sandstone", "ROSLU": "sandstone", "ROSLV": "sandstone",
     "ROCLT": "claystone", "ROCL":  "claystone",
     "ROSS":  "sandstone", "ROSSF": "claystone",
-    "ZEZ1":  "halite", "ZEZ1C": "carbonate", "ZEZ1A": "anhydrite", "ZEZ1H": "halite",
-    "ZEZ2":  "halite", "ZEZ2C": "carbonate", "ZEZ2A": "anhydrite", "ZEZ2H": "halite",
-    "ZEZ3":  "halite", "ZEZ3C": "carbonate", "ZEZ3A": "anhydrite", "ZEZ3H": "halite",
-    "ZEZ4":  "halite", "ZEZ4A": "anhydrite", "ZEZ4H": "halite",
-    "ZEZ5":  "halite",
+    # ─── Zechstein (ZE) ─── ~255 Ma, evaporites
+    #
+    # IMPORTANT: group-level codes ('ZEZ1', 'ZEZ2', ...) are DELIBERATELY
+    # not mapped here. A stratUnitId of just 'ZEZ1' means the interpreter
+    # tagged the interval as the Werra cycle without specifying whether
+    # it's halite (H), anhydrite (A), or carbonate (C) — the cycle as a
+    # whole is mixed (~50% halite, 20% anhydrite, 25% carbonate).
+    # Lumping those rows into 'halite' contaminates the halite
+    # distribution with anhydrite and carbonate physics, which is what
+    # the halite correlations showed (rhob×nphi coming out positive
+    # instead of zero). Rows with group-only codes fall through to
+    # classify_strat_unit's formation fallback, which now sends them to
+    # 'other' (see NLOG_FORMATION_TO_ROCK below).
+    "ZEZ1C": "carbonate", "ZEZ1A": "anhydrite", "ZEZ1H": "halite",
+    "ZEZ2C": "carbonate", "ZEZ2A": "anhydrite", "ZEZ2H": "halite",
+    "ZEZ3C": "carbonate", "ZEZ3A": "anhydrite", "ZEZ3H": "halite",
+    "ZEZ4A": "anhydrite", "ZEZ4H": "halite",
     "ZESA":  "anhydrite", "ZESAU": "anhydrite", "ZESAL": "anhydrite",
     "RBM":   "sandstone", "RBMH":  "sandstone", "RBMV":  "sandstone",
     "RBMD":  "sandstone", "RBSH":  "claystone", "RBSHS": "claystone",
@@ -222,6 +244,8 @@ class PullReport:
     strat_bad_intervals:   int = 0
     strat_overlaps:        int = 0
     strat_unknown_prefix:  Counter = field(default_factory=Counter)
+    # counts of Zechstein rows with only group-level codes (dropped to 'other')
+    ze_group_only:         Counter = field(default_factory=Counter)
     clipping_counts:       dict = field(default_factory=lambda: defaultdict(int))
     nonfinite_in_las:      int = 0
     per_feature_rows:      Counter = field(default_factory=Counter)
@@ -238,6 +262,7 @@ class PullReport:
     xlsx_unmatched:        list = field(default_factory=list)
     xlsx_columns_used:     dict = field(default_factory=dict)
     result_hits:           Counter = field(default_factory=Counter)
+    discovery_hits:        Counter = field(default_factory=Counter)
 
     duplicate_rows:        int = 0
     outlier_wells:         dict = field(default_factory=lambda: defaultdict(list))
@@ -291,6 +316,15 @@ class PullReport:
             for r, n in sorted(self.result_hits.items(), key=lambda x: -x[1]):
                 add(f"    {r:<16s} wells={n:>6,}")
 
+        if self.discovery_hits:
+            add(f"\n## Pooled discovery label (hc_discovery)")
+            add(f"  positive = gas | oil | gas+oil")
+            add(f"  negative = dry | water | abandoned")
+            add(f"  unknown  = show | other | unlabelled")
+            for label in ("positive", "negative", "unknown"):
+                n = self.discovery_hits.get(label, 0)
+                add(f"    {label:<10s} wells={n:>6,}")
+
         add(f"\n## Feature availability in NLOG output")
         for meas in (list(NLOG_PRIMARY.keys()) +
                      list(NLOG_QUALITY.keys()) +
@@ -327,6 +361,16 @@ class PullReport:
             for prefix, n in sorted(self.strat_unknown_prefix.items(),
                                      key=lambda x: -x[1])[:10]:
                 add(f"    {prefix:<12s} {n:>10,}")
+
+        if self.ze_group_only:
+            add(f"\n## Zechstein group-level codes (reclassified to 'other')")
+            add(f"  these rows have only ZEZ1/ZEZ2/... (no H/A/C member suffix)")
+            add(f"  so we cannot assign halite/anhydrite/carbonate safely")
+            total = sum(self.ze_group_only.values())
+            add(f"  total rows affected: {total:,}")
+            for su, n in sorted(self.ze_group_only.items(),
+                                 key=lambda x: -x[1])[:15]:
+                add(f"    {su:<10s} {n:>10,}")
 
         add(f"\n## Curves seen in NLOG LAS files (top 25)")
         for curve, n in self.nlog_curve_counts.most_common(25):
@@ -402,6 +446,32 @@ NLOG_RESULT_CODE_MAP = {
     "ABD":  "abandoned",
     "PNA":  "abandoned",  # plugged & abandoned
 }
+
+
+# Collapse the seven-way hc_result into a three-way discovery label for
+# downstream modelling.  Positive = commercial hydrocarbon found (any fluid).
+# Negative = well drilled and explicitly didn't yield hydrocarbons.
+# Unknown (NaN) = shows (uninformative), other (unmapped), or missing label.
+#
+# Rationale for pooling gas/oil/gas+oil:
+#   - same trap mechanics (reservoir + seal + closure), different fluid
+#   - Dutch subsurface has very few oil-only wells (~1-3%), so splitting
+#     loses positive samples to no statistical benefit
+#   - Task 1's autoencoder learns "prospective rock" signature, not fluid
+#     classification
+HC_RESULT_POSITIVE = {"gas", "oil", "gas+oil"}
+HC_RESULT_NEGATIVE = {"dry", "water", "abandoned"}
+# explicitly uninformative: {"show", "other"} -> NaN
+
+
+def _hc_discovery(hc_result: str | None) -> bool | None:
+    if hc_result is None:
+        return None
+    if hc_result in HC_RESULT_POSITIVE:
+        return True
+    if hc_result in HC_RESULT_NEGATIVE:
+        return False
+    return None  # 'show', 'other' — deliberately three-way
 
 
 def _safe_float(v) -> float:
@@ -524,12 +594,13 @@ def _load_boreholes_metadata(
             col = EXPECTED[role]
             return row[col] if col in df.columns else None
 
+        hc_result = _classify_result_code(g("result_code"), g("result_label"))
         entry = {
             "x_rd":            _safe_float(g("x")),
             "y_rd":            _safe_float(g("y")),
             "location_type":   _classify_on_offshore(g("onshore")),
-            "hc_result":       _classify_result_code(g("result_code"),
-                                                     g("result_label")),
+            "hc_result":       hc_result,
+            "hc_discovery":    _hc_discovery(hc_result),
             "result_code_raw": (str(g("result_code")).strip()
                                 if pd.notna(g("result_code")) else None),
             "field_name":      (str(g("field")).strip()
@@ -617,6 +688,7 @@ def pull_lily(report: PullReport) -> pd.DataFrame:
         df["y_rd"]           = np.nan
         df["location_type"]  = pd.NA
         df["hc_result"]      = pd.NA
+        df["hc_discovery"]   = pd.NA
         df["field_name"]     = pd.NA
 
         before = len(df); df = df.dropna(subset=["depth", "value"])
@@ -640,7 +712,7 @@ def pull_lily(report: PullReport) -> pd.DataFrame:
                           "formation", "strat_unit", "period", "era",
                           "lith_principal",
                           "x_rd", "y_rd", "location_type",
-                          "hc_result", "field_name"]])
+                          "hc_result", "hc_discovery", "field_name"]])
         print(f"  {meas:9s} : {len(df):>9,} rows (from {n_in:,})")
 
     if not frames:
@@ -883,6 +955,8 @@ def pull_nlog(
                 "y_rd":          details["y_rd"],
                 "location_type": details["location_type"],
                 "hc_result":     None,
+                "hc_discovery":  None,
+                "field_name":    None,
             }
 
         if np.isnan(meta["x_rd"]) or np.isnan(meta["y_rd"]):
@@ -891,6 +965,13 @@ def pull_nlog(
             report.location_hits[meta["location_type"]] += 1
         if meta.get("hc_result"):
             report.result_hits[meta["hc_result"]] += 1
+        disc = meta.get("hc_discovery")
+        if disc is True:
+            report.discovery_hits["positive"] += 1
+        elif disc is False:
+            report.discovery_hits["negative"] += 1
+        else:
+            report.discovery_hits["unknown"] += 1
 
         resolved: list[tuple[str, str, CurveSpec]] = []
         for out_name, spec in ALL_NLOG_SPECS.items():
@@ -946,6 +1027,11 @@ def pull_nlog(
 
             rock_type = NLOG_FORMATION_TO_ROCK.get(formation, "other")
             rock_type_fine = classify_strat_unit(strat_unit, formation)
+            # flag Zechstein intervals with only group-level codes (ZEZ1,
+            # ZEZ2, ...) — these have ambiguous lithology and are dropped
+            # to 'other' by the updated classifier
+            if formation == "ZE" and rock_type_fine == "other" and strat_unit:
+                report.ze_group_only[strat_unit] += 1
             if strat_unit and strat_unit not in STRAT_UNIT_TO_FINE_ROCK:
                 matched = any(strat_unit.startswith(p)
                               for p in STRAT_UNIT_TO_FINE_ROCK)
@@ -1007,6 +1093,7 @@ def pull_nlog(
                     "y_rd":           meta["y_rd"],
                     "location_type":  meta["location_type"],
                     "hc_result":      meta.get("hc_result"),
+                    "hc_discovery":   meta.get("hc_discovery"),
                     "field_name":     meta.get("field_name"),
                 })
                 report.per_feature_rows[out_name] += 1
