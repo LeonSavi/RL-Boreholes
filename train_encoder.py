@@ -25,7 +25,7 @@ import torch.nn as nn
 
 from simulator.distributions import DistributionBank
 from simulator.map_generator import MapGenerator, SimConfig
-from simulator.autoencoder import (
+from encoder.autoencoder import (
     BoreholeAutoencoder, AEConfig, save_checkpoint,
     standardise,
 )

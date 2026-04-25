@@ -103,7 +103,7 @@ def main():
 
     print("=" * 60)
     print("generating one map...")
-    cfg = SimConfig(n_x=16, n_y=16, n_depth=64, max_depth=2000.0)
+    cfg = SimConfig(n_x=16, n_y=16, n_depth=400, max_depth=4000.0)
     rng = np.random.default_rng(42)
     m = generate_map(bank, cfg, rng)
     print(f"  rock_types shape: {m['rock_types'].shape}")

@@ -36,8 +36,8 @@ class SimConfig:
     """Simulation parameters."""
     n_x: int = 32
     n_y: int = 32
-    n_depth: int = 200
-    max_depth: float = 2000.0
+    n_depth: int = 400
+    max_depth: float = 4000.0
     # Default variable set.  msus_si (magnetic susceptibility) is
     # LILY-only — NLOG wells do not measure it, so most rock types have
     # no KDE for it anywhere in the bank, which means maps generated for

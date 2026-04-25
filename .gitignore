@@ -26,5 +26,5 @@ temp.ipynb
 *.pkl
 data/clean/*.pkl
 data/clean/*.parquet
-checkpoints/
+# checkpoints/
 

@@ -92,8 +92,8 @@ class StratigraphicColumn:
 
 def sample_column(
     rng: np.random.Generator,
-    max_depth: float = 3000.0,
-    p_formation_present: float = 0.75,
+    max_depth: float = 4000.0,
+    p_formation_present: float = 0.85,
 ) -> StratigraphicColumn:
     """Sample one vertical stratigraphic column.
 
@@ -142,7 +142,7 @@ def sample_spatial_column_field(
     rng: np.random.Generator,
     n_x: int,
     n_y: int,
-    max_depth: float = 3000.0,
+    max_depth: float = 4000.0,
     layer_waviness: float = 20.0,
 ) -> list[list[StratigraphicColumn]]:
     """Sample a 2D (x, y) grid of stratigraphic columns with lateral

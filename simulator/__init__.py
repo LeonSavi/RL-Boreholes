@@ -9,11 +9,11 @@ Pipeline:
      train.py)
   4. export the trained encoder for Task 2's POMDP
 """
-from .distributions import DistributionBank, CellDistribution
-from .stratigraphy import StratigraphicColumn, sample_column
-from .orebody import OreBody, sample_orebodies
-from .map_generator import generate_map, MapGenerator, SimConfig
-from .autoencoder import (
+from simulator.distributions import DistributionBank, CellDistribution
+from simulator.stratigraphy import StratigraphicColumn, sample_column
+from simulator.orebody import OreBody, sample_orebodies
+from simulator.map_generator import generate_map, MapGenerator, SimConfig
+from encoder.autoencoder import (
     BoreholeAutoencoder, AEConfig,
     save_checkpoint, load_checkpoint,
 )
