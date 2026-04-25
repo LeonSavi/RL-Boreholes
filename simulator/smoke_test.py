@@ -15,7 +15,7 @@ import torch
 
 from .distributions import DistributionBank, CellDistribution, _nearest_psd
 from .map_generator import generate_map, SimConfig, MapGenerator
-from .autoencoder import BoreholeAutoencoder, AEConfig
+from ..encoder.autoencoder import BoreholeAutoencoder, AEConfig
 from .train import boreholes_from_map, compute_standardisation_stats, standardise
 
 
