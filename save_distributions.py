@@ -97,5 +97,10 @@ def distribution_check():
 
 if __name__ == "__main__":
     bank = save_distributions()
+
+    print(f"{len(bank.cells)} cells fitted across "
+        f"{len(set(r for r, _ in bank.cells))} rock types")
+    
     print(bank.summary())
+    
     distribution_check()
