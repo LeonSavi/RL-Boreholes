@@ -129,3 +129,4 @@ if __name__ == "__main__":
     distribution_check(bank)
     prior_check(prior)
     geometry_check(geom)
+    

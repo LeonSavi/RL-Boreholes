@@ -14,7 +14,7 @@ from simulator.stratigraphy import StratigraphicColumn, sample_column
 from simulator.distributions import DistributionBank, CellDistribution, DiscoveryPrior, _nearest_psd
 from simulator.orebody import OreBody, sample_orebodies
 from simulator.map_generator import generate_map, MapGenerator, SimConfig
-from simulator.formation_geometry import FormationGeometry, FORMATION_ORDER
+from simulator.formation_geometry import FormationGeometry, FORMATION_ORDER,FormationStats
 from encoder.autoencoder import (
     BoreholeAutoencoder, AEConfig,
     save_checkpoint, load_checkpoint,
@@ -27,5 +27,5 @@ __all__ = [
     "generate_map", "MapGenerator", "SimConfig",
     "BoreholeAutoencoder", "AEConfig",
     "save_checkpoint", "load_checkpoint","DiscoveryPrior"
-    "FormationGeometry", "FORMATION_ORDER","CellDistribution","_nearest_psd"
+    "FormationGeometry", "FORMATION_ORDER","CellDistribution","_nearest_psd","FormationStats"
 ]

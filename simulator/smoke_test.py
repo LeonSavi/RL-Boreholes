@@ -13,13 +13,13 @@ import numpy as np
 from scipy.stats import gaussian_kde
 import torch
 
-from simulator.distributions import (
+from .distributions import (
     DistributionBank, CellDistribution, DiscoveryPrior, _nearest_psd,
 )
-from simulator.formation_geometry import (
+from .formation_geometry import (
     FormationGeometry, FormationStats, FORMATION_ORDER,
 )
-from simulator.map_generator import generate_map, SimConfig, MapGenerator
+from .map_generator import generate_map, SimConfig, MapGenerator
 from encoder.autoencoder import BoreholeAutoencoder, AEConfig
 from train_encoder import boreholes_from_map, compute_standardisation_stats, standardise
 
@@ -247,6 +247,65 @@ def main():
 
     print("=" * 60)
     print("all stages work. ready for real data.")
+
+def build_fake_geometry() -> FormationGeometry:
+    """FormationGeometry with synthetic combinations and thicknesses for
+    smoke-test purposes only. Uses the new combination-based format."""
+    geom = FormationGeometry(list(FORMATION_ORDER))
+    geom.n_wells_total = 100
+    geom.min_well_depth = 4000.0
+    geom.max_well_depth = 4500.0
+ 
+    # synthetic combinations representative of deep Dutch wells
+    geom.combinations = [
+        (("NU", "NM", "NL", "CK", "KN", "RB", "ZE", "RO", "DC"), 15),
+        (("CK", "KN", "RB", "ZE", "RO", "DC"),                    13),
+        (("NU", "NM", "NL", "CK", "KN", "ZE", "RO", "DC"),        10),
+        (("CK", "KN", "RB", "ZE", "RO"),                           9),
+        (("NU", "NM", "NL", "CK", "KN", "RN", "RB", "ZE", "RO", "DC"), 8),
+        (("CK", "KN", "RN", "RB", "ZE", "RO", "DC"),               6),
+        (("CK", "KN", "ZE", "RO", "DC"),                           5),
+        (("CK", "KN", "AT", "RN", "RB", "ZE", "RO", "DC"),         3),
+        (("CK", "KN", "SL", "AT", "RN", "RB"),                     3),
+    ]
+ 
+    # synthetic thickness distributions (n=50 per formation)
+    fake_thickness_stats = {
+        "NU": (414, 200), "NM":  (60,  40), "NL": (393, 200),
+        "CK": (662, 300), "KN": (227, 200),
+        "SL": (180, 150), "SG": (149, 100), "AT": (199, 200),
+        "RN": (262, 200), "RB": (267, 200),
+        "ZE": (326, 250), "RO": (224, 200), "DC":  (63, 100),
+    }
+    fake_facies = {
+        "NU": {"clay": 1.0},
+        "NM": {"clay": 1.0},
+        "NL": {"clay": 1.0},
+        "CK": {"chalk": 1.0},
+        "KN": {"claystone": 0.46, "claystone_cool": 0.41,
+                "sandstone_shaly": 0.13},
+        "SL": {"claystone_cool": 0.61, "claystone": 0.39},
+        "SG": {"claystone": 0.69, "claystone_hot": 0.31},
+        "AT": {"claystone_hot": 0.66, "claystone": 0.20,
+                "claystone_cool": 0.14},
+        "RN": {"claystone": 0.54, "dolomite": 0.40, "anhydrite": 0.06},
+        "RB": {"claystone_hot": 0.67, "sandstone_shaly": 0.33},
+        "ZE": {"halite_pure": 0.43, "anhydrite": 0.28,
+                "other": 0.22, "dolomite": 0.07},
+        "RO": {"sandstone_clean": 0.56, "claystone_hot": 0.44},
+        "DC": {"claystone_hot": 0.59, "claystone": 0.41},
+    }
+ 
+    rng = np.random.default_rng(0)
+    for fm, (med, std) in fake_thickness_stats.items():
+        thicks = rng.normal(med, std, size=50).clip(min=20.0)
+        geom.formations[fm] = FormationStats(
+            name=fm,
+            n_wells=50,
+            thicknesses=thicks,
+            facies=fake_facies[fm],
+        )
+    return geom
 
 
 if __name__ == "__main__":
