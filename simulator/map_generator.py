@@ -2,22 +2,23 @@
 Map generator — stage 1 end-to-end.
 
 Assembles:
-  1. a 2D (n_x, n_y) field of stratigraphic columns (rock_type per depth)
-  2. per-cell variable values sampled from the fitted distributions,
-     with lateral smoothness via gstools Gaussian random fields
-  3. an ore yield + thickness field from 0-3 orebody blobs
+  1. a 2D (n_x, n_y) field of stratigraphic columns (rock_type per depth),
+     sampled from FormationGeometry (data-driven empirical distributions)
+  2. per-cell variable values sampled from DistributionBank, with lateral
+     smoothness via Gaussian random fields
+  3. a 3D ore-yield field with 0-3 ellipsoidal bodies, placed by
+     rock-conditioned scoring against the DiscoveryPrior
 
 Single-map output shape: dict with arrays
     rock_types:   (n_x, n_y, n_depth) dtype=object
     formations:   (n_x, n_y, n_depth) dtype=object
     variables:    dict[var_name -> (n_x, n_y, n_depth) float32]
-    yield_field:  (n_x, n_y) float32
-    thickness_field: (n_x, n_y) float32
+    yield_field:  (n_x, n_y, n_depth) float32
     depth_axis:   (n_depth,) float32
     bodies:       list of OreBody dataclasses (ground truth)
 
-By default maps are generated ON THE FLY: calling generate_map() gives you
-one map; no disk writes.  Suitable for use as a torch IterableDataset.
+Maps are generated ON THE FLY: calling generate_map() gives you one map;
+no disk writes. Suitable for use as a torch IterableDataset.
 """
 from __future__ import annotations
 
@@ -26,7 +27,8 @@ from typing import Any
 
 import numpy as np
 
-from .distributions import DistributionBank
+from .distributions import DistributionBank, DiscoveryPrior
+from .formation_geometry import FormationGeometry
 from .stratigraphy import sample_spatial_column_field, StratigraphicColumn
 from .orebody import sample_orebodies, OreBody
 
@@ -36,31 +38,24 @@ class SimConfig:
     """Simulation parameters."""
     n_x: int = 32
     n_y: int = 32
-    n_depth: int = 400
-    max_depth: float = 4000.0
-    # Default variable set.  msus_si (magnetic susceptibility) is
-    # LILY-only — NLOG wells do not measure it, so most rock types have
-    # no KDE for it anywhere in the bank, which means maps generated for
-    # NLOG-dominant rocks like sandstone fill msus_si with NaN (→ 0).
-    # After standardisation you get mean=0, std=0 across the whole
-    # training set, and the autoencoder gets a channel with zero signal
-    # that also wouldn't exist in real NLOG boreholes at inference time.
-    # Dropping msus_si from the default.  Re-add it if you want
-    # LILY-only experiments.
+    n_depth: int = 440          # 10 m per cell × 4400 m
+    max_depth: float = 4400.0   # captures 90% of NLOG positive wells
+
     variables: tuple[str, ...] = (
-        "rhob", "gr_api", "dt_us_ft", "nphi", "pef",
-        #"cali_in",
-          "res_deep_log", # "sp_mv", #"drho",
+        "rhob", "gr_api", "dt_us_ft", "nphi", "pef", "res_deep_log",
     )
-    # how spatially smooth the noise-field perturbations are (in cells).
-    # smaller = more fine-grained variation; larger = broader features.
+
     lateral_correlation_cells: float = 2.0
-    # blend between the smooth GRF baseline and i.i.d. KDE draws.
-    # 0.0 = pure i.i.d. draws (no spatial correlation, speckly).
-    # 1.0 = pure GRF (smooth but doesn't capture KDE shape detail).
-    # 0.5 gives both: visible spatial features + real per-cell variation.
     spatial_correlation_strength: float = 0.5
     layer_waviness_m: float = 20.0
+
+    # ----- ore-body parameters -----
+    ore_depth_window: tuple[float, float] = (1600.0, 4400.0)
+    n_ore_candidates: int = 30
+    ore_softmax_temperature: float = 1.0
+    ore_radius_xy_range: tuple[float, float] = (3.0, 8.0)
+    ore_radius_z_range: tuple[float, float] = (50.0, 200.0)
+    ore_yield_peak_range: tuple[float, float] = (0.5, 5.0)
 
     @property
     def dz(self) -> float:
@@ -69,19 +64,25 @@ class SimConfig:
 
 def generate_map(
     bank: DistributionBank,
+    geometry: FormationGeometry,
     config: SimConfig | None = None,
     rng: np.random.Generator | None = None,
+    prior: DiscoveryPrior | None = None,
 ) -> dict[str, Any]:
-    """Generate one 2D map with full variables + ore yield + thickness.
+    """Generate one map with full variables + 3D ore yield field.
 
     Parameters
     ----------
     bank : DistributionBank
-        Fitted from NLOG+LILY data via DistributionBank.fit().
+        Fitted from NLOG+LILY data.
+    geometry : FormationGeometry
+        Empirical formation depth/thickness/facies (replaces DUTCH_COLUMN).
     config : SimConfig
         Map dimensions and variable list.
     rng : np.random.Generator
-        Random state (provide for reproducibility; None = fresh).
+        Random state.
+    prior : DiscoveryPrior | None
+        Calibration prior for ore placement. If None → uniform-random ore.
     """
     if config is None:
         config = SimConfig()
@@ -96,6 +97,7 @@ def generate_map(
         rng=rng,
         n_x=nx,
         n_y=ny,
+        geometry=geometry,
         max_depth=config.max_depth,
         layer_waviness=config.layer_waviness_m,
     )
@@ -109,37 +111,11 @@ def generate_map(
             formations[x, y, :] = f
 
     # --- 2. sample variable values per cell -------------------------------
-    # For each (x, y, z) cell we know its rock_type. We want:
-    #   (a) values respecting per-rock-type distributions
-    #   (b) between-variable correlations
-    #   (c) smooth lateral variation (neighbouring cells similar)
-    #
-    # Approach: two-stage sampling.
-    #   Stage A: per-cell joint sample from the bank — preserves marginals
-    #            and between-variable correlations, but i.i.d. across cells.
-    #   Stage B: generate a 2D Gaussian random field per variable per slice
-    #            (mean 0, std 1). Use it to "pull" each independent draw
-    #            toward a spatially-smooth baseline.
-    #
-    # Specifically: final = alpha * (rock_mean + rock_std * grf) +
-    #                       (1 - alpha) * iid_draw
-    # where alpha controls how much lateral correlation vs sample diversity.
-    # alpha=0: raw i.i.d. draws (no lateral correlation).
-    # alpha=1: everything is mean + std * grf (fully correlated, no per-cell
-    #          detail beyond the GRF).
-    # Default alpha=0.5 preserves ~75% of the original variance while giving
-    # visible spatial correlation.
     variables_out = {
         v: np.full((nx, ny, nz), np.nan, dtype=np.float32)
         for v in config.variables
     }
 
-    # per-variable (x, y, z) correlated noise fields — one GRF per depth
-    # slice. Using the same seed across depths would produce vertically
-    # continuous features; using different seeds per depth gives
-    # decorrelated slices. We use the SAME seed per variable across
-    # depths so a cell that is "high density" at one depth tends to be
-    # "high density" at nearby depths too.
     noise_fields = _make_noise_fields(
         rng, nx, ny, nz, config.variables,
         len_scale=config.lateral_correlation_cells,
@@ -151,9 +127,7 @@ def generate_map(
             n_cells = int(mask.sum())
             if n_cells == 0:
                 continue
-            # i.i.d. per-cell joint draw
             samples = bank.sample(rock, float(depth), n=n_cells, rng=rng)
-            # cell location (x, y) for each masked cell (to index noise field)
             xs, ys = np.where(mask)
             for var in config.variables:
                 if var not in samples:
@@ -161,7 +135,6 @@ def generate_map(
                 iid = samples[var]
                 if np.all(np.isnan(iid)):
                     continue
-                # pull cell values toward a smooth baseline around the rock mean
                 cell = bank.cells.get((rock, _bin_for(bank, depth)))
                 if cell is None or var not in cell.kdes:
                     variables_out[var][xs, ys, z_idx] = iid.astype(np.float32)
@@ -174,15 +147,28 @@ def generate_map(
                 blended = alpha * smooth_baseline + (1 - alpha) * iid
                 variables_out[var][xs, ys, z_idx] = blended.astype(np.float32)
 
-    # --- 3. orebody: yield + thickness ------------------------------------
-    yield_field, thickness_field, bodies = sample_orebodies(rng, nx, ny)
+    # --- 3. 3D ore yield field --------------------------------------------
+    yield_field, bodies = sample_orebodies(
+        rng=rng,
+        n_x=nx,
+        n_y=ny,
+        n_depth=nz,
+        depth_axis=depth_axis,
+        rock_types=rock_types,
+        prior=prior,
+        ore_depth_window=config.ore_depth_window,
+        n_candidates=config.n_ore_candidates,
+        softmax_temperature=config.ore_softmax_temperature,
+        radius_xy_range=config.ore_radius_xy_range,
+        radius_z_range=config.ore_radius_z_range,
+        yield_peak_range=config.ore_yield_peak_range,
+    )
 
     return {
         "rock_types": rock_types,
         "formations": formations,
         "variables": variables_out,
-        "yield_field": yield_field.astype(np.float32),
-        "thickness_field": thickness_field.astype(np.float32),
+        "yield_field": yield_field,
         "depth_axis": depth_axis,
         "bodies": bodies,
         "config": asdict(config),
@@ -197,23 +183,12 @@ def _make_noise_fields(
     variables: tuple[str, ...],
     len_scale: float,
 ) -> dict[str, np.ndarray]:
-    """Generate a correlated noise field per variable, shape (nx, ny, nz),
-    with mean 0, std 1, and Gaussian spatial correlation in (x, y) with
-    correlation length `len_scale` cells.  Slices are drawn independently
-    but with temporal correlation via a slow random walk on each cell.
-
-    Uses scipy.ndimage.gaussian_filter on white noise — cheap, and gives
-    approximately Gaussian-correlated fields. For more physical
-    variograms you'd switch to gstools.SRF here.
-    """
     from scipy.ndimage import gaussian_filter
     out = {}
     for var in variables:
-        # white noise in (x, y, z), smoothed in (x, y) only per slice
         raw = rng.normal(0, 1, size=(nx, ny, nz)).astype(np.float32)
         for z in range(nz):
             raw[:, :, z] = gaussian_filter(raw[:, :, z], sigma=len_scale)
-        # renormalise to unit variance after smoothing (smoothing reduces std)
         std = raw.std()
         if std > 1e-6:
             raw /= std
@@ -227,21 +202,30 @@ def _bin_for(bank, depth: float) -> int:
 
 
 class MapGenerator:
-    """Stateful wrapper for streaming map generation.  Use with torch
-    IterableDataset or just call next() repeatedly."""
+    """Stateful wrapper for streaming map generation.
+
+    Pass `prior` for rock-conditioned ore placement (recommended).
+    `geometry` is required — there's no longer a hand-coded fallback."""
 
     def __init__(
         self,
         bank: DistributionBank,
+        geometry: FormationGeometry,
         config: SimConfig | None = None,
         seed: int | None = None,
+        prior: DiscoveryPrior | None = None,
     ):
         self.bank = bank
+        self.geometry = geometry
         self.config = config or SimConfig()
         self.rng = np.random.default_rng(seed)
+        self.prior = prior
 
     def __iter__(self):
         return self
 
     def __next__(self) -> dict[str, Any]:
-        return generate_map(self.bank, self.config, self.rng)
+        return generate_map(
+            self.bank, self.geometry, self.config, self.rng,
+            prior=self.prior,
+        )

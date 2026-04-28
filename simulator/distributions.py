@@ -1,26 +1,38 @@
 """
 Distribution fitting — stage 1a of the simulator pipeline.
 
-Fits P(variable | rock_type_fine, depth_bin) from the cleaned NLOG+LILY
-samples.parquet produced by pull_data.py v4.
+Two artefacts are produced from samples.parquet:
 
-The fitted distributions are the *parameters* of the simulator. Each rock
-type at each depth gets a marginal KDE per variable, plus a correlation
-matrix across variables for sampling physically-consistent joint values.
+  * DistributionBank: P(variable | rock_type_fine, depth_bin), used to
+    sample petrophysical values per cell during map generation.
+
+  * DiscoveryPrior: P(rock_type_fine | depth_bin) conditional on
+    hc_discovery=True, used to score candidate ore-body locations
+    during map generation so that ore preferentially sits where the
+    column's rock signature matches historical NLOG positive-discovery
+    wells.
+
+Both are fit from the same parquet but saved as separate pickles so they
+can be regenerated independently.
 
 Usage
 -----
-    from simulator.distributions import DistributionBank
+    from simulator.distributions import DistributionBank, DiscoveryPrior
+
     bank = DistributionBank.fit(
         "data/clean/samples.parquet",
         variables=["rhob", "gr_api", "dt_us_ft", "nphi", "pef"],
-        depth_bins=[0, 300, 800, 1500, 3000, 6000],
+        depth_bins=[0, 400, 800, 1200, 1600, 2000, 2400, 2800,
+                    3200, 3600, 4000, 4400, 4800, 5200, 5600, 6000],
     )
     bank.save("data/clean/distributions.pkl")
 
-    # later, at simulation time:
-    bank = DistributionBank.load("data/clean/distributions.pkl")
-    samples = bank.sample("sandstone", depth=1200, n=100)  # (100, n_vars)
+    prior = DiscoveryPrior.fit(
+        "data/clean/samples.parquet",
+        depth_bins=bank.depth_bins,
+        rock_types=bank.rock_types,
+    )
+    prior.save("data/clean/discovery_prior.pkl")
 """
 from __future__ import annotations
 
@@ -35,7 +47,7 @@ from scipy.stats import gaussian_kde
 
 
 # physically-plausible clamps so rogue samples can't inject junk into the
-# simulator.  match DISPLAY_BOUNDS in plots.py where sensible.
+# simulator. Match DISPLAY_BOUNDS in plots.py where sensible.
 HARD_BOUNDS = {
     "rhob":         (1.20, 3.20),   # g/cc
     "gr_api":       (0.0, 300.0),   # API
@@ -51,6 +63,10 @@ HARD_BOUNDS = {
     "ngr_cps":      (0.0, 500.0),
 }
 
+
+# =============================================================================
+# CellDistribution + DistributionBank
+# =============================================================================
 
 @dataclass
 class CellDistribution:
@@ -68,7 +84,7 @@ class CellDistribution:
     means: dict[str, float] = field(default_factory=dict)
     stds: dict[str, float] = field(default_factory=dict)
     # between-variable correlation matrix (Spearman, on ranks, robust to
-    # heavy tails).  only computed across variables where this cell has
+    # heavy tails). Only computed across variables where this cell has
     # joint observations.
     corr_matrix: np.ndarray | None = None
     corr_variables: list[str] = field(default_factory=list)
@@ -77,13 +93,12 @@ class CellDistribution:
         """Draw n joint samples across variables.
 
         Strategy: draw a correlated multivariate normal, map back to each
-        variable's marginal distribution via rank-based transform.  This is
+        variable's marginal distribution via rank-based transform. This is
         the Gaussian-copula approach — preserves the marginals (whatever
         their shape) while imposing the empirical correlation structure.
         """
         out = {}
-        # defensive: ensure corr_matrix and corr_variables are consistent.
-        # can be violated if KDEs are edited after fitting.
+        # defensive: ensure corr_matrix and corr_variables are consistent
         if (self.corr_matrix is not None
                 and len(self.corr_variables) >= 2
                 and self.corr_matrix.shape[0] == len(self.corr_variables)):
@@ -105,15 +120,13 @@ class CellDistribution:
 
     def _inverse_cdf(self, var: str, u: np.ndarray, rng) -> np.ndarray:
         """Map uniform[0,1] samples to the variable's marginal via empirical
-        quantiles drawn from the KDE.  Approximate but fast."""
+        quantiles drawn from the KDE. Approximate but fast."""
         kde = self.kdes.get(var)
         if kde is None:
             return np.full(len(u), np.nan)
-        # build an empirical CDF by sampling the KDE heavily
         n_draws = 5000
         draws = self._clamp(var, kde.resample(n_draws, seed=rng)[0])
         draws.sort()
-        # np.quantile is equivalent to empirical inverse CDF
         return np.quantile(draws, u)
 
     def _clamp(self, var: str, values: np.ndarray) -> np.ndarray:
@@ -143,14 +156,12 @@ class DistributionBank:
         df = pd.read_parquet(parquet_path)
         bank = cls(list(variables), list(depth_bins))
 
-        # pivot long -> wide so each row is (borehole, depth) with all
-        # variables as columns.  this lets us compute correlations.
         if "rock_type_fine" not in df.columns:
             raise ValueError("samples.parquet needs rock_type_fine (v4 schema)")
 
-        # keep only rows for the variables of interest
         df = df[df["measurement"].isin(variables)]
-        # wide pivot
+        # wide pivot so each row is (borehole, depth) with all variables
+        # as columns — lets us compute correlations
         wide = df.pivot_table(
             index=["dataset", "borehole", "depth", "rock_type_fine"],
             columns="measurement",
@@ -158,7 +169,6 @@ class DistributionBank:
             aggfunc="mean",
         ).reset_index()
 
-        # bucket into depth bins
         wide["depth_bin"] = pd.cut(
             wide["depth"],
             bins=depth_bins,
@@ -231,21 +241,11 @@ class DistributionBank:
                 cell.means[var] = float(vals.mean())
                 cell.stds[var] = float(vals.std())
             except np.linalg.LinAlgError:
-                # degenerate (all values identical) — skip
                 pass
 
         # between-variable correlations (Spearman, pairwise).
-        #
-        # Previously used sub[varset].dropna() which required every row to
-        # have all variables present.  In NLOG no single well measures all
-        # 10 variables, so dropna() killed nearly every row for cells that
-        # had plenty of marginal data — that's why well-populated cells
-        # showed vars_corr=0 in the summary.
-        #
-        # Pairwise fix: for each variable pair, compute the Spearman
-        # correlation using only rows where both are present.  Build the
-        # d×d matrix pair by pair, then project to the nearest positive
-        # semi-definite matrix so multivariate_normal sampling works.
+        # Pairwise (not full-dropna) because no NLOG well measures all
+        # variables simultaneously.
         varset = [v for v in variables if v in cell.kdes]
         if len(varset) >= 2:
             corr = np.eye(len(varset))
@@ -254,9 +254,7 @@ class DistributionBank:
                     vi, vj = varset[i], varset[j]
                     pair = sub[[vi, vj]].dropna()
                     if len(pair) < 30:
-                        # not enough joint observations — leave as 0
                         continue
-                    # Spearman = Pearson on ranks
                     ranks = pair.rank().values
                     if ranks[:, 0].std() < 1e-9 or ranks[:, 1].std() < 1e-9:
                         continue
@@ -264,7 +262,6 @@ class DistributionBank:
                     if np.isfinite(c):
                         corr[i, j] = c
                         corr[j, i] = c
-            # regularise to positive semi-definite
             corr = _nearest_psd(corr)
             cell.corr_matrix = corr
             cell.corr_variables = varset
@@ -282,16 +279,13 @@ class DistributionBank:
 
         With `interpolate=True` (default), samples are blended between the
         two adjacent bin centres so the marginal distribution at depth d
-        is a mixture of the floor-bin and ceiling-bin distributions,
-        weighted by where d falls between their centres.  This removes
-        the step-function artefact at bin boundaries.
+        is a mixture of the floor-bin and ceiling-bin distributions.
 
         Three-level fallback when a requested cell/variable is missing:
           1. If the exact (rock_type, depth_bin) cell has no fit, use the
              nearest populated depth bin of the same rock type.
           2. For any variable that the chosen cell lacks a KDE for, borrow
-             that variable's KDE from the nearest sibling cell (same rock,
-             different depth bin) that *does* have it.
+             that variable's KDE from the nearest sibling cell.
           3. If the rock has no fitted cells anywhere, returns NaN.
         """
         if rng is None:
@@ -303,7 +297,6 @@ class DistributionBank:
                 return {v: np.full(n, np.nan) for v in self.variables}
             return self._sample_cell_with_fallback(cell, rock_type, n, rng)
 
-        # interpolation: find the two bin centres bracketing `depth`
         centres = self._bin_centres()
         cell_lo, cell_hi, alpha = self._bracket_cells(rock_type, depth, centres)
 
@@ -316,11 +309,7 @@ class DistributionBank:
         if cell_lo is cell_hi:
             return self._sample_cell_with_fallback(cell_lo, rock_type, n, rng)
 
-        # mix: n_hi samples from ceiling cell, rest from floor cell.
         # binomial split preserves per-sample correlation structure
-        # (each sample is fully drawn from one cell, never mixed
-        # mid-sample), while the *aggregate* distribution is the correct
-        # alpha-weighted mixture.
         n_hi = int(rng.binomial(n, alpha))
         n_lo = n - n_hi
 
@@ -337,8 +326,6 @@ class DistributionBank:
             for v in self.variables:
                 out[v][n_hi:] = lo_samples.get(v, np.full(n_lo, np.nan))
 
-        # shuffle so the hi/lo halves aren't in adjacent positions when
-        # the caller assigns these to a spatial grid
         idx = rng.permutation(n)
         for v in self.variables:
             out[v] = out[v][idx]
@@ -346,7 +333,6 @@ class DistributionBank:
 
     def _resolve_cell(self, rock_type: str, depth: float
                       ) -> CellDistribution | None:
-        """Pick the cell for (rock_type, depth) with nearest-bin fallback."""
         bin_idx = np.searchsorted(self.depth_bins, depth, side="right") - 1
         bin_idx = int(np.clip(bin_idx, 0, len(self.depth_bins) - 2))
         cell = self.cells.get((rock_type, bin_idx))
@@ -361,13 +347,6 @@ class DistributionBank:
     def _bracket_cells(
         self, rock_type: str, depth: float, centres: list[float],
     ) -> tuple[CellDistribution | None, CellDistribution | None, float]:
-        """Return (cell_lo, cell_hi, alpha) where alpha ∈ [0,1] is the
-        interpolation weight toward cell_hi.  Uses populated cells only:
-        if rock's bin 2 is missing we interpolate between bins 1 and 3.
-
-        alpha = 0  → use cell_lo  (depth at cell_lo's centre or below)
-        alpha = 1  → use cell_hi  (depth at cell_hi's centre or above)
-        """
         populated = sorted(
             [(b, self.cells[(rock_type, b)])
              for (r, b) in self.cells if r == rock_type],
@@ -376,12 +355,10 @@ class DistributionBank:
         if not populated:
             return None, None, 0.0
 
-        # compare `depth` against the populated bins' centres
         for i, (b, c) in enumerate(populated):
             centre = centres[b]
             if depth <= centre:
                 if i == 0:
-                    # below the shallowest populated centre — use it alone
                     return c, c, 0.0
                 b_prev, c_prev = populated[i - 1]
                 centre_prev = centres[b_prev]
@@ -391,7 +368,6 @@ class DistributionBank:
                 alpha = float(np.clip(alpha, 0.0, 1.0))
                 return c_prev, c, alpha
 
-        # depth is above all populated centres — use the deepest alone
         _, c_last = populated[-1]
         return c_last, c_last, 0.0
 
@@ -402,9 +378,6 @@ class DistributionBank:
         n: int,
         rng: np.random.Generator,
     ) -> dict[str, np.ndarray]:
-        """Run cell.sample(n) but fill in any variables the cell lacks by
-        borrowing from the nearest sibling cell of the same rock type."""
-        # locate this cell's bin index (needed for the borrow search)
         bin_idx = 0
         for (r, b), c in self.cells.items():
             if c is cell and r == rock_type:
@@ -432,8 +405,8 @@ class DistributionBank:
             out[v] = np.clip(vals, lo, hi)
         return out
 
-    def _nearest_cell(self, rock_type: str, bin_idx: int) -> CellDistribution | None:
-        """Find the populated cell for this rock type closest to bin_idx."""
+    def _nearest_cell(self, rock_type: str, bin_idx: int
+                      ) -> CellDistribution | None:
         candidates = [
             (abs(b - bin_idx), b)
             for (r, b) in self.cells
@@ -448,7 +421,6 @@ class DistributionBank:
     def _nearest_cell_with_variable(
         self, rock_type: str, bin_idx: int, variable: str,
     ) -> CellDistribution | None:
-        """Nearest cell (same rock) that has KDE fitted for `variable`."""
         candidates = []
         for (r, b), c in self.cells.items():
             if r != rock_type:
@@ -472,8 +444,7 @@ class DistributionBank:
             return pickle.load(f)
 
     def summary(self) -> pd.DataFrame:
-        """Tabular summary of fit coverage: which (rock, bin) cells have
-        data, how many samples each, how many variables correlated."""
+        """Tabular summary of fit coverage."""
         rows = []
         for (rock, bin_idx), cell in self.cells.items():
             rows.append({
@@ -485,6 +456,209 @@ class DistributionBank:
             })
         return pd.DataFrame(rows).sort_values(["rock_type", "depth_bin"])
 
+
+# =============================================================================
+# DiscoveryPrior — for rock-conditioned ore placement
+# =============================================================================
+
+@dataclass
+class DiscoveryPrior:
+    """P(rock_type_fine | depth_bin) conditional on hc_discovery=True.
+
+    Built from samples.parquet, filtered to wells where a commercial
+    hydrocarbon discovery was made (gas, oil, or gas+oil — see
+    pull_data.py's hc_discovery=True definition).
+
+    Stored as a 2D array `prob[rock_idx, bin_idx]` such that
+    `prob[:, bin_idx].sum() == 1` for each populated bin.
+
+    Used by orebody.py to score candidate ore-body centroids: a column
+    whose rock types at each depth match high-probability cells of the
+    prior gets a high score and is preferentially chosen as a host.
+    """
+    rock_types: list[str]            # ordered list, defines axis-0 of prob
+    depth_bins: list[float]           # bin edges, defines axis-1 (n_bins-1)
+    prob: np.ndarray                  # shape (n_rock_types, n_depth_bins)
+    n_positive_wells: int
+    n_positive_rows: int
+
+    @classmethod
+    def fit(
+        cls,
+        parquet_path: str | Path,
+        depth_bins: Sequence[float],
+        rock_types: Sequence[str] | None = None,
+        smoothing: float = 1e-3,
+    ) -> "DiscoveryPrior":
+        """Compute P(rock | depth_bin, hc_discovery=True) from samples.parquet.
+
+        Parameters
+        ----------
+        parquet_path : path to samples.parquet (must contain hc_discovery,
+                       rock_type_fine, depth columns)
+        depth_bins   : same edges as DistributionBank, for consistency
+        rock_types   : optional ordering. If None, takes all unique values
+                       present in positive-discovery rows.
+        smoothing    : Laplace-smoothing constant added to every cell so
+                       no rock-type / bin combination has zero probability
+                       (avoids -inf in log-prob scoring).
+        """
+        df = pd.read_parquet(parquet_path)
+
+        if "hc_discovery" not in df.columns:
+            raise ValueError("samples.parquet missing hc_discovery column")
+        positive = df[df["hc_discovery"] == True].copy()
+        if len(positive) == 0:
+            raise ValueError("no rows with hc_discovery=True found in parquet")
+
+        # deduplicate to one row per (well, depth) — multi-variable rows
+        # would otherwise over-count the same physical cell
+        positive = positive.drop_duplicates(
+            subset=["dataset", "borehole", "depth"], keep="first")
+
+        positive["depth_bin"] = pd.cut(
+            positive["depth"],
+            bins=list(depth_bins),
+            labels=list(range(len(depth_bins) - 1)),
+            include_lowest=True,
+        )
+
+        if rock_types is None:
+            rocks = sorted(positive["rock_type_fine"].dropna().unique().tolist())
+        else:
+            rocks = list(rock_types)
+        rock_to_idx = {r: i for i, r in enumerate(rocks)}
+
+        n_rocks = len(rocks)
+        n_bins = len(depth_bins) - 1
+        counts = np.zeros((n_rocks, n_bins), dtype=np.float64)
+
+        for _, row in positive.iterrows():
+            r = row.get("rock_type_fine")
+            b = row.get("depth_bin")
+            if r is None or pd.isna(r) or pd.isna(b):
+                continue
+            if r not in rock_to_idx:
+                continue
+            counts[rock_to_idx[r], int(b)] += 1.0
+
+        # Laplace smoothing + per-bin normalisation
+        counts += smoothing
+        col_sums = counts.sum(axis=0, keepdims=True)
+        col_sums[col_sums == 0] = 1.0
+        prob = counts / col_sums
+
+        n_wells = positive["borehole"].nunique()
+        n_rows = len(positive)
+        print(f"DiscoveryPrior: {n_wells} positive wells, {n_rows:,} rows, "
+              f"{n_rocks} rock types, {n_bins} depth bins")
+
+        return cls(
+            rock_types=rocks,
+            depth_bins=list(depth_bins),
+            prob=prob,
+            n_positive_wells=n_wells,
+            n_positive_rows=n_rows,
+        )
+
+    def log_prob(self, rock_type: str, depth: float) -> float:
+        """Log-probability of seeing `rock_type` at `depth`, given positive
+        hc_discovery. Returns -inf if rock_type is unknown to the prior."""
+        if rock_type not in self.rock_types:
+            return -np.inf
+        ri = self.rock_types.index(rock_type)
+        bi = int(np.clip(
+            np.searchsorted(self.depth_bins, depth, side="right") - 1,
+            0, len(self.depth_bins) - 2,
+        ))
+        p = self.prob[ri, bi]
+        if p <= 0:
+            return -np.inf
+        return float(np.log(p))
+
+    def score_column(
+        self,
+        rock_types_column: np.ndarray,   # (n_z,) of rock-type strings
+        depth_axis: np.ndarray,          # (n_z,) of depths in metres
+        depth_window: tuple[float, float] | None = None,
+    ) -> float:
+        """Sum of log-probabilities over a depth column.
+
+        If `depth_window` is given (lo, hi), only the cells in that range
+        contribute. Useful when scoring against a target reservoir
+        interval (e.g., 2800-3400m for Rotliegend) rather than the full
+        column.
+        """
+        if depth_window is not None:
+            lo, hi = depth_window
+            mask = (depth_axis >= lo) & (depth_axis < hi)
+        else:
+            mask = np.ones(len(depth_axis), dtype=bool)
+        score = 0.0
+        for r, d, m in zip(rock_types_column, depth_axis, mask):
+            if not m:
+                continue
+            lp = self.log_prob(str(r), float(d))
+            if np.isfinite(lp):
+                score += lp
+        return score
+
+    def best_depth_in_column(
+        self,
+        rock_types_column: np.ndarray,
+        depth_axis: np.ndarray,
+        depth_window: tuple[float, float] | None = None,
+    ) -> float:
+        """Return the depth in `depth_axis` whose rock has the highest
+        log-probability under the prior. Used to place the centre of an
+        accepted ore body within a column."""
+        if depth_window is not None:
+            lo, hi = depth_window
+            valid_mask = (depth_axis >= lo) & (depth_axis < hi)
+        else:
+            valid_mask = np.ones(len(depth_axis), dtype=bool)
+        best_lp = -np.inf
+        best_d = float(depth_axis[len(depth_axis) // 2])
+        for r, d, m in zip(rock_types_column, depth_axis, valid_mask):
+            if not m:
+                continue
+            lp = self.log_prob(str(r), float(d))
+            if lp > best_lp:
+                best_lp = lp
+                best_d = float(d)
+        return best_d
+
+    def save(self, path: str | Path) -> None:
+        with open(path, "wb") as f:
+            pickle.dump(self, f)
+        print(f"Saved DiscoveryPrior to {path}")
+
+    @classmethod
+    def load(cls, path: str | Path) -> "DiscoveryPrior":
+        with open(path, "rb") as f:
+            return pickle.load(f)
+
+    def summary(self) -> pd.DataFrame:
+        """Per-bin top-3 rock types, useful for sanity-checking the prior
+        looks geologically reasonable."""
+        rows = []
+        for bi in range(self.prob.shape[1]):
+            lo, hi = self.depth_bins[bi], self.depth_bins[bi + 1]
+            top_idx = np.argsort(self.prob[:, bi])[::-1][:3]
+            top = [(self.rock_types[i], float(self.prob[i, bi]))
+                   for i in top_idx]
+            rows.append({
+                "depth_bin": f"{lo:.0f}-{hi:.0f}",
+                "top1": f"{top[0][0]} ({top[0][1]:.0%})",
+                "top2": f"{top[1][0]} ({top[1][1]:.0%})",
+                "top3": f"{top[2][0]} ({top[2][1]:.0%})",
+            })
+        return pd.DataFrame(rows)
+
+
+# =============================================================================
+# Helpers
+# =============================================================================
 
 def _nearest_psd(a: np.ndarray) -> np.ndarray:
     """Nearest positive semi-definite matrix via eigenvalue flooring.

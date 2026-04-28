@@ -28,3 +28,4 @@ data/clean/*.pkl
 data/clean/*.parquet
 # checkpoints/
 
+test.py
