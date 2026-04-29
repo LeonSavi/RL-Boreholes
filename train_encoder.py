@@ -23,6 +23,9 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+
+from simulator import FormationGeometry, DiscoveryPrior
+
 from simulator.distributions import DistributionBank
 from simulator.map_generator import MapGenerator, SimConfig
 from encoder.autoencoder import (
@@ -122,11 +125,13 @@ def train(
     print(f"device: {device}")
 
     bank = DistributionBank.load(distributions_path)
+    geom = FormationGeometry.load("data/clean/formation_geometry.pkl")
+    prior = DiscoveryPrior.load("data/clean/discovery_prior.pkl")
     sim_cfg = SimConfig()
     variables = list(sim_cfg.variables)
 
     # streaming data
-    gen = MapGenerator(bank, sim_cfg, seed=42)
+    gen = MapGenerator(bank, geom, sim_cfg, seed=42, prior=prior)
     print(f"computing standardisation stats (10 maps)...")
     stats = compute_standardisation_stats(gen, variables, n_maps=10)
     for v, (m, s) in stats.items():
