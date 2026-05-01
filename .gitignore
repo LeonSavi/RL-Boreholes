@@ -4,6 +4,8 @@ venv/
 venv_rl/
 .venv_rl/
 env/
+data/OCR-data
+data/ocr_output/
 
 data/nlog/nlog_scrape/
 data/lily/*.csv
