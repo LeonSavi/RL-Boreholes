@@ -223,13 +223,24 @@ class DistributionBank:
             variables=variables,
             n_samples=len(sub),
         )
-        # per-variable marginals
+        # per-variable marginals.
+        # Two-stage filtering before KDE fit:
+        #   1. drop values outside HARD_BOUNDS (physically impossible)
+        #   2. winsorise to empirical [P1, P99] (trims log-tool calibration
+        #      glitches and bed-boundary cells that contaminate per-cell
+        #      distributions). Without (2), the KDE picks up extreme
+        #      outliers and produces unphysical samples in the simulator.
         for var in variables:
             if var not in sub.columns:
                 continue
             vals = sub[var].dropna().values
             bounds = HARD_BOUNDS.get(var, (-np.inf, np.inf))
             vals = vals[(vals >= bounds[0]) & (vals <= bounds[1])]
+            if len(vals) < 20: # min number of samples, if lower skip
+                continue
+            # winsorise to [P1, P99]
+            p1, p99 = np.percentile(vals, [1, 99])
+            vals = vals[(vals >= p1) & (vals <= p99)]
             if len(vals) < 20:
                 continue
             try:
@@ -245,7 +256,9 @@ class DistributionBank:
 
         # between-variable correlations (Spearman, pairwise).
         # Pairwise (not full-dropna) because no NLOG well measures all
-        # variables simultaneously.
+        # variables simultaneously. Correlation uses raw values (not the
+        # winsorised marginals) — winsorisation per-variable would distort
+        # the joint structure if extreme values are correlated across vars.
         varset = [v for v in variables if v in cell.kdes]
         if len(varset) >= 2:
             corr = np.eye(len(varset))

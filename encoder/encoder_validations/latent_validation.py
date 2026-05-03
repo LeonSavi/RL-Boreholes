@@ -67,6 +67,7 @@ import torch
 
 from encoder.autoencoder import load_checkpoint, standardise
 from simulator.distributions import DistributionBank
+from simulator.formation_geometry import FormationGeometry
 from simulator.map_generator import SimConfig
 from simulator.stratigraphy import sample_column
 
@@ -78,6 +79,7 @@ def generate_independent_boreholes(
     n_boreholes: int,
     variables: list[str],
     bank: DistributionBank,
+    geometry: FormationGeometry,
     sim_cfg: SimConfig,
     rng: np.random.Generator,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -99,7 +101,7 @@ def generate_independent_boreholes(
     rocks = np.empty((n_boreholes, nz), dtype=object)
     forms = np.empty((n_boreholes, nz), dtype=object)
     for i in range(n_boreholes):
-        col = sample_column(rng, max_depth=sim_cfg.max_depth)
+        col = sample_column(rng, geometry, max_depth=sim_cfg.max_depth)
         r, f = col.rasterise(depth_axis)
         rocks[i, :] = r
         forms[i, :] = f
@@ -389,6 +391,7 @@ def main() -> None:
 
     print(f"loading distributions: {args.distributions}")
     bank = DistributionBank.load(args.distributions)
+    geom = FormationGeometry.load("data/clean/formation_geometry.pkl")
     sim_cfg = SimConfig()
     rng = np.random.default_rng(args.seed)
 
@@ -397,6 +400,7 @@ def main() -> None:
         n_boreholes=args.n_boreholes,
         variables=variables,
         bank=bank,
+        geometry=geom,
         sim_cfg=sim_cfg,
         rng=rng,
     )

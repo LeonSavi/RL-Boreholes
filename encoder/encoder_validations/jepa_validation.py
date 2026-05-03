@@ -24,6 +24,7 @@ import torch
 
 from encoder.autoencoder import standardise
 from simulator.distributions import DistributionBank
+from simulator.formation_geometry import FormationGeometry
 from simulator.map_generator import SimConfig
 from simulator.stratigraphy import sample_column
 from encoder.jepa_encoder import load_jepa_checkpoint
@@ -34,7 +35,7 @@ from encoder.jepa_encoder import load_jepa_checkpoint
 # helper functions here.
 import sys
 sys.path.insert(0, str(Path(__file__).parent))
-from latent_validation import (
+from encoder.encoder_validations.latent_validation import (
     generate_independent_boreholes,
     compute_all_labels,
     reduce_to_2d,
@@ -83,6 +84,7 @@ def main() -> None:
 
     print(f"loading distributions: {args.distributions}")
     bank = DistributionBank.load(args.distributions)
+    geom = FormationGeometry.load("data/clean/formation_geometry.pkl")
     sim_cfg = SimConfig()
     rng = np.random.default_rng(args.seed)
 
@@ -91,6 +93,7 @@ def main() -> None:
         n_boreholes=args.n_boreholes,
         variables=variables,
         bank=bank,
+        geometry=geom,
         sim_cfg=sim_cfg,
         rng=rng,
     )

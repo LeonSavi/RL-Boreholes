@@ -4,8 +4,9 @@ Map generator — stage 1 end-to-end.
 Assembles:
   1. a 2D (n_x, n_y) field of stratigraphic columns (rock_type per depth),
      sampled from FormationGeometry (data-driven empirical distributions)
+     with per-cell Markov-chain facies inside each formation
   2. per-cell variable values sampled from DistributionBank, with lateral
-     smoothness via Gaussian random fields
+     and vertical smoothness via 3D Gaussian random fields
   3. a 3D ore-yield field with 0-3 ellipsoidal bodies, placed by
      rock-conditioned scoring against the DiscoveryPrior
 
@@ -27,7 +28,7 @@ from typing import Any
 
 import numpy as np
 
-from .distributions import DistributionBank, DiscoveryPrior
+from .distributions import DistributionBank, DiscoveryPrior, HARD_BOUNDS
 from .formation_geometry import FormationGeometry
 from .stratigraphy import sample_spatial_column_field, StratigraphicColumn
 from .orebody import sample_orebodies, OreBody
@@ -46,8 +47,15 @@ class SimConfig:
     )
 
     lateral_correlation_cells: float = 2.0
-    spatial_correlation_strength: float = 0.5
+    vertical_correlation_cells: float = 3.0  # 30m vertical correlation length
+    spatial_correlation_strength: float = 0.7 # smootheness across layers
     layer_waviness_m: float = 20.0
+
+    # ----- within-formation facies alternation -----
+    # Markov-chain persistence for per-cell rock type within a layer.
+    # 0.85 → average run length ~6.7 cells (~67m), matching typical
+    # bed-package thickness in Dutch sequences.
+    facies_persistence: float = 0.85
 
     # ----- ore-body parameters -----
     ore_depth_window: tuple[float, float] = (1600.0, 4400.0)
@@ -69,21 +77,7 @@ def generate_map(
     rng: np.random.Generator | None = None,
     prior: DiscoveryPrior | None = None,
 ) -> dict[str, Any]:
-    """Generate one map with full variables + 3D ore yield field.
-
-    Parameters
-    ----------
-    bank : DistributionBank
-        Fitted from NLOG+LILY data.
-    geometry : FormationGeometry
-        Empirical formation depth/thickness/facies (replaces DUTCH_COLUMN).
-    config : SimConfig
-        Map dimensions and variable list.
-    rng : np.random.Generator
-        Random state.
-    prior : DiscoveryPrior | None
-        Calibration prior for ore placement. If None → uniform-random ore.
-    """
+    """Generate one map with full variables + 3D ore yield field."""
     if config is None:
         config = SimConfig()
     if rng is None:
@@ -100,6 +94,8 @@ def generate_map(
         geometry=geometry,
         max_depth=config.max_depth,
         layer_waviness=config.layer_waviness_m,
+        cell_height=config.dz,
+        facies_persistence=config.facies_persistence,
     )
 
     rock_types = np.empty((nx, ny, nz), dtype=object)
@@ -118,7 +114,8 @@ def generate_map(
 
     noise_fields = _make_noise_fields(
         rng, nx, ny, nz, config.variables,
-        len_scale=config.lateral_correlation_cells,
+        lateral_len_scale=config.lateral_correlation_cells,
+        vertical_len_scale=config.vertical_correlation_cells,
     )
 
     for z_idx, depth in enumerate(depth_axis):
@@ -145,6 +142,8 @@ def generate_map(
                 smooth_baseline = mu + sigma * grf_values
                 alpha = config.spatial_correlation_strength
                 blended = alpha * smooth_baseline + (1 - alpha) * iid
+                lo, hi = HARD_BOUNDS.get(var, (-np.inf, np.inf))
+                blended = np.clip(blended, lo, hi)
                 variables_out[var][xs, ys, z_idx] = blended.astype(np.float32)
 
     # --- 3. 3D ore yield field --------------------------------------------
@@ -181,14 +180,18 @@ def _make_noise_fields(
     ny: int,
     nz: int,
     variables: tuple[str, ...],
-    len_scale: float,
+    lateral_len_scale: float,
+    vertical_len_scale: float,
 ) -> dict[str, np.ndarray]:
+    """Generate per-variable 3D anisotropic Gaussian random fields."""
     from scipy.ndimage import gaussian_filter
     out = {}
     for var in variables:
         raw = rng.normal(0, 1, size=(nx, ny, nz)).astype(np.float32)
-        for z in range(nz):
-            raw[:, :, z] = gaussian_filter(raw[:, :, z], sigma=len_scale)
+        raw = gaussian_filter(
+            raw,
+            sigma=(lateral_len_scale, lateral_len_scale, vertical_len_scale),
+        )
         std = raw.std()
         if std > 1e-6:
             raw /= std
@@ -202,10 +205,7 @@ def _bin_for(bank, depth: float) -> int:
 
 
 class MapGenerator:
-    """Stateful wrapper for streaming map generation.
-
-    Pass `prior` for rock-conditioned ore placement (recommended).
-    `geometry` is required — there's no longer a hand-coded fallback."""
+    """Stateful wrapper for streaming map generation."""
 
     def __init__(
         self,
