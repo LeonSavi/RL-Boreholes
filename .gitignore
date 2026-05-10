@@ -8,6 +8,8 @@ env/
 data/nlog/nlog_scrape/
 data/lily/*.csv
 data/clean/*.parquet
+
+decision_simulator/results/
 *.parquet
 *.las
 *.json
