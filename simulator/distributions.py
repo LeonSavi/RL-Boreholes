@@ -88,6 +88,10 @@ class CellDistribution:
     # joint observations.
     corr_matrix: np.ndarray | None = None
     corr_variables: list[str] = field(default_factory=list)
+    # Per-variable clipping bounds — overridden empirically at fit-time
+    # (Task 5a) and falling back to HARD_BOUNDS for variables we never
+    # observed enough of to set bounds for.
+    bounds: dict[str, tuple[float, float]] = field(default_factory=dict)
 
     def sample(self, n: int, rng: np.random.Generator) -> dict[str, np.ndarray]:
         """Draw n joint samples across variables.
@@ -130,7 +134,9 @@ class CellDistribution:
         return np.quantile(draws, u)
 
     def _clamp(self, var: str, values: np.ndarray) -> np.ndarray:
-        lo, hi = HARD_BOUNDS.get(var, (-np.inf, np.inf))
+        lo, hi = self.bounds.get(
+            var, HARD_BOUNDS.get(var, (-np.inf, np.inf))
+        )
         return np.clip(values, lo, hi)
 
 
@@ -142,6 +148,17 @@ class DistributionBank:
         self.depth_bins = depth_bins
         self.cells: dict[tuple[str, int], CellDistribution] = {}
         self.rock_types: list[str] = []
+        # [0.5%, 99.5%] empirical quantiles per variable, computed in fit()
+        # from the full real corpus (Task 5a).  Replaces HARD_BOUNDS at
+        # sampling time for variables present here; HARD_BOUNDS remains
+        # the fallback for variables without enough data.
+        self.empirical_bounds: dict[str, tuple[float, float]] = {}
+
+    def bounds_for(self, var: str) -> tuple[float, float]:
+        """Empirical bounds if fitted, otherwise HARD_BOUNDS, otherwise unbounded."""
+        return self.empirical_bounds.get(
+            var, HARD_BOUNDS.get(var, (-np.inf, np.inf))
+        )
 
     @classmethod
     def fit(
@@ -180,6 +197,27 @@ class DistributionBank:
         print(f"Fitting distributions over {len(bank.rock_types)} rock types, "
               f"{len(depth_bins)-1} depth bins, {len(variables)} variables")
 
+        # ---- Task 5a: empirical [0.5%, 99.5%] bounds per variable ----
+        # Computed once, from the FULL real corpus (after winsorising to
+        # HARD_BOUNDS so an upstream calibration glitch can't widen them).
+        # Variables whose real corpus is too sparse fall back to HARD_BOUNDS
+        # at sampling time via bank.bounds_for().
+        print("\nempirical variable bounds (Task 5a):")
+        for v in variables:
+            if v not in wide.columns:
+                continue
+            vals = wide[v].dropna().to_numpy()
+            hb_lo, hb_hi = HARD_BOUNDS.get(v, (-np.inf, np.inf))
+            vals = vals[(vals >= hb_lo) & (vals <= hb_hi)]
+            if len(vals) < 1000:
+                print(f"  {v:14s}  (only {len(vals):,} clean samples — fall back to HARD_BOUNDS)")
+                continue
+            lo = float(np.quantile(vals, 0.005))
+            hi = float(np.quantile(vals, 0.995))
+            bank.empirical_bounds[v] = (lo, hi)
+            print(f"  {v:14s}  empirical [{lo:>8.3f}, {hi:>8.3f}]   "
+                  f"hard [{hb_lo:>7.2f}, {hb_hi:>7.2f}]   n={len(vals):,}")
+
         import time
         total_cells = 0
         t_start = time.time()
@@ -194,7 +232,8 @@ class DistributionBank:
                     continue
                 t0 = time.time()
                 cell = cls._fit_cell(
-                    rock, lo, hi, list(variables), sub, kde_bandwidth
+                    rock, lo, hi, list(variables), sub, kde_bandwidth,
+                    bounds=bank.empirical_bounds,
                 )
                 dt = time.time() - t0
                 bank.cells[(rock, bin_idx)] = cell
@@ -215,6 +254,7 @@ class DistributionBank:
         variables: list[str],
         sub: pd.DataFrame,
         bandwidth,
+        bounds: dict[str, tuple[float, float]] | None = None,
     ) -> CellDistribution:
         cell = CellDistribution(
             rock_type=rock,
@@ -222,6 +262,7 @@ class DistributionBank:
             depth_hi=hi,
             variables=variables,
             n_samples=len(sub),
+            bounds=dict(bounds) if bounds else {},
         )
         # per-variable marginals.
         # Two-stage filtering before KDE fit:
@@ -454,7 +495,14 @@ class DistributionBank:
     @classmethod
     def load(cls, path: str | Path) -> "DistributionBank":
         with open(path, "rb") as f:
-            return pickle.load(f)
+            obj = pickle.load(f)
+        # backfill Task 5a attrs on older pickles
+        if not hasattr(obj, "empirical_bounds"):
+            obj.empirical_bounds = {}
+        for cell in obj.cells.values():
+            if not hasattr(cell, "bounds"):
+                cell.bounds = {}
+        return obj
 
     def summary(self) -> pd.DataFrame:
         """Tabular summary of fit coverage."""
