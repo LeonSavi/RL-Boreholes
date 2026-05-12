@@ -175,7 +175,7 @@ def stream_batches_from_dir(
     recompute_stats_n_maps: int | None = None,
 ) -> tuple[Iterator[torch.Tensor], dict, list[str]]:
     """Yield training batches from a directory produced by
-    generate_map_dataset.py.  Same shuffling discipline as
+    pull_maps.py.  Same shuffling discipline as
     stream_batches(): pool `maps_per_refill` maps, shuffle pooled
     boreholes, emit full-size batches, then refill.  Infinite stream —
     after a full pass through the dataset, the map order reshuffles.
@@ -196,7 +196,7 @@ def stream_batches_from_dir(
     if not map_files:
         raise RuntimeError(
             f"no boreholes_*.npy files in {dataset_dir} "
-            f"(did you run generate_map_dataset.py?)"
+            f"(did you run pull_maps.py?)"
         )
     print(f"  found {len(map_files):,} pre-generated maps in {dataset_dir}")
 
@@ -480,7 +480,7 @@ def train(
     use_dataset = dataset_dir is not None
     if use_dataset:
         # Pre-generated dataset path: stats and variables come from the
-        # dataset directory (saved by generate_map_dataset.py), then
+        # dataset directory (saved by pull_maps.py), then
         # refined from 100 sampled maps to tighten the standardisation
         # before training.  Bank / geom / prior aren't needed here.
         print(f"using pre-generated dataset at: {dataset_dir}")
@@ -676,7 +676,7 @@ def main():
                         "functions by cumulative and self time")
     p.add_argument("--dataset-dir", type=Path, default=Path("data/dataset"),
                    help="path to pre-generated dataset directory "
-                        "(produced by scripts/generate_map_dataset.py). "
+                        "(produced by pull_maps.py). "
                         "If set, skips online map generation and streams "
                         "saved boreholes from disk. Pass an empty string "
                         "('') to force online generation.")

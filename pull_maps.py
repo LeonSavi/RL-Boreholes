@@ -22,10 +22,9 @@ Each map is ~5 MB on disk (float16 of (1024, 6, 440)).  10 000 maps ≈ 50 GB.
 
 Usage
 -----
-    python scripts/generate_map_dataset.py \\
-        --out-dir data/dataset \\
-        --n-maps 10000 \\
-        --workers 12
+    python pull_maps.py
+    # or with explicit overrides
+    python pull_maps.py --out-dir data/dataset --n-maps 10000 --workers 16
 """
 from __future__ import annotations
 
@@ -39,7 +38,7 @@ from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from encoder.autoencoder import standardise
 from simulator.distributions import DistributionBank, DiscoveryPrior
@@ -85,11 +84,10 @@ def _generate_one(map_idx: int) -> tuple[int, float]:
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--out-dir", type=Path, required=True)
+    p.add_argument("--out-dir", type=Path, default=Path("data/dataset"))
     p.add_argument("--n-maps", type=int, default=10000)
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--workers", type=int,
-                   default=max(1, mp.cpu_count() - 2))
+    p.add_argument("--workers", type=int, default=16)
     p.add_argument("--n-stats-maps", type=int, default=10,
                    help="number of maps used to fit standardisation stats")
     p.add_argument("--bank", type=Path,

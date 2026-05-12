@@ -94,7 +94,7 @@ def train_jepa(
     use_dataset = dataset_dir is not None
     if use_dataset:
         # Pre-generated dataset path: stats and variables come from the
-        # dataset directory (saved by generate_map_dataset.py).  We skip
+        # dataset directory (saved by pull_maps.py).  We skip
         # loading the bank / geom / prior since no online generation
         # happens.
         print(f"using pre-generated dataset at: {dataset_dir}")
@@ -309,7 +309,7 @@ def main():
                         "functions by cumulative and self time")
     p.add_argument("--dataset-dir", type=Path, default=Path("data/dataset"),
                    help="read pre-generated maps from this directory (output "
-                        "of generate_map_dataset.py) instead of generating "
+                        "of pull_maps.py) instead of generating "
                         "online during training. Pass an empty string ('') "
                         "to force online generation.")
     p.add_argument("--min-maps-warmup", type=int, default=3500,

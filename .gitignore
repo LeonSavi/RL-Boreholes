@@ -29,3 +29,7 @@ data/clean/*.parquet
 # checkpoints/
 
 test.py
+
+*.npy
+
+.claude/
