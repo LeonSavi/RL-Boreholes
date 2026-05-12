@@ -53,6 +53,7 @@ import torch
 import torch.nn as nn
 
 
+
 @dataclass
 class JEPAConfig:
     n_variables: int

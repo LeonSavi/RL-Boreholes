@@ -243,9 +243,10 @@ class DistributionBank:
                       f"vars_corr={len(cell.corr_variables)}  "
                       f"({dt:.1f}s)")
 
+
         print(f"\nfitted {total_cells} cells in {time.time()-t_start:.0f}s")
         return bank
-
+ 
     @staticmethod
     def _fit_cell(
         rock: str,

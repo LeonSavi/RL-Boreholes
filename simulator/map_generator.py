@@ -35,6 +35,7 @@ from .stratigraphy import sample_spatial_column_field, StratigraphicColumn
 from .orebody import sample_orebodies, OreBody
 
 
+
 @dataclass
 class SimConfig:
     """Simulation parameters."""
@@ -42,7 +43,7 @@ class SimConfig:
     n_y: int = 32
     n_depth: int = 440          # 10 m per cell × 4400 m
     max_depth: float = 4400.0   # captures 90% of NLOG positive wells
-
+ 
     variables: tuple[str, ...] = (
         # pef removed: only 6% of NLOG wells log it, so the encoder spent
         # most of its capacity on a near-constant zero channel.

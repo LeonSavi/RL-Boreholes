@@ -110,6 +110,7 @@ def plot_map(
         ax.set_xlabel("x (cell)"); ax.set_ylabel("depth (m)")
         fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
 
+
     # --- row 2: map-view slices (shallow/mid/deep) -----------------------
     slice_depths = [depth_axis[nz // 6], depth_axis[nz // 2], depth_axis[-nz // 5]]
     slice_idxs = [nz // 6, nz // 2, nz - nz // 5]

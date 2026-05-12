@@ -195,7 +195,7 @@
     RV                    7
     RVVE                  6
     XX                    5
-
+ 
 ## Zechstein group-level codes (reclassified to 'other')
   these rows have only ZEZ1/ZEZ2/... (no H/A/C member suffix)
   so we cannot assign halite/anhydrite/carbonate safely

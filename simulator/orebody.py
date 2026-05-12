@@ -432,7 +432,8 @@ def sample_orebodies(
             body_built = True
             break
 
+
         if not body_built:
             continue
-
+ 
     return yield_field, bodies

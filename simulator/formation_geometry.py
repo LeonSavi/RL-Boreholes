@@ -447,10 +447,11 @@ class FormationGeometry:
               f"[{min_well_depth:.0f}, {max_well_depth:.0f}]m → "
               f"{n_in_window:,} wells")
 
+
         geom = cls(list(formation_order))
         geom.min_well_depth = min_well_depth
         geom.max_well_depth = max_well_depth
-
+ 
         # ---- Task 5b: cluster wells into basins via k-means on (x_rd, y_rd)
         # over the FULL NLOG corpus, so basin definitions are stable
         # regardless of the depth window used for combinations.

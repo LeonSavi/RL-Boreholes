@@ -32,10 +32,12 @@ from .formation_geometry import (
 )
 
 
+
 # Layer tuple shape: (formation, rocks, top, bot)
 #   formation : str
 #   rocks     : list[str]   one entry per source cell (cell_height = 10m)
 #   top, bot  : float       layer top and bottom in metres
+
 
 
 @dataclass
