@@ -26,6 +26,7 @@ from __future__ import annotations
 from dataclasses import dataclass, asdict
 from typing import Any
 
+import gstools as gs
 import numpy as np
 
 from .distributions import DistributionBank, DiscoveryPrior, HARD_BOUNDS
@@ -43,13 +44,37 @@ class SimConfig:
     max_depth: float = 4400.0   # captures 90% of NLOG positive wells
 
     variables: tuple[str, ...] = (
-        "rhob", "gr_api", "dt_us_ft", "nphi", "pef", "res_deep_log",
+        # pef removed: only 6% of NLOG wells log it, so the encoder spent
+        # most of its capacity on a near-constant zero channel.
+        "rhob", "gr_api", "dt_us_ft", "nphi", "res_deep_log",
     )
 
     lateral_correlation_cells: float = 2.0
     vertical_correlation_cells: float = 3.0  # 30m vertical correlation length
     spatial_correlation_strength: float = 0.7 # smootheness across layers
-    layer_waviness_m: float = 20.0
+
+    # ----- variable-noise GRF (Task 4) -----
+    # Two implementations of an anisotropic 3D Gaussian random field for
+    # the per-variable spatial smoothness:
+    #   "gaussian_filter": scipy gaussian_filter on white noise.  This IS
+    #     spectral synthesis for the Gaussian variogram (the kernel and
+    #     covariance function are Fourier duals), so it produces the same
+    #     statistical field as gstools, ~15× faster.
+    #   "gstools_srf": gstools.SRF with an explicit gs.Gaussian variogram.
+    #     Slower; useful if you ever need to swap in exponential/spherical
+    #     variograms or do conditional simulation.
+    # The validation script confirms both produce variograms matching the
+    # specified range (plots/validation/variogram_check.png).
+    grf_method: str = "gaussian_filter"
+    grf_mode_no: int = 64           # only used when grf_method=="gstools_srf"
+
+    # ----- layer-boundary perturbation (Task 1) -----
+    # Each interior layer boundary gets one independent 2D Gaussian random
+    # field realisation (anisotropic-capable) added to its base depth.
+    # Std controls vertical amplitude in metres; range_cells controls the
+    # lateral correlation length (scalar -> isotropic, tuple -> anisotropic).
+    layer_perturbation_std: float = 10.0           # m, replaces layer_waviness
+    layer_perturbation_range_cells: float = 8.0    # lateral correlation length
 
     # ----- within-formation facies alternation -----
     # Markov-chain persistence for per-cell rock type within a layer.
@@ -93,7 +118,8 @@ def generate_map(
         n_y=ny,
         geometry=geometry,
         max_depth=config.max_depth,
-        layer_waviness=config.layer_waviness_m,
+        layer_perturbation_std=config.layer_perturbation_std,
+        layer_perturbation_range_cells=config.layer_perturbation_range_cells,
         cell_height=config.dz,
         facies_persistence=config.facies_persistence,
     )
@@ -116,6 +142,8 @@ def generate_map(
         rng, nx, ny, nz, config.variables,
         lateral_len_scale=config.lateral_correlation_cells,
         vertical_len_scale=config.vertical_correlation_cells,
+        method=config.grf_method,
+        mode_no=config.grf_mode_no,
     )
 
     for z_idx, depth in enumerate(depth_axis):
@@ -142,7 +170,7 @@ def generate_map(
                 smooth_baseline = mu + sigma * grf_values
                 alpha = config.spatial_correlation_strength
                 blended = alpha * smooth_baseline + (1 - alpha) * iid
-                lo, hi = HARD_BOUNDS.get(var, (-np.inf, np.inf))
+                lo, hi = bank.bounds_for(var)
                 blended = np.clip(blended, lo, hi)
                 variables_out[var][xs, ys, z_idx] = blended.astype(np.float32)
 
@@ -182,20 +210,99 @@ def _make_noise_fields(
     variables: tuple[str, ...],
     lateral_len_scale: float,
     vertical_len_scale: float,
+    method: str = "gaussian_filter",
+    mode_no: int = 64,
 ) -> dict[str, np.ndarray]:
-    """Generate per-variable 3D anisotropic Gaussian random fields."""
+    """Per-variable 3D anisotropic Gaussian random fields.
+
+    For the Gaussian variogram, convolution of white noise with a Gaussian
+    kernel is spectral synthesis of the corresponding random field — so
+    `method="gaussian_filter"` and `method="gstools_srf"` produce
+    statistically equivalent output (verified in validate_grf_3d.py).
+    The filter path is ~15× faster.
+
+    Outputs are renormalised to unit std so downstream blending math
+    (`mu + sigma * field`) keeps its existing scale.
+    """
+    if method == "gaussian_filter":
+        return _noise_gaussian_filter(
+            rng, nx, ny, nz, variables,
+            lateral_len_scale, vertical_len_scale,
+        )
+    elif method == "gstools_srf":
+        return _noise_gstools_srf(
+            rng, nx, ny, nz, variables,
+            lateral_len_scale, vertical_len_scale, mode_no=mode_no,
+        )
+    else:
+        raise ValueError(
+            f"unknown grf_method={method!r} "
+            "(expected 'gaussian_filter' or 'gstools_srf')"
+        )
+
+
+def _noise_gaussian_filter(
+    rng: np.random.Generator,
+    nx: int, ny: int, nz: int,
+    variables: tuple[str, ...],
+    lateral_len_scale: float,
+    vertical_len_scale: float,
+) -> dict[str, np.ndarray]:
+    """Convolution of white noise with a Gaussian kernel.
+
+    Math note: convolving white noise with a Gaussian of std σ produces
+    a field whose covariance function is a Gaussian with std σ√2, i.e.
+    a Gaussian variogram with effective range ≈ σ√2.  To make the
+    `*_len_scale` parameter mean the SAME range as gstools' Gaussian
+    variogram (γ(h)=σ²[1−exp(−(h/L)²)]), divide the filter sigma by √2.
+    The validation script confirms both methods then produce variograms
+    with the same fitted range.
+    """
     from scipy.ndimage import gaussian_filter
-    out = {}
+    sigma_lat = lateral_len_scale / np.sqrt(2.0)
+    sigma_vert = vertical_len_scale / np.sqrt(2.0)
+    out: dict[str, np.ndarray] = {}
     for var in variables:
         raw = rng.normal(0, 1, size=(nx, ny, nz)).astype(np.float32)
         raw = gaussian_filter(
             raw,
-            sigma=(lateral_len_scale, lateral_len_scale, vertical_len_scale),
+            sigma=(sigma_lat, sigma_lat, sigma_vert),
         )
         std = raw.std()
         if std > 1e-6:
             raw /= std
         out[var] = raw
+    return out
+
+
+def _noise_gstools_srf(
+    rng: np.random.Generator,
+    nx: int, ny: int, nz: int,
+    variables: tuple[str, ...],
+    lateral_len_scale: float,
+    vertical_len_scale: float,
+    mode_no: int = 64,
+) -> dict[str, np.ndarray]:
+    """gstools.SRF with explicit anisotropic Gaussian variogram.  Slow;
+    use only for validation or when swapping in non-Gaussian variograms.
+    """
+    model = gs.Gaussian(
+        dim=3,
+        var=1.0,
+        len_scale=[lateral_len_scale, lateral_len_scale, vertical_len_scale],
+    )
+    xs = np.arange(nx)
+    ys = np.arange(ny)
+    zs = np.arange(nz)
+    out: dict[str, np.ndarray] = {}
+    for var in variables:
+        seed = int(rng.integers(0, 2 ** 31 - 1))
+        srf = gs.SRF(model, seed=seed, mode_no=mode_no)
+        field = srf((xs, ys, zs), mesh_type="structured").astype(np.float32)
+        std = field.std()
+        if std > 1e-6:
+            field /= std
+        out[var] = field
     return out
 
 

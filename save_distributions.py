@@ -19,8 +19,10 @@ OUTPUT_PRIOR       = "data/clean/discovery_prior.pkl"
 OUTPUT_GEOM        = "data/clean/formation_geometry.pkl"
 
 VARIABLES = [
-    "rhob", "gr_api", "dt_us_ft", "nphi", "pef", "res_deep_log",
+    "rhob", "gr_api", "dt_us_ft", "nphi", "res_deep_log",
     # dropped:
+    #   pef      — only 6% of wells have it; the encoder learned a
+    #              near-constant zero channel for the other 94%.
     #   msus_si  — LILY-only, no NLOG equivalent
     #   drho     — density-correction, tool-quality not rock physics
     #   sp_mv    — drilling-mud electrochemistry, well medians span 230 mV
