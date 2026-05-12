@@ -155,6 +155,20 @@ STRAT_UNIT_TO_FINE_ROCK = {
     "ZESAU":  "anhydrite",
     "ZESAL":  "anhydrite",
     "ZEUC":   "dolomite",          # Upper Carbonate
+    # NLOG member codes that were previously dropping to "other".  Defaults
+    # follow Zechstein cyclothem stratigraphy: W/T = Werra/transition salt
+    # (mostly halite), M/F = main anhydrite, S = stinkschiefer (organic
+    # shale), G/R = grey/red salt-clay, CP = Coppershale (Kupferschiefer).
+    "ZEZ1W":  "halite_pure",       # Werra salt — 71k rows
+    "ZEZ2M":  "anhydrite",         # Main Anhydrite (Hauptanhydrit)
+    "ZEZ1T":  "halite_pure",       # Z1 transition salt
+    "ZEZ1G":  "claystone",         # Z1 grey salt-clay
+    "ZEZ1F":  "anhydrite",         # Z1 (basal) anhydrite
+    "ZEZ1M":  "anhydrite",         # Z1 main anhydrite
+    "ZEZ1S":  "claystone_hot",     # Z1 stinkschiefer — organic-rich
+    "ZEZ4S":  "halite_pure",       # Z4 salt
+    "ZEZ4R":  "claystone",         # Z4 red salt-clay
+    "ZECP":   "claystone_hot",     # Coppershale (Kupferschiefer) — organic
 
     # ─── Buntsandstein (RB) — Triassic, continental sands + mud ─────
     "RBM":    "sandstone_shaly",   # Main Buntsandstein — fluvial, muddy
@@ -165,6 +179,12 @@ STRAT_UNIT_TO_FINE_ROCK = {
     "RBSHS":  "claystone_hot",
     "RBSHM":  "claystone_hot",     # seen in data: mean=92 API, hot
     "RBSHR":  "claystone_hot",     # seen in data: mean=94 API, hot
+    # Slochteren Sandstone members — Rotliegend gas reservoirs. Overwhelmingly
+    # clean despite the "RB" formation prefix (the muddy sister Bunter sits in
+    # RBM*); previously fell through to the bare "sandstone" residual class.
+    "RBSN":   "sandstone_clean",   # Slochteren upper
+    "RBSR":   "sandstone_clean",   # Slochteren lower
+    "RBSM":   "sandstone_clean",   # Slochteren middle
 
     # ─── Muschelkalk / Keuper (RN) — Triassic carbonates + clay ─────
     "RNRO":   "claystone",         # Röt Formation — mixed
@@ -856,14 +876,17 @@ def _read_details(folder: Path, report: PullReport) -> dict:
     if not data:
         return out
 
-    for xk in ("xCoord", "x", "easting", "xRd"):
+    # NLOG details.json actually stores RD coords under "xcoordRD"/"ycoordRD"
+    # (lowercase "coord", uppercase "RD"). The earlier guesses below remain
+    # as long-tail fallbacks for unusual files.
+    for xk in ("xcoordRD", "xCoordRd", "xCoord", "x", "easting", "xRd"):
         if xk in data and data[xk] is not None:
             try:
                 out["x_rd"] = float(data[xk])
                 break
             except (TypeError, ValueError):
                 pass
-    for yk in ("yCoord", "y", "northing", "yRd"):
+    for yk in ("ycoordRD", "yCoordRd", "yCoord", "y", "northing", "yRd"):
         if yk in data and data[yk] is not None:
             try:
                 out["y_rd"] = float(data[yk])
