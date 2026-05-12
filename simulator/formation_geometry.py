@@ -64,6 +64,18 @@ MAX_RESAMPLES = 20
 DEFAULT_CELL_HEIGHT = 10.0
 DEFAULT_FACIES_PERSISTENCE = 0.95
 DEFAULT_COMPOSITION_BLEND = 0.10  # weight on population average
+MIN_WELLS_FOR_PER_WELL_COMPOSITION = 10  # below this, use population avg only
+
+# Markov transition matrix fit (Task 2 — T-PROGS-style)
+TRANSITION_LAPLACE = 1e-3            # smoothing on rare pairs (avoid P=0)
+MIN_TRANSITIONS_FOR_FIT = 500        # below this, fall back to persistence
+TRANSITION_BIN_STEP_M = 10.0         # resample wells to this step before fit
+
+# Basin-aware stratification (Task 5b)
+MIN_WELLS_PER_BASIN_FOR_STRATIFICATION = 5  # tiny basins are dropped — a
+# basin with 1-2 wells in the pool would otherwise be picked 1/k of the
+# time under uniform basin sampling, which over-amplifies it instead of
+# correcting for the over-representation of dense basins.
 
 
 @dataclass
@@ -74,13 +86,37 @@ class FormationStats:
     thicknesses: np.ndarray
     facies: dict[str, float] = field(default_factory=dict)
     well_compositions: list[dict[str, float]] = field(default_factory=list)
+    # Task 2: empirical 1-step transition matrix at TRANSITION_BIN_STEP_M
+    # (rows = from-rock, cols = to-rock, Laplace-smoothed and row-normalised).
+    # None when fewer than MIN_TRANSITIONS_FOR_FIT observed transitions —
+    # the sampler then falls back to DEFAULT_FACIES_PERSISTENCE.
+    transition_matrix: pd.DataFrame | None = None
+    n_transitions: int = 0
     _top_kde: gaussian_kde | None = None
+    # cached arrays for fast sampling (rebuilt on demand)
+    _trans_rocks: list[str] | None = None
+    _trans_cumP: np.ndarray | None = None
 
     def sample_top_depth(self, rng: np.random.Generator) -> float:
         if self._top_kde is None:
             self._top_kde = gaussian_kde(self.top_depths)
         v = float(self._top_kde.resample(1, seed=rng)[0, 0])
         return max(v, 0.0)
+
+    def sample_thickness(self, rng: np.random.Generator) -> float:
+        """Sample a thickness from the empirical distribution.
+
+        Used by sample_column for the LAST formation in a combination,
+        which would otherwise extend all the way to max_depth and
+        produce unrealistic chain run lengths (DC issue).
+        """
+        if len(self.thicknesses) == 0:
+            return 100.0
+        # avoid heavy-tail extreme draws by sampling with replacement from
+        # the empirical pool — simpler and more robust than fitting a KDE
+        # on a positive-skewed distribution where a KDE would put mass
+        # below zero.
+        return float(rng.choice(self.thicknesses))
 
     def sample_well_composition(
         self,
@@ -95,8 +131,15 @@ class FormationStats:
         Default 0.10 keeps the picked well's flavour dominant while
         ensuring every facies has at least small probability of being
         sampled, so that 100%-one-facies wells don't lock the column.
+
+        Small-pool guard (Task 11): when fewer than
+        MIN_WELLS_FOR_PER_WELL_COMPOSITION wells are available, the
+        per-well draw becomes a coin flip on a tiny pool — one extreme
+        well can dominate.  In that regime we ignore the per-well
+        compositions and use the population marginal directly.
         """
-        if not self.well_compositions:
+        if (not self.well_compositions
+                or len(self.well_compositions) < MIN_WELLS_FOR_PER_WELL_COMPOSITION):
             return dict(self.facies) if self.facies else {"other": 1.0}
 
         idx = int(rng.integers(0, len(self.well_compositions)))
@@ -149,6 +192,74 @@ class FormationStats:
                 out.append(current)
         return out
 
+    def has_transition_matrix(self) -> bool:
+        return (self.transition_matrix is not None
+                and self.n_transitions >= MIN_TRANSITIONS_FOR_FIT)
+
+    def _ensure_transition_arrays(self) -> None:
+        """Cache numpy views for fast inverse-CDF sampling."""
+        if self._trans_rocks is not None and self._trans_cumP is not None:
+            return
+        if self.transition_matrix is None:
+            return
+        self._trans_rocks = list(self.transition_matrix.index)
+        P = self.transition_matrix.values.astype(np.float64)
+        self._trans_cumP = np.cumsum(P, axis=1)
+
+    def sample_rocks_with_matrix(
+        self,
+        rng: np.random.Generator,
+        n_cells: int,
+    ) -> list[str]:
+        """T-PROGS-style sampler driven by the fitted transition matrix.
+
+        Initial state is drawn from the empirical marginal (`facies`);
+        each subsequent cell uses inverse-CDF sampling on the row of
+        the transition matrix corresponding to the current state.
+        Falls back to sample_rocks_markov() if no matrix is attached.
+        """
+        if n_cells <= 0:
+            return []
+        if not self.has_transition_matrix():
+            return self.sample_rocks_markov(rng, n_cells)
+        self._ensure_transition_arrays()
+        rocks = self._trans_rocks
+        cumP = self._trans_cumP
+        R = len(rocks)
+
+        # initial state from the formation's empirical marginal (restricted
+        # to rocks in the matrix; uniform if facies missing or all zero).
+        init_p = np.array([self.facies.get(r, 0.0) for r in rocks],
+                          dtype=np.float64)
+        s = init_p.sum()
+        if s > 0:
+            init_p /= s
+        else:
+            init_p = np.full(R, 1.0 / R)
+
+        out_idx = np.empty(n_cells, dtype=np.int64)
+        out_idx[0] = int(rng.choice(R, p=init_p))
+        u = rng.random(n_cells - 1) if n_cells > 1 else np.empty(0)
+        for k in range(1, n_cells):
+            out_idx[k] = int(np.searchsorted(cumP[out_idx[k - 1]], u[k - 1]))
+            # clip in case of floating-point overshoot at u==1.0
+            if out_idx[k] >= R:
+                out_idx[k] = R - 1
+        return [rocks[i] for i in out_idx]
+
+    def mean_run_lengths(self) -> dict[str, float]:
+        """Expected run length per rock under the fitted transition matrix.
+
+        For a Markov chain with self-transition P(i→i)=p_ii, the run
+        length of state i is geometric with mean 1/(1 - p_ii).
+        """
+        if self.transition_matrix is None:
+            return {}
+        diag = np.diag(self.transition_matrix.values.astype(np.float64))
+        denom = np.clip(1.0 - diag, 1e-9, None)
+        run = 1.0 / denom
+        return dict(zip(self.transition_matrix.index, run.tolist()))
+
     @property
     def median_top(self) -> float:
         return float(np.median(self.top_depths))
@@ -156,6 +267,137 @@ class FormationStats:
     @property
     def median_thickness(self) -> float:
         return float(np.median(self.thicknesses))
+
+
+def _empirical_run_lengths(
+    df: pd.DataFrame,
+    rocks: list[str],
+    bin_step_m: float,
+) -> dict[str, float]:
+    """Mean within-well run length (in cells) for each rock at bin_step_m.
+
+    Used to calibrate the transition-matrix diagonal so the simulator
+    reproduces the *observed* run-length distribution rather than the
+    matrix's untruncated steady state — which can be much longer when
+    the within-formation/within-well sequence is short relative to the
+    chain's natural run length (DC and SL exhibit this).
+    """
+    out: dict[str, list[int]] = {r: [] for r in rocks}
+    work = df[["borehole", "depth", "rock_type_fine"]].copy()
+    work["rock_type_fine"] = work["rock_type_fine"].astype(str)
+    work = work[work["rock_type_fine"].isin(rocks)]
+    work = work.sort_values(["borehole", "depth"], kind="mergesort")
+    work["_bin"] = np.floor(work["depth"].to_numpy() / bin_step_m).astype(np.int64)
+    work = work.drop_duplicates(["borehole", "_bin"], keep="first")
+    for _, well_df in work.groupby("borehole"):
+        seq = well_df["rock_type_fine"].tolist()
+        if not seq:
+            continue
+        cur = seq[0]
+        n = 1
+        for r in seq[1:]:
+            if r == cur:
+                n += 1
+            else:
+                if cur in out:
+                    out[cur].append(n)
+                cur = r
+                n = 1
+        if cur in out:
+            out[cur].append(n)
+    return {r: float(np.mean(v)) if v else 1.5 for r, v in out.items()}
+
+
+def _fit_transition_matrix(
+    df: pd.DataFrame,
+    rock_set: set[str],
+    bin_step_m: float = TRANSITION_BIN_STEP_M,
+    laplace: float = TRANSITION_LAPLACE,
+    calibrate_to_empirical_runs: bool = True,
+    max_p_self: float = 0.998,
+) -> tuple[pd.DataFrame, int]:
+    """Fit a 1-step Markov transition matrix at the given depth step.
+
+    `df` must contain columns ['borehole', 'depth', 'rock_type_fine']
+    and be restricted to a single formation.  Per-well sequences are
+    resampled to `bin_step_m` (drop duplicates within each bin, keep
+    first); only contiguous (Δbin == 1) rock pairs contribute.  Laplace
+    smoothing avoids hard-zero transitions for rare pairs.
+
+    When `calibrate_to_empirical_runs=True` (default), each row's
+    diagonal is shrunk so that 1/(1−P[i,i]) matches the rock's
+    empirical mean run length in cells; the off-diagonal mass is
+    rescaled to keep the row stochastic.  This addresses the failure
+    mode where the raw within-well counts produce P_self ≈ 1 (because
+    empirical runs are truncated by well/formation boundaries rather
+    than internal transitions), causing the simulator to generate
+    untruncated chains that are unrealistically long.
+
+    Returns (P, n_transitions).
+    """
+    rocks = sorted(rock_set)
+    n = len(rocks)
+    if n == 0 or df.empty:
+        return pd.DataFrame(np.eye(max(n, 1)), index=rocks, columns=rocks), 0
+    idx = {r: i for i, r in enumerate(rocks)}
+    counts = np.zeros((n, n), dtype=np.float64)
+    n_obs = 0
+
+    # Vectorise per well: bin depths, drop dupes, shift to get pairs, count
+    # only where consecutive bins differ by exactly one step.
+    work = df[["borehole", "depth", "rock_type_fine"]].copy()
+    work["rock_type_fine"] = work["rock_type_fine"].astype(str)
+    work = work[work["rock_type_fine"].isin(idx)]
+    work = work.sort_values(["borehole", "depth"], kind="mergesort")
+    work["_bin"] = np.floor(work["depth"].to_numpy() / bin_step_m).astype(np.int64)
+    work = work.drop_duplicates(subset=["borehole", "_bin"], keep="first")
+    work["_prev_bin"] = work.groupby("borehole")["_bin"].shift(1)
+    work["_prev_rock"] = work.groupby("borehole")["rock_type_fine"].shift(1)
+    pairs = work.dropna(subset=["_prev_bin", "_prev_rock"])
+    pairs = pairs[pairs["_bin"] - pairs["_prev_bin"] == 1]
+    if not pairs.empty:
+        ij = pairs[["_prev_rock", "rock_type_fine"]].to_numpy()
+        for r_prev, r_cur in ij:
+            counts[idx[str(r_prev)], idx[str(r_cur)]] += 1
+        n_obs = int(len(pairs))
+
+    smoothed = counts + laplace
+    row_sums = smoothed.sum(axis=1, keepdims=True)
+    P = smoothed / row_sums
+
+    if calibrate_to_empirical_runs and n_obs > 0:
+        runs = _empirical_run_lengths(df, rocks, bin_step_m)
+        for i, r in enumerate(rocks):
+            target_p_self = 1.0 - 1.0 / max(runs[r], 1.5)
+            target_p_self = float(min(target_p_self, max_p_self))
+            current_p_self = float(P[i, i])
+            if current_p_self <= target_p_self:
+                continue
+            off_sum = 1.0 - current_p_self
+            if off_sum > 1e-12:
+                # rescale off-diagonal to sum to (1 - target_p_self),
+                # preserving its empirical relative shape.
+                scale = (1.0 - target_p_self) / off_sum
+                for j in range(n):
+                    if j != i:
+                        P[i, j] *= scale
+                P[i, i] = target_p_self
+            else:
+                # degenerate: no observed transitions out of this rock
+                # (e.g. SL claystone_cool).  Spread the deficit across
+                # the other rocks weighted by their marginal frequency
+                # within the formation.
+                marginal = counts.sum(axis=0) + laplace
+                marginal[i] = 0.0
+                if marginal.sum() > 0:
+                    marginal /= marginal.sum()
+                else:
+                    marginal = np.ones(n) / max(n - 1, 1)
+                    marginal[i] = 0.0
+                P[i, :] = marginal * (1.0 - target_p_self)
+                P[i, i] = target_p_self
+
+    return pd.DataFrame(P, index=rocks, columns=rocks), n_obs
 
 
 class FormationGeometry:
@@ -168,6 +410,15 @@ class FormationGeometry:
         self.n_wells_full_corpus: int = 0
         self.min_well_depth: float = DEFAULT_MIN_WELL_DEPTH
         self.max_well_depth: float = DEFAULT_MAX_WELL_DEPTH
+        # Task 5b: basin clusters derived from (x_rd, y_rd) on the full
+        # NLOG corpus.  combinations_by_basin[basin] is the same shape as
+        # `combinations` but restricted to wells in that cluster, used by
+        # sample_column() for stratified combination sampling.
+        self.basin_centers: np.ndarray | None = None
+        self.basin_labels_per_well: dict[str, int] = {}
+        self.combinations_by_basin: dict[
+            int, list[tuple[tuple[str, ...], int]]
+        ] = {}
 
     @classmethod
     def fit(
@@ -177,6 +428,8 @@ class FormationGeometry:
         min_well_depth: float = DEFAULT_MIN_WELL_DEPTH,
         max_well_depth: float = DEFAULT_MAX_WELL_DEPTH,
         require_surface: bool = True,
+        n_basins: int = 5,
+        basin_seed: int = 42,
     ) -> "FormationGeometry":
         df = pd.read_parquet(parquet_path)
         df = df[df["dataset"] == "NLOG"]
@@ -198,7 +451,32 @@ class FormationGeometry:
         geom.min_well_depth = min_well_depth
         geom.max_well_depth = max_well_depth
 
+        # ---- Task 5b: cluster wells into basins via k-means on (x_rd, y_rd)
+        # over the FULL NLOG corpus, so basin definitions are stable
+        # regardless of the depth window used for combinations.
+        if {"x_rd", "y_rd"}.issubset(df.columns):
+            from sklearn.cluster import KMeans
+            coords = (df.groupby("borehole")[["x_rd", "y_rd"]]
+                        .mean().dropna())
+            k = max(2, min(n_basins, len(coords)))
+            km = KMeans(n_clusters=k, random_state=basin_seed, n_init=10)
+            labels = km.fit_predict(coords.values)
+            geom.basin_centers = km.cluster_centers_
+            geom.basin_labels_per_well = dict(
+                zip(coords.index.astype(str).tolist(), labels.tolist())
+            )
+            counts = Counter(labels.tolist())
+            print(f"  basin k-means k={k} fit on {len(coords):,} wells: "
+                  + ", ".join(f"basin{b}={c}" for b, c in sorted(counts.items())))
+        else:
+            print("  (no x_rd/y_rd columns in parquet — basin clustering disabled)")
+
         combinations = Counter()
+        # combinations_per_basin[basin][combo] = count
+        from collections import defaultdict as _dd
+        combo_per_basin: dict[int, dict[tuple[str, ...], int]] = _dd(
+            lambda: _dd(int)
+        )
         n_kept = 0
         n_dropped_no_surface = 0
         for borehole, well_df in df_window.groupby("borehole"):
@@ -209,7 +487,11 @@ class FormationGeometry:
             if require_surface and valid[0] not in SURFACE_FORMATIONS:
                 n_dropped_no_surface += 1
                 continue
-            combinations[tuple(valid)] += 1
+            combo = tuple(valid)
+            combinations[combo] += 1
+            basin = geom.basin_labels_per_well.get(str(borehole))
+            if basin is not None:
+                combo_per_basin[int(basin)][combo] += 1
             n_kept += 1
 
         geom.n_wells_total = n_kept
@@ -219,6 +501,29 @@ class FormationGeometry:
         geom.combinations = sorted(
             combinations.items(), key=lambda kv: -kv[1]
         )
+        # drop basins below MIN_WELLS_PER_BASIN_FOR_STRATIFICATION (their
+        # uniform-sampling weight would over-amplify them); fall back to
+        # global frequency sampling if no basins survive.
+        kept = {
+            b: d for b, d in combo_per_basin.items()
+            if sum(d.values()) >= MIN_WELLS_PER_BASIN_FOR_STRATIFICATION
+        }
+        geom.combinations_by_basin = {
+            b: sorted(d.items(), key=lambda kv: -kv[1])
+            for b, d in kept.items()
+        }
+        for b in sorted(combo_per_basin):
+            n = sum(combo_per_basin[b].values())
+            note = "" if b in kept else f"  [dropped: < {MIN_WELLS_PER_BASIN_FOR_STRATIFICATION} wells]"
+            print(f"    basin {b}: {n} wells, "
+                  f"{len(combo_per_basin[b])} unique combos{note}")
+        n_unmapped = n_kept - sum(
+            sum(d.values()) for d in combo_per_basin.values()
+        )
+        if n_unmapped > 0:
+            print(f"    ({n_unmapped} pool wells lacked x_rd/y_rd, "
+                  "ignored for stratified sampling — they remain in the "
+                  "global combinations list as fallback)")
 
         n_full_corpus = df["borehole"].nunique()
         geom.n_wells_full_corpus = n_full_corpus
@@ -260,6 +565,11 @@ class FormationGeometry:
             facies = {str(r): float(c / facies_total)
                       for r, c in facies_counts.items()}
 
+            # Task 2: fit empirical transition matrix at TRANSITION_BIN_STEP_M
+            trans_matrix, n_trans = _fit_transition_matrix(
+                sub, rock_set=set(facies.keys()),
+            )
+
             geom.formations[fm] = FormationStats(
                 name=fm,
                 n_wells=len(tops),
@@ -267,13 +577,18 @@ class FormationGeometry:
                 thicknesses=thicks,
                 facies=facies,
                 well_compositions=well_compositions,
+                transition_matrix=trans_matrix,
+                n_transitions=n_trans,
             )
+            fit_mode = ("matrix" if n_trans >= MIN_TRANSITIONS_FOR_FIT
+                        else "persistence-fallback")
             print(f"  {fm:<4s}  n={len(tops):>4d}  "
                   f"top P5/50/95=[{np.percentile(tops, 5):>5.0f}, "
                   f"{np.percentile(tops, 50):>5.0f}, "
                   f"{np.percentile(tops, 95):>5.0f}]m  "
                   f"thk med={np.median(thicks):>5.0f}m  "
-                  f"compositions={len(well_compositions)}")
+                  f"compositions={len(well_compositions)}  "
+                  f"transitions={n_trans:,} ({fit_mode})")
 
         return geom
 
@@ -292,7 +607,18 @@ class FormationGeometry:
         if not self.combinations:
             raise RuntimeError("No combinations fit — call .fit() first")
 
-        combos, counts = zip(*self.combinations)
+        # Task 5b: when basin-stratified data is available, equalize basins
+        # first (uniform draw over basin labels), then sample within the
+        # basin weighted by combination frequency.  This mitigates bias
+        # from over-represented basins (e.g. Groningen) in the 139-well
+        # combination pool.  Falls back to global frequency sampling
+        # when no basin metadata was attached.
+        if self.combinations_by_basin:
+            basin_keys = sorted(self.combinations_by_basin.keys())
+            basin = basin_keys[int(rng.integers(0, len(basin_keys)))]
+            combos, counts = zip(*self.combinations_by_basin[basin])
+        else:
+            combos, counts = zip(*self.combinations)
         weights = np.array(counts, dtype=np.float64)
         weights /= weights.sum()
         idx = int(rng.choice(len(combos), p=weights))
@@ -305,12 +631,26 @@ class FormationGeometry:
         layers: list[tuple[str, list[str], float, float]] = []
         for i, fm in enumerate(combination):
             top = tops[i]
-            bot = tops[i + 1] if i + 1 < len(tops) else max_depth
             stats = self.formations.get(fm)
+            # The last formation extends all the way to max_depth: in real
+            # geology DC / basement do continue downward, even though many
+            # wells don't log that interval.  Calibration of the Markov
+            # diagonal (in _fit_transition_matrix) is what keeps run
+            # lengths realistic when the slice is long, NOT truncating
+            # the slice (which would leave large "other" gaps at the
+            # column bottom and make every map look geologically broken).
+            bot = tops[i + 1] if i + 1 < len(tops) else max_depth
             n_cells = max(1, int(np.ceil((bot - top) / cell_height)))
             if stats is None:
                 rocks = ["other"] * n_cells
+            elif stats.has_transition_matrix():
+                # T-PROGS-style: empirical transition matrix drives both
+                # marginals and run-length structure (Task 2).
+                rocks = stats.sample_rocks_with_matrix(rng, n_cells)
             else:
+                # Fallback for formations with too few observed transitions:
+                # per-well composition blended with population average, then
+                # uniform persistence Markov chain.
                 comp = stats.sample_well_composition(
                     rng, blend_with_population=composition_blend,
                 )
@@ -384,6 +724,10 @@ class FormationGeometry:
     def save(self, path: str | Path) -> None:
         for s in self.formations.values():
             s._top_kde = None
+            # Drop derived sampling caches — they're cheap to rebuild and
+            # bloat the pickle.  The matrix itself is kept.
+            s._trans_rocks = None
+            s._trans_cumP = None
         with open(path, "wb") as f:
             pickle.dump(self, f)
         print(f"Saved FormationGeometry to {path}")
@@ -396,6 +740,22 @@ class FormationGeometry:
         for s in obj.formations.values():
             if not hasattr(s, "well_compositions"):
                 s.well_compositions = []
+            # backfill Task 2 attrs when loading older pickles
+            if not hasattr(s, "transition_matrix"):
+                s.transition_matrix = None
+            if not hasattr(s, "n_transitions"):
+                s.n_transitions = 0
+            if not hasattr(s, "_trans_rocks"):
+                s._trans_rocks = None
+            if not hasattr(s, "_trans_cumP"):
+                s._trans_cumP = None
+        # backfill Task 5b basin attrs
+        if not hasattr(obj, "basin_centers"):
+            obj.basin_centers = None
+        if not hasattr(obj, "basin_labels_per_well"):
+            obj.basin_labels_per_well = {}
+        if not hasattr(obj, "combinations_by_basin"):
+            obj.combinations_by_basin = {}
         return obj
 
     def summary(self) -> pd.DataFrame:
