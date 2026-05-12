@@ -21,6 +21,8 @@ Module contents
 from __future__ import annotations
 
 from dataclasses import dataclass
+
+import gstools as gs
 import numpy as np
 
 from .formation_geometry import (
@@ -109,13 +111,52 @@ def sample_column(
     return StratigraphicColumn(layers=layers, cell_height=cell_height)
 
 
+def sample_layer_boundary_grf(
+    rng: np.random.Generator,
+    n_x: int,
+    n_y: int,
+    n_boundaries: int,
+    perturbation_std: float,
+    range_cells: float | tuple[float, float],
+) -> np.ndarray:
+    """Sample independent 2D Gaussian random fields, one per layer boundary.
+
+    Standard geostatistical practice for spatially correlated boundary
+    wiggle: a GRF with a Gaussian variogram of given variance and
+    lateral correlation length.  Returns a (n_boundaries, n_x, n_y)
+    array of perturbations in metres.
+
+    Parameters
+    ----------
+    range_cells :
+        Lateral correlation length, in cells.  Pass a scalar for an
+        isotropic field, or (rx, ry) for an anisotropic one.
+    """
+    if np.isscalar(range_cells):
+        len_scale = float(range_cells)
+    else:
+        len_scale = [float(r) for r in range_cells]
+    model = gs.Gaussian(dim=2, var=perturbation_std ** 2, len_scale=len_scale)
+    xs = np.arange(n_x)
+    ys = np.arange(n_y)
+    out = np.zeros((n_boundaries, n_x, n_y), dtype=np.float64)
+    for i in range(n_boundaries):
+        # independent realisation per boundary; derive deterministic seed
+        # from the outer RNG so the whole sample stream stays reproducible.
+        seed = int(rng.integers(0, 2 ** 31 - 1))
+        srf = gs.SRF(model, seed=seed)
+        out[i] = srf((xs, ys), mesh_type="structured")
+    return out
+
+
 def sample_spatial_column_field(
     rng: np.random.Generator,
     n_x: int,
     n_y: int,
     geometry: FormationGeometry,
     max_depth: float = 4400.0,
-    layer_waviness: float = 20.0,
+    layer_perturbation_std: float = 10.0,
+    layer_perturbation_range_cells: float | tuple[float, float] = 8.0,
     cell_height: float = DEFAULT_CELL_HEIGHT,
     facies_persistence: float = DEFAULT_FACIES_PERSISTENCE,
 ) -> list[list[StratigraphicColumn]]:
@@ -124,10 +165,13 @@ def sample_spatial_column_field(
 
     Strategy: pick a single base column, then perturb each layer-
     boundary depth spatially so neighbouring (x, y) cells have similar
-    but not identical layer depths. The base column's per-cell rock
-    list is reused for each (x, y); the rasteriser maps each depth into
-    that list, automatically stretching/compressing when the layer's
-    perturbed span differs from the base span.
+    but not identical layer depths.  The perturbation field is a 2D
+    Gaussian random field (anisotropic-capable) per boundary — the
+    geostatistical standard — replacing earlier sinusoidal wiggle.
+    The base column's per-cell rock list is reused for each (x, y);
+    the rasteriser maps each depth into that list, automatically
+    stretching/compressing when the layer's perturbed span differs
+    from the base span.
     """
     base = sample_column(
         rng, geometry, max_depth=max_depth,
@@ -135,15 +179,20 @@ def sample_spatial_column_field(
     )
     n_layers = len(base.layers)
 
+    # boundary 0 = top of column (always 0), boundary i (1..n_layers-1) =
+    # between layer i-1 and layer i, boundary n_layers = bottom (capped to
+    # max_depth).  Only the interior boundaries get perturbed.
     boundary_perturbations = np.zeros((n_layers + 1, n_x, n_y))
-    for i in range(1, n_layers):
-        kx = rng.uniform(0.05, 0.3)
-        ky = rng.uniform(0.05, 0.3)
-        phase = rng.uniform(0, 2 * np.pi)
-        ampl = rng.uniform(0.4, 1.0) * layer_waviness
-        xs = np.arange(n_x)[:, None]
-        ys = np.arange(n_y)[None, :]
-        boundary_perturbations[i] = ampl * np.sin(kx * xs + ky * ys + phase)
+    n_interior = max(0, n_layers - 1)
+    if n_interior > 0:
+        interior = sample_layer_boundary_grf(
+            rng=rng,
+            n_x=n_x, n_y=n_y,
+            n_boundaries=n_interior,
+            perturbation_std=layer_perturbation_std,
+            range_cells=layer_perturbation_range_cells,
+        )
+        boundary_perturbations[1:n_layers] = interior
 
     columns = []
     for x in range(n_x):
@@ -160,6 +209,10 @@ def sample_spatial_column_field(
                 new_layers.append((fm, rocks, current, perturbed_bot))
                 current = perturbed_bot
             if new_layers and current < max_depth:
+                # extend the deepest formation to fill the column — real
+                # geology continues to the basement even when well logs
+                # stop.  The calibrated transition matrix keeps run
+                # lengths realistic over this longer stretch.
                 fm, rocks, top, _ = new_layers[-1]
                 new_layers[-1] = (fm, rocks, top, max_depth)
             row.append(StratigraphicColumn(
