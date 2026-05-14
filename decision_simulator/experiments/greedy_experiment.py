@@ -1,93 +1,114 @@
 from __future__ import annotations
 
-import torch
-
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
+from sklearn.neighbors import KNeighborsRegressor
 
-from decision_simulator.config_decision_experiments import GreedyConfig, METHOD_GREEDY
+from simulator.map_generator import MapGenerator, SimConfig
+
+from decision_simulator.config_decision_experiments import GreedyConfig
 from decision_simulator.resources import DecisionSimulationResources
-from decision_simulator.pomdp.policies.greedy_policy import run_greedy_simulation
-from decision_simulator.utils.experiment_results import (
-    build_step_rows,
-    build_summary_row,
-    print_aggregate,
+from decision_simulator.pomdp.policies.greedy_policy import select_greedy_action
+from decision_simulator.pomdp.observations.borehole_observations import (
+    drill_at,
+    run_initial_random_drills,
 )
-from decision_simulator.utils.plotting import plot_trajectory
+from decision_simulator.typing import DrillObservation
 
 
-def run_many_greedy_experiments(
-    seeds: list[int],
+def run_greedy_simulation(
+    seed: int,
     cfg: GreedyConfig,
-    out_dir: Path,
     resources: DecisionSimulationResources,
-    device: str | None = None,
-) -> pd.DataFrame:
-    """Run the greedy simulation over many seeds and persist results.
-
-    Resources (JEPA model, simulator bank, geometry) are loaded once and
-    reused across seeds.
-
-    Writes
-    ------
-    out_dir/steps.parquet
-    out_dir/summary.parquet
-    out_dir/plots/trajectory_seed_{seed}.png
+    device: str,
+    verbose: bool = True,
+) -> tuple[list[dict], dict, str]:
+    """Generate one map and run the full greedy drilling loop.
 
     Returns
     -------
-    summary_df : pd.DataFrame  - one row per seed
+    observations : list[dict]  - one dict per drilled location
+    true_map     : dict        - full generated map (ground truth)
+    decision     : str         - "MINE" or "ABANDON"
     """
-    if device is None:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+    if verbose:
+        print(f"\nGenerating synthetic map (seed={seed})...")
+    sim_cfg = SimConfig()
+    gen = MapGenerator(
+        resources.distribution_bank,
+        resources.formation_geometry,
+        sim_cfg,
+        seed=seed,
+        prior=resources.discovery_prior,
+    )
+    true_map = next(gen)
 
-    (out_dir / "plots").mkdir(parents=True, exist_ok=True)
+    n_x, n_y = sim_cfg.n_x, sim_cfg.n_y
+    if verbose:
+        print(f"  map size  : {n_x}x{n_y}  ({n_x * n_y} candidate locations)")
+        print(f"  ore bodies: {len(true_map['bodies'])}")
 
-    all_step_rows: list[dict] = []
-    all_summary_rows: list[dict] = []
-    total_runs = len(seeds)
+    all_candidates: list[list[int, int]] = [
+        [i, j] for i in range(n_x) for j in range(n_y)
+    ]
+    rng = np.random.default_rng(seed)
 
-    for run_idx, seed in enumerate(seeds, start=1):
-        print(f"\n[{run_idx}/{total_runs}] seed={seed}", flush=True)
+    drill_kwargs = dict(
+        true_map=true_map,
+        resources=resources,
+        device=device,
+        verbose=verbose,
+    )
 
-        observations, true_map, decision = run_greedy_simulation(
-            seed=seed,
-            cfg=cfg,
-            resources=resources,
-            device=device,
-            verbose=False,
+    # Phase 1: initial random drilling
+    observations: list[DrillObservation]
+    observations, unvisited = run_initial_random_drills(
+        all_candidates, cfg.initial_random_drills, rng, drill_kwargs
+    )
+
+    # Phase 2: greedy selection
+    n_drills = cfg.drilling_budget - cfg.initial_random_drills
+    if verbose:
+        print(f"\nPhase 2 - greedy selection ({n_drills} drills)")
+
+    for step in range(cfg.initial_random_drills + 1, cfg.drilling_budget + 1):
+        obs_locs = np.array(
+            [[o["location"][0], o["location"][1]] for o in observations],
         )
+        obs_latents = np.array([o["latent"] for o in observations], dtype=np.float32)
+        obs_ores = np.array([o["ore_value"] for o in observations], dtype=np.float32)
 
-        best_ore = max(o["ore_value"] for o in observations)
-        print(f"  best_ore={best_ore:.4f}  decision={decision}")
+        X_train = np.concatenate([obs_locs, obs_latents], axis=1)  # (N_obs, 2+D_lat)
 
-        for obs in observations:
-            obs["decision"] = decision
+        k = min(cfg.k_neighbors, len(observations))
+        knn = KNeighborsRegressor(n_neighbors=k, weights="distance")
+        knn.fit(X_train, obs_ores)
 
-        all_step_rows.extend(
-            build_step_rows(seed, METHOD_GREEDY, cfg, observations, decision)
-        )
-        all_summary_rows.append(
-            build_summary_row(seed, METHOD_GREEDY, cfg, observations, true_map, decision)
-        )
-        plot_trajectory(
-            seed=seed,
-            method=METHOD_GREEDY,
-            observations=observations,
-            true_map=true_map,
-            out_dir=out_dir,
-        )
+        # Proxy latent: nearest observed borehole in (x, y) space
+        cand_locs = np.array(unvisited, dtype=np.float32)  # (N_u, 2)
+        spatial_dists = np.linalg.norm(
+            cand_locs[:, None, :] - obs_locs[None, :, :], axis=-1
+        )  # (N_u, N_obs)
+        nearest_idx = spatial_dists.argmin(axis=1)  # (N_u,)
+        proxy_latents = obs_latents[nearest_idx]  # (N_u, D_lat)
 
-    steps_df = pd.DataFrame(all_step_rows)
-    summary_df = pd.DataFrame(all_summary_rows)
+        X_cand = np.concatenate([cand_locs, proxy_latents], axis=1)  # (N_u, 2+D_lat)
+        preds = knn.predict(X_cand)  # (N_u,)
 
-    steps_path = out_dir / "steps.parquet"
-    summary_path = out_dir / "summary.parquet"
-    steps_df.to_parquet(steps_path, index=False)
-    summary_df.to_parquet(summary_path, index=False)
-    print(f"\nSaved {len(steps_df)} step rows    -> {steps_path}")
-    print(f"Saved {len(summary_df)} summary rows -> {summary_path}")
+        best_loc, best_pred = select_greedy_action(preds, unvisited)
 
-    print_aggregate(summary_df)
-    return summary_df
+        obs = drill_at(best_loc, step, pred_ore=best_pred, **drill_kwargs)
+        observations.append(obs)
+        unvisited.remove(best_loc)
+
+    # Decision
+    best_observed_ore = max(o["ore_value"] for o in observations)
+    decision = "MINE" if best_observed_ore >= cfg.mine_threshold else "ABANDON"
+
+    if verbose:
+        print(f"\nBest observed ore value: {best_observed_ore:.4f}")
+        print(f"Decision: {decision}")
+
+    return observations, true_map, decision

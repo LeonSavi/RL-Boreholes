@@ -207,6 +207,6 @@ def run_initial_random_drills(
         loc = all_candidate_borehole_coords[int(idx)]
         obs = drill_at(loc, step, **drill_kwargs)
         observations.append(obs)
-        drilled.add(loc)
-    unvisited = [c for c in all_candidate_borehole_coords if c not in drilled]
+        drilled.add(tuple(loc))
+    unvisited = [c for c in all_candidate_borehole_coords if tuple(c) not in drilled]
     return observations, unvisited

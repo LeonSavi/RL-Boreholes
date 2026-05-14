@@ -3,17 +3,11 @@ run_experiment.py - CLI entry point for drilling decision experiments.
 
 Usage
 -----
-    # greedy, single run (verbose, no files written)
-    python run_experiment.py --policy greedy --mode single --seed 42
+    # greedy experiment
+    python run_experiment.py --policy greedy --n-seeds 100
 
-    # greedy, multi-seed experiment
-    python run_experiment.py --policy greedy --mode many --n-seeds 100
-
-    # particle belief, single run
-    python run_experiment.py --policy particle_belief --mode single --seed 42
-
-    # particle belief, multi-seed experiment
-    python run_experiment.py --policy particle_belief --mode many --n-seeds 100
+    # particle belief experiment
+    python run_experiment.py --policy particle_belief --n-seeds 100
 """
 
 from __future__ import annotations
@@ -35,14 +29,11 @@ from decision_simulator.config_decision_experiments import (
     DISCOVERY_PRIOR,
 )
 from decision_simulator.resources import load_resources
-from decision_simulator.pomdp.policies.greedy_policy import run_greedy_simulation
-from decision_simulator.pomdp.policies.particle_belief_policy import (
+from decision_simulator.experiments.greedy_experiment import run_greedy_simulation
+from decision_simulator.experiments.particle_belief_experiment import (
     run_particle_belief_simulation,
 )
-from decision_simulator.experiments.greedy_experiment import run_many_greedy_experiments
-from decision_simulator.experiments.particle_belief_experiment import (
-    run_many_particle_belief_experiments,
-)
+from decision_simulator.experiment_caller import run_many_experiments
 
 
 def main() -> None:
@@ -54,19 +45,10 @@ def main() -> None:
         help="decision policy to run",
     )
     p.add_argument(
-        "--mode",
-        choices=["single", "many"],
-        default="single",
-        help="single: one seed (verbose); many: multi-seed experiment",
-    )
-    # single-run option
-    p.add_argument("--seed", type=int, default=42, help="seed for --mode single")
-    # multi-run option
-    p.add_argument(
         "--n-seeds",
         type=int,
         default=20,
-        help="number of seeds for --mode many (uses seeds 0..n-1)",
+        help="number of seeds to run (uses seeds 0..n-1)",
     )
     p.add_argument(
         "--out-dir",
@@ -97,40 +79,14 @@ def main() -> None:
     )
 
     dispatch = {
-        "greedy": {
-            "single": _run_greedy_single,
-            "many": _run_greedy_many,
-        },
-        "particle_belief": {
-            "single": _run_particle_belief_single,
-            "many": _run_particle_belief_many,
-        },
+        "greedy": _run_greedy,
+        "particle_belief": _run_particle_belief,
     }
 
-    dispatch[args.policy][args.mode](args, resources, device)
+    dispatch[args.policy](args, resources, device)
 
 
-# ---------------------------------------------------------------------------
-# Greedy
-# ---------------------------------------------------------------------------
-
-def _run_greedy_single(args, resources, device: str) -> None:
-    cfg = GreedyConfig(
-        drilling_budget=args.drilling_budget,
-        initial_random_drills=args.initial_random_drills,
-        mine_threshold=args.mine_threshold,
-        k_neighbors=args.k_neighbors,
-    )
-    run_greedy_simulation(
-        seed=args.seed,
-        cfg=cfg,
-        resources=resources,
-        device=device,
-        verbose=True,
-    )
-
-
-def _run_greedy_many(args, resources, device: str) -> None:
+def _run_greedy(args, resources, device: str) -> None:
     cfg = GreedyConfig(
         drilling_budget=args.drilling_budget,
         initial_random_drills=args.initial_random_drills,
@@ -138,37 +94,18 @@ def _run_greedy_many(args, resources, device: str) -> None:
         k_neighbors=args.k_neighbors,
     )
     out_dir = args.out_dir or (RESULTS_BASE / METHOD_GREEDY)
-    run_many_greedy_experiments(
+    run_many_experiments(
         seeds=list(range(args.n_seeds)),
         cfg=cfg,
         out_dir=out_dir,
         resources=resources,
         device=device,
+        method=METHOD_GREEDY,
+        simulation_fn=run_greedy_simulation,
     )
 
 
-# ---------------------------------------------------------------------------
-# Particle belief
-# ---------------------------------------------------------------------------
-
-def _run_particle_belief_single(args, resources, device: str) -> None:
-    cfg = ParticleBeliefConfig(
-        drilling_budget=args.drilling_budget,
-        initial_random_drills=args.initial_random_drills,
-        mine_threshold=args.mine_threshold,
-        n_particles=args.n_particles,
-        temperature=args.temperature,
-    )
-    run_particle_belief_simulation(
-        seed=args.seed,
-        cfg=cfg,
-        resources=resources,
-        device=device,
-        verbose=True,
-    )
-
-
-def _run_particle_belief_many(args, resources, device: str) -> None:
+def _run_particle_belief(args, resources, device: str) -> None:
     cfg = ParticleBeliefConfig(
         drilling_budget=args.drilling_budget,
         initial_random_drills=args.initial_random_drills,
@@ -177,12 +114,14 @@ def _run_particle_belief_many(args, resources, device: str) -> None:
         temperature=args.temperature,
     )
     out_dir = args.out_dir or (RESULTS_BASE / METHOD_PARTICLE_BELIEF)
-    run_many_particle_belief_experiments(
+    run_many_experiments(
         seeds=list(range(args.n_seeds)),
         cfg=cfg,
         out_dir=out_dir,
         resources=resources,
         device=device,
+        method=METHOD_PARTICLE_BELIEF,
+        simulation_fn=run_particle_belief_simulation,
     )
 
 

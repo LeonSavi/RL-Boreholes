@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-import torch
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
+
+from simulator.map_generator import MapGenerator, SimConfig
 
 from decision_simulator.config_decision_experiments import (
     ParticleBeliefConfig,
@@ -11,86 +13,102 @@ from decision_simulator.config_decision_experiments import (
 )
 from decision_simulator.resources import DecisionSimulationResources
 from decision_simulator.pomdp.policies.particle_belief_policy import (
-    run_particle_belief_simulation,
+    select_particle_belief_action,
 )
-from decision_simulator.utils.experiment_results import (
-    build_step_rows,
-    build_summary_row,
-    print_aggregate,
+from decision_simulator.pomdp.beliefs.particle_belief import (
+    sample_particles,
+    compute_particle_weights,
+    score_candidates_by_expected_ore,
 )
-from decision_simulator.utils.plotting import plot_trajectory
+from decision_simulator.pomdp.observations.borehole_observations import (
+    drill_at,
+    run_initial_random_drills,
+)
 
 
-def run_many_particle_belief_experiments(
-    seeds: list[int],
+def run_particle_belief_simulation(
+    seed: int,
     cfg: ParticleBeliefConfig,
-    out_dir: Path,
     resources: DecisionSimulationResources,
-    device: str | None = None,
-) -> pd.DataFrame:
-    """Run particle-belief simulation over many seeds and persist results.
-
-    Writes
-    ------
-    out_dir/steps.parquet
-    out_dir/summary.parquet
-    out_dir/plots/trajectory_seed_{seed}.png
+    device: str,
+    verbose: bool = True,
+) -> tuple[list[dict], dict, str]:
+    """Generate one true map and run particle-belief drilling.
 
     Returns
     -------
-    summary_df : pd.DataFrame  - one row per seed
+    observations : list[dict]
+    true_map     : dict
+    decision     : "MINE" | "ABANDON"
     """
-    if device is None:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+    if verbose:
+        print(f"\nGenerating synthetic map (seed={seed})...")
+    sim_cfg = SimConfig()
+    gen = MapGenerator(
+        resources.distribution_bank,
+        resources.formation_geometry,
+        sim_cfg,
+        seed=seed,
+        prior=resources.discovery_prior,
+    )
+    true_map = next(gen)
 
-    (out_dir / "plots").mkdir(parents=True, exist_ok=True)
+    n_x, n_y = sim_cfg.n_x, sim_cfg.n_y
+    if verbose:
+        print(f"  map size  : {n_x}x{n_y}  ({n_x * n_y} candidate locations)")
+        print(f"  ore bodies: {len(true_map['bodies'])}")
+        print(f"  sampling {cfg.n_particles} particles...")
 
-    all_step_rows: list[dict] = []
-    all_summary_rows: list[dict] = []
-    total_runs = len(seeds)
+    # Particle seeds offset to avoid overlapping with experiment seeds (0..999).
+    particles = sample_particles(
+        resources, sim_cfg, cfg.n_particles, seed=seed + 1_000_000
+    )
 
-    for run_idx, seed in enumerate(seeds, start=1):
-        print(f"\n[{run_idx}/{total_runs}] seed={seed}", flush=True)
+    # Potential state maps
+    particle_ore_maps = np.stack(
+        [p["yield_field"].max(axis=2) for p in particles]
+    )  # (n_particles, n_x, n_y)
 
-        observations, true_map, decision = run_particle_belief_simulation(
-            seed=seed,
-            cfg=cfg,
-            resources=resources,
-            device=device,
-            verbose=False,
+    all_candidate_borehole_coords: list[tuple[int, int]] = [
+        (i, j) for i in range(n_x) for j in range(n_y)
+    ]
+    rng = np.random.default_rng(seed)
+
+    drill_kwargs = dict(
+        true_map=true_map,
+        resources=resources,
+        device=device,
+        verbose=verbose,
+    )
+
+    # Phase 1: initial random drilling
+    observations, unvisited = run_initial_random_drills(
+        all_candidate_borehole_coords, cfg.initial_random_drills, rng, drill_kwargs
+    )
+
+    # Phase 2: particle belief selection
+    n_active = cfg.drilling_budget - cfg.initial_random_drills
+    if verbose:
+        print(f"\nPhase 2 - particle belief selection ({n_active} drills)")
+
+    for step in range(cfg.initial_random_drills + 1, cfg.drilling_budget + 1):
+        weights = compute_particle_weights(
+            particle_ore_maps, observations, cfg.temperature
         )
+        scores = score_candidates_by_expected_ore(particle_ore_maps, weights, unvisited)
 
-        best_ore = max(o["ore_value"] for o in observations)
-        print(f"  best_ore={best_ore:.4f}  decision={decision}")
+        best_loc, pred_ore = select_particle_belief_action(scores)
 
-        for obs in observations:
-            obs["decision"] = decision
+        obs = drill_at(best_loc, step, pred_ore=pred_ore, **drill_kwargs)
+        observations.append(obs)
+        unvisited.remove(best_loc)
 
-        all_step_rows.extend(
-            build_step_rows(seed, METHOD_PARTICLE_BELIEF, cfg, observations, decision)
-        )
-        all_summary_rows.append(
-            build_summary_row(
-                seed, METHOD_PARTICLE_BELIEF, cfg, observations, true_map, decision
-            )
-        )
-        plot_trajectory(
-            seed=seed,
-            method=METHOD_PARTICLE_BELIEF,
-            observations=observations,
-            true_map=true_map,
-            out_dir=out_dir,
-        )
+    # Decision
+    best_observed_ore = max(o["ore_value"] for o in observations)
+    decision = "MINE" if best_observed_ore >= cfg.mine_threshold else "ABANDON"
 
-    steps_df = pd.DataFrame(all_step_rows)
-    summary_df = pd.DataFrame(all_summary_rows)
+    if verbose:
+        print(f"\nBest observed ore value: {best_observed_ore:.4f}")
+        print(f"Decision: {decision}")
 
-    steps_path = out_dir / "steps.parquet"
-    summary_path = out_dir / "summary.parquet"
-    steps_df.to_parquet(steps_path, index=False)
-    summary_df.to_parquet(summary_path, index=False)
-    print(f"\nSaved {len(steps_df)} step rows    -> {steps_path}")
-    print(f"Saved {len(summary_df)} summary rows -> {summary_path}")
-
-    print_aggregate(summary_df)
-    return summary_df
+    return observations, true_map, decision
