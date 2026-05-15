@@ -83,11 +83,25 @@ def encode_full_latent_map(
 ) -> np.ndarray:
     """Encode every borehole in a map in one batched pass.
 
+    Encoder resolution order:
+      1. ``resources.borehole_encoder_fn`` if set
+      2. ``resources.jepa_model.embed`` as backward-compatible fallback
+      3. Neither set → return empty ``(n_x, n_y, 0)`` array (no-encoder mode)
+
     Returns
     -------
     np.ndarray of shape (n_x, n_y, latent_dim) float32
     """
     n_x, n_y = true_map["yield_field"].shape[:2]
+
+    encoder_fn = getattr(resources, "borehole_encoder_fn", None)
+    if encoder_fn is None:
+        jepa = getattr(resources, "jepa_model", None)
+        if jepa is not None:
+            encoder_fn = jepa.embed
+
+    if encoder_fn is None:
+        return np.zeros((n_x, n_y, 0), dtype=np.float32)
 
     boreholes: list[np.ndarray] = []
     for i in range(n_x):
@@ -102,7 +116,7 @@ def encode_full_latent_map(
     chunks: list[np.ndarray] = []
     for start in range(0, bh_arr.shape[0], batch_size):
         with torch.no_grad():
-            lat = resources.jepa_model.embed(bh_tensor[start : start + batch_size])
+            lat = encoder_fn(bh_tensor[start : start + batch_size])
         chunks.append(lat.cpu().numpy())
 
     latents = np.concatenate(chunks, axis=0)  # (n_x*n_y, latent_dim)

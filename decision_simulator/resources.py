@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable, Any
 
 from encoder.jepa_encoder import JEPAModel, load_jepa_checkpoint
 
@@ -28,12 +29,14 @@ class DecisionSimulationResources:
     Shared runtime resources used by decision-simulation experiments.
     """
 
-    jepa_model: JEPAModel
+    jepa_model: JEPAModel | None
     norm_stats: dict[str, tuple[float, float]]
     variable_names: list[str]
     distribution_bank: DistributionBank
     formation_geometry: FormationGeometry
     discovery_prior: DiscoveryPrior | None = None
+    # Explicit encoder callable; when None, falls back to jepa_model.embed.
+    borehole_encoder_fn: Callable[..., Any] | None = field(default=None, repr=False)
 
 
 def load_resources(

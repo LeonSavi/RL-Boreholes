@@ -4,10 +4,13 @@ import csv
 import dataclasses
 import json
 from pathlib import Path
+from typing import Literal
 
 import torch
 
-from decision_simulator.resources import load_resources
+from simulator.distributions import DiscoveryPrior, DistributionBank
+from simulator.formation_geometry import FormationGeometry
+from decision_simulator.resources import DecisionSimulationResources
 
 from .model import UNetBelief
 from .training import (
@@ -16,8 +19,9 @@ from .training import (
     train_neural_belief,
 )
 
-# Relative resource paths — resolved against storage_root at runtime.
-_JEPA_REL         = Path("checkpoints/jepa.pt")
+# Default resource paths, resolved against storage_root at runtime.
+_JEPA_REL          = Path("checkpoints/jepa.pt")
+_AE_REL            = Path("checkpoints/autoencoder.pt")
 _DISTRIBUTIONS_REL = Path("data/clean/distributions.pkl")
 _FORMATION_GEO_REL = Path("data/clean/formation_geometry.pkl")
 _DISCOVERY_REL     = Path("data/clean/discovery_prior.pkl")
@@ -28,7 +32,9 @@ def train_belief_from_colab(
     checkpoint_dir: str | Path,
     device: str = "cuda",
     debug: bool = False,
+    borehole_encoder: Literal["jepa", "autoencoder", "none"] = "jepa",
     jepa_checkpoint: str | Path | None = None,
+    autoencoder_checkpoint: str | Path | None = None,
     distribution_bank_path: str | Path | None = None,
     formation_geometry_path: str | Path | None = None,
     discovery_prior_path: str | Path | None = None,
@@ -39,23 +45,29 @@ def train_belief_from_colab(
     Example
     -------
     >>> from decision_simulator.neural_belief.colab import train_belief_from_colab
+
+    # JEPA encoder (default)
     >>> model, history = train_belief_from_colab(
     ...     storage_root="/content/drive/MyDrive/thesis",
-    ...     checkpoint_dir="checkpoints/belief_v1",
+    ...     checkpoint_dir="checkpoints/belief_jepa",
     ...     device="cuda",
     ...     debug=True,
     ... )
 
-    Override any NeuralBeliefTrainingConfig field via keyword arguments:
-
+    # Autoencoder
     >>> model, history = train_belief_from_colab(
     ...     storage_root="/content/drive/MyDrive/thesis",
-    ...     checkpoint_dir="checkpoints/belief_v1",
+    ...     checkpoint_dir="checkpoints/belief_autoencoder",
     ...     device="cuda",
-    ...     n_train_maps=100,
-    ...     samples_per_map=30,
-    ...     n_epochs=75,
-    ...     batch_size=32,
+    ...     borehole_encoder="autoencoder",
+    ... )
+
+    # No encoder (ore + mask only, in_channels=2)
+    >>> model, history = train_belief_from_colab(
+    ...     storage_root="/content/drive/MyDrive/thesis",
+    ...     checkpoint_dir="checkpoints/belief_none",
+    ...     device="cuda",
+    ...     borehole_encoder="none",
     ... )
 
     Parameters
@@ -74,9 +86,20 @@ def train_belief_from_colab(
     debug
         If True, use a minimal config (2 maps, 2 epochs, base_channels=16) to
         verify the full pipeline end-to-end without a full training run.
+    borehole_encoder
+        Which encoder provides latent embeddings per borehole:
+
+        ``"jepa"``        — JEPA encoder; ``in_channels = 2 + latent_dim``
+        ``"autoencoder"`` — 1-D CNN autoencoder; ``in_channels = 2 + latent_dim``
+        ``"none"``        — no encoder; input is ore + mask only, ``in_channels = 2``
     jepa_checkpoint
         Path to the JEPA ``.pt`` file.  Defaults to
-        ``<storage_root>/checkpoints/jepa.pt``.
+        ``<storage_root>/checkpoints/jepa.pt``.  Required when
+        ``borehole_encoder="jepa"``.
+    autoencoder_checkpoint
+        Path to the autoencoder ``.pt`` file.  Defaults to
+        ``<storage_root>/checkpoints/autoencoder.pt``.  Required when
+        ``borehole_encoder="autoencoder"``.
     distribution_bank_path
         Path to ``distributions.pkl``.  Defaults to
         ``<storage_root>/data/clean/distributions.pkl``.
@@ -90,6 +113,8 @@ def train_belief_from_colab(
     **overrides
         Any field of :class:`NeuralBeliefTrainingConfig` by name, e.g.
         ``n_epochs=75``.  Unknown field names raise ``ValueError``.
+        ``in_channels`` and ``latent_dim`` are set automatically from the
+        encoder type; explicit overrides take precedence.
 
     Returns
     -------
@@ -101,30 +126,36 @@ def train_belief_from_colab(
 
     root = Path(storage_root).expanduser().resolve()
 
-    jepa, distributions, formation_geo, discovery = _resolve_paths(
+    jepa_path, ae_path, distributions, formation_geo, discovery = _resolve_paths(
         root,
         jepa_checkpoint,
+        autoencoder_checkpoint,
         distribution_bank_path,
         formation_geometry_path,
         discovery_prior_path,
     )
-    _check_required_paths(jepa, distributions, formation_geo)
+    _check_encoder_path(borehole_encoder, jepa_path, ae_path)
+    _check_sim_paths(distributions, formation_geo)
 
     ckpt_dir = Path(checkpoint_dir)
     if not ckpt_dir.is_absolute():
         ckpt_dir = root / ckpt_dir
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
-    cfg = _build_config(debug, overrides)
-    print(f"\nTraining config:\n{cfg}\n")
-
-    resources = load_resources(
-        jepa_path=jepa,
-        distributions_path=distributions,
-        formation_geometry_path=formation_geo,
-        discovery_prior_path=discovery,
-        device=device,
+    resources, latent_dim = _load_encoder_resources(
+        borehole_encoder, jepa_path, ae_path,
+        distributions, formation_geo, discovery, device,
     )
+
+    # in_channels and latent_dim are derived from the encoder;
+    # explicit user overrides take precedence.
+    encoder_defaults = {"in_channels": 2 + latent_dim, "latent_dim": latent_dim}
+    cfg = _build_config(debug, {**encoder_defaults, **overrides})
+
+    print(f"\nborehole_encoder : {borehole_encoder}")
+    print(f"latent_dim       : {latent_dim}")
+    print(f"in_channels      : {cfg.in_channels}")
+    print(f"Training config  :\n{cfg}\n")
 
     model, _ = train_neural_belief(
         resources=resources,
@@ -144,28 +175,107 @@ def train_belief_from_colab(
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Resource loading
+# ---------------------------------------------------------------------------
+
+def _load_encoder_resources(
+    borehole_encoder: str,
+    jepa_path: Path,
+    ae_path: Path,
+    distributions: Path,
+    formation_geo: Path,
+    discovery: Path,
+    device: str,
+) -> tuple[DecisionSimulationResources, int]:
+    """Load simulator components and the requested borehole encoder.
+
+    Returns (resources, latent_dim).
+    """
+    distribution_bank = DistributionBank.load(distributions)
+    formation_geometry = FormationGeometry.load(formation_geo)
+    discovery_prior = DiscoveryPrior.load(discovery) if discovery.exists() else None
+
+    if borehole_encoder == "jepa":
+        from encoder.jepa_encoder import load_jepa_checkpoint
+        jepa_model, norm_stats, variable_names = load_jepa_checkpoint(jepa_path, device=device)
+        jepa_model.eval()
+        latent_dim: int = jepa_model.cfg.latent_dim
+        resources = DecisionSimulationResources(
+            jepa_model=jepa_model,
+            norm_stats=norm_stats,
+            variable_names=variable_names,
+            distribution_bank=distribution_bank,
+            formation_geometry=formation_geometry,
+            discovery_prior=discovery_prior,
+            # borehole_encoder_fn=None → encode_full_latent_map falls back to jepa_model.embed
+        )
+
+    elif borehole_encoder == "autoencoder":
+        from encoder.autoencoder import load_checkpoint as load_ae_checkpoint
+        ae_model, norm_stats, variable_names = load_ae_checkpoint(ae_path, device=device)
+        ae_model.eval()
+        latent_dim = ae_model.cfg.latent_dim
+        resources = DecisionSimulationResources(
+            jepa_model=None,
+            norm_stats=norm_stats,
+            variable_names=variable_names,
+            distribution_bank=distribution_bank,
+            formation_geometry=formation_geometry,
+            discovery_prior=discovery_prior,
+            borehole_encoder_fn=ae_model.encoder,  # BoreholeEncoder: (B,V,D) → (B,latent_dim)
+        )
+
+    else:  # "none"
+        latent_dim = 0
+        resources = DecisionSimulationResources(
+            jepa_model=None,
+            norm_stats={},
+            variable_names=[],
+            distribution_bank=distribution_bank,
+            formation_geometry=formation_geometry,
+            discovery_prior=discovery_prior,
+            # borehole_encoder_fn=None + jepa_model=None → returns (n_x, n_y, 0) latent map
+        )
+
+    return resources, latent_dim
+
+
+# ---------------------------------------------------------------------------
+# Path helpers
 # ---------------------------------------------------------------------------
 
 def _resolve_paths(
     root: Path,
     jepa_checkpoint: str | Path | None,
+    autoencoder_checkpoint: str | Path | None,
     distribution_bank_path: str | Path | None,
     formation_geometry_path: str | Path | None,
     discovery_prior_path: str | Path | None,
-) -> tuple[Path, Path, Path, Path]:
-    jepa         = Path(jepa_checkpoint)         if jepa_checkpoint         is not None else root / _JEPA_REL
-    distributions = Path(distribution_bank_path) if distribution_bank_path  is not None else root / _DISTRIBUTIONS_REL
-    formation_geo = Path(formation_geometry_path) if formation_geometry_path is not None else root / _FORMATION_GEO_REL
-    discovery     = Path(discovery_prior_path)    if discovery_prior_path    is not None else root / _DISCOVERY_REL
-    return jepa, distributions, formation_geo, discovery
+) -> tuple[Path, Path, Path, Path, Path]:
+    jepa          = Path(jepa_checkpoint)          if jepa_checkpoint          is not None else root / _JEPA_REL
+    ae            = Path(autoencoder_checkpoint)   if autoencoder_checkpoint   is not None else root / _AE_REL
+    distributions = Path(distribution_bank_path)   if distribution_bank_path   is not None else root / _DISTRIBUTIONS_REL
+    formation_geo = Path(formation_geometry_path)  if formation_geometry_path  is not None else root / _FORMATION_GEO_REL
+    discovery     = Path(discovery_prior_path)     if discovery_prior_path     is not None else root / _DISCOVERY_REL
+    return jepa, ae, distributions, formation_geo, discovery
 
 
-def _check_required_paths(jepa: Path, distributions: Path, formation_geo: Path) -> None:
-    for path in (jepa, distributions, formation_geo):
+def _check_encoder_path(borehole_encoder: str, jepa_path: Path, ae_path: Path) -> None:
+    if borehole_encoder == "jepa" and not jepa_path.exists():
+        raise FileNotFoundError(f"JEPA checkpoint not found: {jepa_path}")
+    if borehole_encoder == "autoencoder" and not ae_path.exists():
+        raise FileNotFoundError(f"Autoencoder checkpoint not found: {ae_path}")
+
+
+def _check_sim_paths(distributions: Path, formation_geo: Path) -> None:
+    for path in (distributions, formation_geo):
         if not path.exists():
             raise FileNotFoundError(f"Required resource not found: {path}")
 
+
+# ---------------------------------------------------------------------------
+# Config / device helpers
+# ---------------------------------------------------------------------------
 
 def _check_device(device: str) -> None:
     if device == "cuda":
@@ -206,6 +316,10 @@ def _build_config(debug: bool, overrides: dict) -> NeuralBeliefTrainingConfig:
 
     return cfg
 
+
+# ---------------------------------------------------------------------------
+# History export
+# ---------------------------------------------------------------------------
 
 def _export_history(history: list[dict], checkpoint_dir: Path) -> None:
     if not history:
