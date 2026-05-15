@@ -1319,3 +1319,192 @@ def plot_msus_by_rock_type_lily(df: pd.DataFrame, out_path: Path) -> None:
     fig.savefig(out_path, dpi=140, bbox_inches="tight")
     plt.close(fig)
     print(f"  wrote {out_path}")
+
+
+# ---------------------------------------------------------------------------
+# Thesis EDA additions — well location map (NLOG), expedition breakdown
+# (LILY), and variable availability per well.
+# ---------------------------------------------------------------------------
+
+def plot_nlog_well_map(df: pd.DataFrame, out_path: Path,
+                       geometry_pkl: Path | None = None) -> None:
+    """Scatter NLOG wells on Netherlands RD grid, coloured by basin (k-means
+    cluster from FormationGeometry) when available, falling back to
+    onshore/offshore. Provides a visual sanity check on basin stratification.
+    """
+    n = df[df["dataset"] == "NLOG"].drop_duplicates("borehole")
+    n = n.dropna(subset=["x_rd", "y_rd"])
+    if len(n) == 0:
+        print(f"  skip {out_path.name} — no NLOG coords")
+        return
+
+    fig, ax = plt.subplots(figsize=(8, 9))
+
+    basin_labels = None
+    if geometry_pkl is not None and Path(geometry_pkl).exists():
+        try:
+            import pickle as _pickle
+            with open(geometry_pkl, "rb") as f:
+                geom = _pickle.load(f)
+            mapping = getattr(geom, "basin_labels_per_well", None) or {}
+            basin_labels = n["borehole"].map(mapping)
+        except Exception:
+            basin_labels = None
+
+    if basin_labels is not None and basin_labels.notna().any():
+        cmap = plt.get_cmap("tab10")
+        labels = sorted(int(b) for b in basin_labels.dropna().unique())
+        for lab in labels:
+            sub = n[basin_labels == lab]
+            ax.scatter(sub["x_rd"] / 1000, sub["y_rd"] / 1000,
+                       s=14, alpha=0.75, color=cmap(lab % 10),
+                       edgecolor="black", linewidth=0.2,
+                       label=f"basin {lab}  (n={len(sub)})")
+        title_tail = f"by k-means basin (k={len(labels)})"
+    else:
+        for lt, col in [("onshore", "#33a02c"), ("offshore", "#1f78b4")]:
+            sub = n[n["location_type"] == lt]
+            if len(sub):
+                ax.scatter(sub["x_rd"] / 1000, sub["y_rd"] / 1000,
+                           s=14, alpha=0.75, color=col,
+                           edgecolor="black", linewidth=0.2,
+                           label=f"{lt}  (n={len(sub)})")
+        unset = n[n["location_type"].isna()]
+        if len(unset):
+            ax.scatter(unset["x_rd"] / 1000, unset["y_rd"] / 1000,
+                       s=14, alpha=0.55, color="#999999",
+                       edgecolor="black", linewidth=0.2,
+                       label=f"unset  (n={len(unset)})")
+        title_tail = "by location type"
+
+    ax.set_xlabel("x_RD (km)")
+    ax.set_ylabel("y_RD (km)")
+    ax.set_title(f"NLOG well locations — {len(n):,} wells, {title_tail}",
+                 fontweight="bold")
+    ax.set_aspect("equal", adjustable="datalim")
+    ax.grid(alpha=0.25)
+    ax.legend(fontsize=8, loc="best")
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=140, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  wrote {out_path}")
+
+
+def plot_lily_expeditions(df: pd.DataFrame, out_path: Path) -> None:
+    """Bar chart of LILY samples and wells grouped by IODP expedition number.
+
+    LILY borehole names follow the form "<EXP>-U<SITE>-<HOLE>", e.g.
+    "318-U1356-A".  We split on '-' and take the first chunk as expedition
+    number.  IODP expeditions correspond to coherent oceanographic regions
+    (318 = Wilkes Land, 329 = South Pacific Gyre, 336 = North Atlantic, …),
+    so the bar chart doubles as a rough regional breakdown.
+    """
+    l = df[df["dataset"] == "LILY"].copy()
+    if len(l) == 0:
+        print(f"  skip {out_path.name} — no LILY rows")
+        return
+    l["expedition"] = (l["borehole"].astype(str)
+                        .str.split("-", n=1).str[0])
+
+    agg = (l.groupby("expedition")
+             .agg(rows=("value", "size"),
+                  wells=("borehole", "nunique"))
+             .sort_values("rows", ascending=False))
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, max(4, 0.35 * len(agg))))
+    ax1.barh(range(len(agg)), agg["rows"].values,
+             color="#2166ac", alpha=0.8, edgecolor="black", linewidth=0.3)
+    ax1.set_yticks(range(len(agg)))
+    ax1.set_yticklabels(agg.index)
+    ax1.set_xlabel("samples (rows)")
+    ax1.set_xscale("log")
+    ax1.invert_yaxis()
+    ax1.set_title("LILY samples per IODP expedition", fontweight="bold")
+    ax1.grid(alpha=0.25)
+
+    ax2.barh(range(len(agg)), agg["wells"].values,
+             color="#762a83", alpha=0.8, edgecolor="black", linewidth=0.3)
+    ax2.set_yticks(range(len(agg)))
+    ax2.set_yticklabels(agg.index)
+    ax2.set_xlabel("wells")
+    ax2.invert_yaxis()
+    ax2.set_title("LILY wells per IODP expedition", fontweight="bold")
+    ax2.grid(alpha=0.25)
+
+    fig.suptitle(f"LILY breakdown — {len(l):,} samples across "
+                 f"{l['borehole'].nunique()} wells from "
+                 f"{len(agg)} IODP expeditions",
+                 fontweight="bold")
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
+    fig.savefig(out_path, dpi=140, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  wrote {out_path}")
+
+
+def plot_variable_availability(df: pd.DataFrame, out_path: Path,
+                               target_vars: tuple = ("rhob", "gr_api",
+                                                     "dt_us_ft", "nphi",
+                                                     "pef", "res_deep_log",
+                                                     )) -> None:
+    """Per-well availability of the candidate trained variables.
+
+    Two panels:
+    (a) Percentage of wells that log each variable, per dataset.  PEF in
+        particular is rare in NLOG (~6%), justifying its exclusion from
+        the encoder input.
+    (b) Cumulative distribution of "number of target variables present"
+        per well — how many wells have all 6, ≥4, ≥2, etc.
+    """
+    target = list(target_vars)
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5))
+
+    have_per_well = (df.groupby(["dataset", "borehole"])["measurement"]
+                       .apply(set)
+                       .reset_index(name="vars"))
+    bar_x = np.arange(len(target))
+    width = 0.4
+    for i, ds in enumerate(["NLOG", "LILY"]):
+        sub = have_per_well[have_per_well["dataset"] == ds]
+        if len(sub) == 0:
+            continue
+        pct = [100 * sub["vars"].apply(lambda s, v=v: v in s).mean()
+               for v in target]
+        ax1.bar(bar_x + (i - 0.5) * width, pct, width,
+                color=DATASET_COLOURS[ds], alpha=0.8,
+                edgecolor="black", linewidth=0.3,
+                label=f"{ds}  ({len(sub)} wells)")
+        for j, p in enumerate(pct):
+            ax1.text(bar_x[j] + (i - 0.5) * width, p + 1.5, f"{p:.0f}%",
+                     ha="center", fontsize=8)
+    ax1.set_xticks(bar_x)
+    ax1.set_xticklabels(target, rotation=30, ha="right")
+    ax1.set_ylabel("wells with variable (%)")
+    ax1.set_ylim(0, 110)
+    ax1.set_title("Per-well variable availability", fontweight="bold")
+    ax1.legend(fontsize=9)
+    ax1.grid(alpha=0.25, axis="y")
+    ax1.axhline(50, color="grey", lw=0.7, ls=":")
+    ax1.axhline(10, color="red", lw=0.7, ls=":")
+
+    nlog_wells = have_per_well[have_per_well["dataset"] == "NLOG"]
+    counts = nlog_wells["vars"].apply(lambda s: len(set(target) & s))
+    ks = list(range(len(target) + 1))
+    pcts = [100 * (counts >= k).mean() for k in ks]
+    ax2.bar(ks, pcts, color="#b2182b", alpha=0.8,
+            edgecolor="black", linewidth=0.3)
+    for k, p in zip(ks, pcts):
+        ax2.text(k, p + 1.5, f"{p:.0f}%", ha="center", fontsize=8)
+    ax2.set_xticks(ks)
+    ax2.set_xlabel("≥ k target variables")
+    ax2.set_ylabel("NLOG wells (%)")
+    ax2.set_ylim(0, 110)
+    ax2.set_title(f"NLOG wells with at least k of {len(target)} variables",
+                  fontweight="bold")
+    ax2.grid(alpha=0.25, axis="y")
+
+    fig.suptitle("Variable availability — justifies dropping PEF (in only ~6% of NLOG wells)",
+                 fontsize=12)
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
+    fig.savefig(out_path, dpi=140, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  wrote {out_path}")

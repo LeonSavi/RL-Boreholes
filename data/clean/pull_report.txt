@@ -20,17 +20,17 @@
     msus_si: depth out of range                              0
 
 ## NLOG — file-level (Tier 1)
-  wells scanned                              6,686
+  wells scanned                              6,680
     with LAS                                 2,072
-    with strat.json                          6,509
+    with strat.json                          6,508
     used                                     1,537
     feet-depth auto-converted                  428
-  rows written                           7,707,097
+  rows written                           7,710,488
 
 ## boreholes.xlsx (location + hc_result)
   rows read                                  6,698
   matched to NLOG folders                      717
-  unmatched NLOG folders                     1,349
+  unmatched NLOG folders                     1,350
   columns used:
     id               'Borehole name'
     x                'X Dutch National Grid'
@@ -42,7 +42,7 @@
     objective        'Borehole objective code'
 
 ## Location metadata (xlsx → details.json fallback)
-  coords missing                             1,349
+  coords missing                                 0
     offshore         wells=   716
     onshore          wells=     1
 
@@ -61,19 +61,19 @@
   unknown  = show | other | unlabelled
     positive   wells=   341
     negative   wells=   255
-    unknown    wells= 1,470
+    unknown    wells= 1,471
 
 ## Feature availability in NLOG output
-    rhob             wells=   997   rows= 1,027,884
-    gr_api           wells= 1,274   rows= 2,547,534
-    nphi             wells=   779   rows=   529,438
+    rhob             wells=   998   rows= 1,028,604
+    gr_api           wells= 1,274   rows= 2,548,763
+    nphi             wells=   780   rows=   530,158
     dt_us_ft         wells= 1,283   rows= 1,799,982
     pef              wells=    95   rows=    61,560
     cali_in          wells=   307   rows=   336,435
     sp_mv            wells=   187   rows=   196,162
     res_deep_log     wells=   345   rows=   313,452
     res_shal_log     wells=   216   rows=   165,064
-    drho             wells=   643   rows=   698,391
+    drho             wells=   644   rows=   699,113
     vsh              wells=    16   rows=    13,816
     vcl              wells=    16   rows=     2,245
     vsnd             wells=     6   rows=        20
@@ -115,11 +115,11 @@
 
 ## NLOG formation hits (interval count)
     ZE        7,535
-    KN        4,575
+    KN        4,579
     RN        3,684
-    RB        2,921
+    RB        2,923
     NL        2,774
-    CK        2,431
+    CK        2,432
     RO        1,791
     NU        1,328
     NM          909
@@ -130,22 +130,22 @@
     SK          129
 
 ## Sub-unit (stratUnitId) hits — mapped
-    CKGR       → chalk           597,115
-    KNNC       → claystone       150,023
+    CKGR       → chalk           597,229
+    KNNC       → claystone       150,355
     NLFFY      → clay            128,131
     ZEZ2H      → halite_pure     124,514
     RBSHM      → claystone_hot     73,533
-    KNGLU      → claystone_cool     71,865
+    KNGLU      → claystone_cool     71,923
     ATAL       → claystone_hot     64,435
     ZESA       → anhydrite        60,864
     NUOT       → clay             56,360
     RBSHR      → claystone_hot     55,914
     ROSL       → sandstone_clean     49,928
     ZEZ3H      → halite_pure      48,397
-    CKTX       → chalk            43,241
+    CKTX       → chalk            43,406
     NUBA       → clay             34,612
     ROCL       → claystone_hot     32,126
-    KNGLL      → claystone_cool     31,184
+    KNGLL      → claystone_cool     31,356
     SLDNA      → claystone_cool     28,924
     ROSLU      → sandstone_clean     28,698
     NLFFC      → clay             25,290
@@ -154,20 +154,19 @@
     NUMS       → clay             23,607
     RNMUL      → dolomite         22,827
     ZESAL      → anhydrite        22,742
+    ZEZ1W      → halite_pure      22,553
     ROSLL      → sandstone_clean     21,963
-    KNGLM      → claystone_cool     21,817
+    KNGLM      → claystone_cool     21,943
     RBMVL      → sandstone_shaly     21,724
     NLFFS      → clay             21,001
     NLLFC      → clay             19,326
-    RBSH       → claystone_hot     18,663
 
 ## Sub-unit codes NOT in dictionary (fell back to formation)
-  total rows affected: 541,261
+  total rows affected: 499,976
     NU            224,533
     NL             33,359
     ZE             30,467
     CK             30,403
-    ZEZ1W          22,553
     DC             16,231
     NM             13,229
     DCCB            5,152
@@ -182,7 +181,8 @@
     SLDB            3,702
     SGSKN           3,282
     DCC             3,203
-    ZEZ2M           2,890
+    SLCM            2,804
+    SGGS            2,771
 
 ## Strat 2-char prefixes not in NLOG_FORMATIONS (dropped)
     N                   491
@@ -195,26 +195,26 @@
     RV                    7
     RVVE                  6
     XX                    5
-
+ 
 ## Zechstein group-level codes (reclassified to 'other')
   these rows have only ZEZ1/ZEZ2/... (no H/A/C member suffix)
   so we cannot assign halite/anhydrite/carbonate safely
-  total rows affected: 92,989
+  total rows affected: 52,607
     ZE             30,467
-    ZEZ1W          22,553
     ZEZ3            4,920
     ZEZ2            4,826
     ZEZ1            3,926
-    ZEZ2M           2,890
     ZEZ4            2,506
-    ZEZ1G           2,337
-    ZEZ1T           2,307
-    ZEZ1M           2,207
-    ZEZ1F           2,154
-    ZEZ4R           1,918
-    ZEZ4S           1,579
-    ZECP            1,312
-    ZEZ1S           1,125
+    ZEZ3G           1,056
+    ZEZ2T           1,010
+    ZEZ1K             963
+    ZEZ3B             919
+    ZEZ2S             806
+    ZEZ5              252
+    ZEZ3U             249
+    ZEZ3S             233
+    ZEUN              170
+    ZEZ2R             112
 
 ## Curves seen in NLOG LAS files (top 25)
     GR               1299
@@ -222,7 +222,7 @@
     RHOB             1023
     NPHI              868
     DRHO              657
-    SON               464
+    SON               465
     DEPT:2            422
     CALI              290
     ILD               240
@@ -270,7 +270,7 @@
   large depth gaps flagged                       1
 
   implausible gradients (dropped):
-    rhob                223,918
+    rhob                223,947
     gr_api                    0
     nphi                      0
     dt_us_ft            677,556
@@ -324,7 +324,7 @@
         330-U1375-B
         336-U1382-A
         336-U1383-C
-    NLOG/drho              (28 wells)
+    NLOG/drho              (27 wells)
         ALE-01
         BER-02
         BOZ-01
@@ -342,7 +342,7 @@
         F03-FB-103-S1
         G13-03-S1
         MOL-02-S2
-    NLOG/nphi              (17 wells)
+    NLOG/nphi              (18 wells)
         A08-01
         ALE-01
         B13-03

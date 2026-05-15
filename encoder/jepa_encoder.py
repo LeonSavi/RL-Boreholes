@@ -53,6 +53,7 @@ import torch
 import torch.nn as nn
 
 
+
 @dataclass
 class JEPAConfig:
     n_variables: int
@@ -163,9 +164,15 @@ class LatentPredictor(nn.Module):
         super().__init__()
         self.cfg = cfg
         d = cfg.latent_dim
+        self.n_total_tokens = max(1, cfg.n_depth // (2 ** len(cfg.channels)))
         # learnable mask token that stands in for target-position inputs
         self.mask_token = nn.Parameter(torch.zeros(1, 1, d))
         nn.init.trunc_normal_(self.mask_token, std=0.02)
+        # cache sinusoidal position embedding once — constant, deterministic
+        # from cfg.  persistent=False keeps it out of state_dict (no need to
+        # save derived data; lets old checkpoints load against new code too).
+        pe = sinusoidal_position_embedding(self.n_total_tokens, d, torch.device("cpu"))
+        self.register_buffer("pos_emb", pe, persistent=False)
         # transformer encoder layers
         layer = nn.TransformerEncoderLayer(
             d_model=d,
@@ -182,29 +189,19 @@ class LatentPredictor(nn.Module):
         context_tokens: torch.Tensor,      # (B, T_ctx, D)
         context_positions: torch.Tensor,   # (B, T_ctx) indices into full seq
         target_positions: torch.Tensor,    # (B, T_tgt) indices into full seq
-        n_total_tokens: int,
     ) -> torch.Tensor:
         B, T_ctx, D = context_tokens.shape
         T_tgt = target_positions.size(1)
+        pos_emb = self.pos_emb                                    # (T, D)
 
-        device = context_tokens.device
-        pos_emb = sinusoidal_position_embedding(n_total_tokens, D, device)  # (T, D)
-
-        # add positions to context tokens
-        ctx_pe = pos_emb[context_positions]                      # (B, T_ctx, D)
-        ctx_input = context_tokens + ctx_pe
-
-        # build target-position mask tokens and add positions
-        mask = self.mask_token.expand(B, T_tgt, D)               # (B, T_tgt, D)
-        tgt_pe = pos_emb[target_positions]                       # (B, T_tgt, D)
-        tgt_input = mask + tgt_pe
+        # add positions (advanced-indexing fetch is one kernel)
+        ctx_input = context_tokens + pos_emb[context_positions]   # (B, T_ctx, D)
+        tgt_input = self.mask_token + pos_emb[target_positions]   # broadcasts to (B, T_tgt, D)
 
         # concatenate and run transformer
-        seq = torch.cat([ctx_input, tgt_input], dim=1)           # (B, T_ctx+T_tgt, D)
-        out = self.transformer(seq)                              # (B, T_ctx+T_tgt, D)
-
-        # return only the target-position outputs
-        return out[:, T_ctx:, :]                                 # (B, T_tgt, D)
+        seq = torch.cat([ctx_input, tgt_input], dim=1)            # (B, T_ctx+T_tgt, D)
+        out = self.transformer(seq)
+        return out[:, T_ctx:, :]                                  # (B, T_tgt, D)
 
 
 class JEPAModel(nn.Module):
@@ -231,38 +228,42 @@ class JEPAModel(nn.Module):
 
     @torch.no_grad()
     def ema_update(self) -> None:
-        """Update target encoder via EMA of the context encoder."""
-        m = self.cfg.ema_momentum
-        for tgt_p, ctx_p in zip(self.target_encoder.parameters(),
-                                 self.context_encoder.parameters()):
-            tgt_p.data.mul_(m).add_(ctx_p.data, alpha=1.0 - m)
+        """Update target encoder via EMA of the context encoder.
+
+        Fused via torch._foreach_lerp_ — one launched op covers all
+        parameters at once, replacing the per-parameter Python loop.
+        target = m*target + (1-m)*context  ==  lerp(target, context, 1-m)
+        """
+        target_params = list(self.target_encoder.parameters())
+        context_params = list(self.context_encoder.parameters())
+        torch._foreach_lerp_(target_params, context_params, 1.0 - self.cfg.ema_momentum)
 
     def forward(
         self,
         x_full: torch.Tensor,             # (B, V, D) full borehole
-        context_token_mask: torch.Tensor, # (B, T) bool: True where token is CONTEXT
-        target_token_mask: torch.Tensor,  # (B, T) bool: True where token is TARGET
+        context_positions: torch.Tensor,  # (B, T_ctx) long: token indices used as context
+        target_positions: torch.Tensor,   # (B, T_tgt) long: token indices to predict
     ) -> torch.Tensor:
         """Compute JEPA training loss.
 
-        Both masks operate on the DOWN-SAMPLED token sequence (length T =
-        n_depth / 2^n_pools). The masks define which tokens are used as
-        context input and which are the prediction targets.
-
-        For encoder input we zero out the target region in the RAW
-        borehole (so the encoder can't peek at it), then encode.
+        The sampler returns explicit token indices (not boolean masks) so
+        we never need torch.nonzero or .item() syncs at training time.
+        For encoder input we still zero out the target depth range in the
+        RAW borehole (so the encoder can't peek at it).
         """
         B, V, D = x_full.shape
         T = self.context_encoder.n_tokens
-        assert context_token_mask.shape == (B, T)
-        assert target_token_mask.shape == (B, T)
+        D_lat = self.cfg.latent_dim
 
-        # --- mask the raw input before giving it to the context encoder ---
-        # expand target_token_mask from (B, T) back to (B, D) so we can
-        # zero out the corresponding raw depth positions.
+        # rebuild a (B, T) bool target-token mask from positions via scatter —
+        # vectorized, no host-device sync.
+        target_token_mask = torch.zeros(B, T, dtype=torch.bool, device=x_full.device)
+        target_token_mask.scatter_(1, target_positions, True)
+
+        # expand target token mask to depth resolution and zero the raw input
+        # in the target region before handing it to the context encoder.
         scale = D // T
         depth_mask_target = target_token_mask.repeat_interleave(scale, dim=1)
-        # ensure shape matches (pad or clip if D/T isn't exact)
         if depth_mask_target.size(1) != D:
             if depth_mask_target.size(1) < D:
                 pad = D - depth_mask_target.size(1)
@@ -270,53 +271,25 @@ class JEPAModel(nn.Module):
                     depth_mask_target, (0, pad), value=False)
             else:
                 depth_mask_target = depth_mask_target[:, :D]
+        x_context_input = x_full.masked_fill(depth_mask_target.unsqueeze(1), 0.0)
 
-        x_context_input = x_full.clone()
-        x_context_input[depth_mask_target.unsqueeze(1).expand_as(x_full)] = 0.0
-
-        # --- encode context and targets ---
-        # context encoder sees masked input, produces token sequence
+        # encode context (gradient) and target (stopgrad)
         ctx_tokens_full = self.context_encoder(x_context_input)  # (B, T, D_lat)
-
-        # target encoder sees UNMASKED input; we stopgrad
         with torch.no_grad():
             tgt_tokens_full = self.target_encoder(x_full)        # (B, T, D_lat)
 
-        # --- gather per-sample context and target token subsets ---
-        # We assume the same number of context / target tokens per sample
-        # (enforced by the sampler). Use indexing via mask.
-        # Result tensors are (B, T_ctx, D_lat) and (B, T_tgt, D_lat).
-        T_ctx = context_token_mask.sum(dim=1).min().item()
-        T_tgt = target_token_mask.sum(dim=1).min().item()
+        # vectorized gather of per-sample context / target tokens by position
+        ctx_tokens = ctx_tokens_full.gather(
+            1, context_positions.unsqueeze(-1).expand(-1, -1, D_lat))
+        tgt_tokens = tgt_tokens_full.gather(
+            1, target_positions.unsqueeze(-1).expand(-1, -1, D_lat))
 
-        context_positions = torch.zeros(B, T_ctx, dtype=torch.long,
-                                         device=x_full.device)
-        target_positions = torch.zeros(B, T_tgt, dtype=torch.long,
-                                        device=x_full.device)
-        ctx_tokens = torch.zeros(B, T_ctx, self.cfg.latent_dim,
-                                  device=x_full.device)
-        tgt_tokens = torch.zeros(B, T_tgt, self.cfg.latent_dim,
-                                  device=x_full.device)
-
-        for b in range(B):
-            ctx_idx = torch.nonzero(context_token_mask[b], as_tuple=False).squeeze(1)[:T_ctx]
-            tgt_idx = torch.nonzero(target_token_mask[b], as_tuple=False).squeeze(1)[:T_tgt]
-            context_positions[b] = ctx_idx
-            target_positions[b]  = tgt_idx
-            ctx_tokens[b] = ctx_tokens_full[b, ctx_idx]
-            tgt_tokens[b] = tgt_tokens_full[b, tgt_idx]
-
-        # --- predict target tokens from context ---
         pred_tgt = self.predictor(
             context_tokens=ctx_tokens,
             context_positions=context_positions,
             target_positions=target_positions,
-            n_total_tokens=T,
         )
-
-        # --- loss: SmoothL1 on the predicted vs true target tokens ---
-        loss = nn.functional.smooth_l1_loss(pred_tgt, tgt_tokens, beta=1.0)
-        return loss
+        return nn.functional.smooth_l1_loss(pred_tgt, tgt_tokens, beta=1.0)
 
     @torch.no_grad()
     def embed(self, x: torch.Tensor) -> torch.Tensor:
@@ -335,49 +308,48 @@ class JEPAModel(nn.Module):
 # ---------------------------------------------------------------------------
 # Masking utilities
 # ---------------------------------------------------------------------------
-def sample_context_target_masks(
+def sample_context_target_positions(
     n_tokens: int, batch_size: int, cfg: JEPAConfig,
     rng: np.random.Generator,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Sample per-batch context / target token masks.
+    """Vectorized per-batch sampler.
 
-    Strategy (per sample, independently):
-      1. Pick a contiguous target window of size round(target_window_frac * T).
-      2. Target positions = those indices.
-      3. Context positions = a random subset of non-target positions
-         of size round(context_keep_frac * T).
-      4. Guarantee target doesn't touch the very top/bottom edges.
+    Strategy (per sample):
+      1. Pick a contiguous target window of size round(target_window_frac*T),
+         start drawn uniformly from [edge_buffer, T-edge_buffer-T_tgt].
+      2. Context = random T_ctx positions drawn from the (T - T_tgt) tokens
+         outside the target window.
 
-    Returns (context_mask, target_mask): (B, T) bool tensors.
+    Returns (context_positions, target_positions) as long tensors of
+    shape (B, T_ctx) and (B, T_tgt).  No Python per-sample loop, no
+    torch.nonzero, no host-device sync at training time.
     """
     T = n_tokens
     T_tgt = max(2, int(round(cfg.target_window_frac * T)))
     T_ctx = max(2, int(round(cfg.context_keep_frac * T)))
     edge_buffer = max(1, int(cfg.min_target_dist_from_edge * T))
 
-    context_mask = np.zeros((batch_size, T), dtype=bool)
-    target_mask = np.zeros((batch_size, T), dtype=bool)
-    for b in range(batch_size):
-        # pick start index for the contiguous target window
-        lo_min = edge_buffer
-        lo_max = T - edge_buffer - T_tgt
-        if lo_max <= lo_min:
-            lo = max(0, (T - T_tgt) // 2)
-        else:
-            lo = int(rng.integers(lo_min, lo_max + 1))
-        target_mask[b, lo:lo + T_tgt] = True
-        # context = random subset of non-target
-        candidates = np.where(~target_mask[b])[0]
-        if len(candidates) < T_ctx:
-            # shouldn't happen given our sizes but be safe
-            T_ctx_actual = len(candidates)
-        else:
-            T_ctx_actual = T_ctx
-        chosen = rng.choice(candidates, size=T_ctx_actual, replace=False)
-        context_mask[b, chosen] = True
+    lo_min = edge_buffer
+    lo_max = T - edge_buffer - T_tgt
+    if lo_max <= lo_min:
+        starts = np.full(batch_size, max(0, (T - T_tgt) // 2), dtype=np.int64)
+    else:
+        starts = rng.integers(lo_min, lo_max + 1, size=batch_size).astype(np.int64)
 
-    return (torch.from_numpy(context_mask),
-            torch.from_numpy(target_mask))
+    target_positions = starts[:, None] + np.arange(T_tgt, dtype=np.int64)[None, :]
+
+    # Vectorized "without-replacement choice from the non-target set":
+    # draw uniform keys, set keys at target positions to +inf, take the
+    # T_ctx smallest per row (argpartition is O(T) per row).
+    keys = rng.random((batch_size, T))
+    rows = np.arange(batch_size)[:, None]
+    keys[rows, target_positions] = np.inf
+    context_positions = np.argpartition(keys, T_ctx - 1, axis=1)[:, :T_ctx].astype(np.int64)
+
+    return (
+        torch.from_numpy(context_positions),
+        torch.from_numpy(target_positions),
+    )
 
 
 # ---------------------------------------------------------------------------
