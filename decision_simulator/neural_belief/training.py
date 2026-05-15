@@ -53,7 +53,7 @@ def _pearson_correlation(pred: torch.Tensor, target: torch.Tensor) -> float:
     t = target.view(B, -1)
     p_c = p - p.mean(dim=1, keepdim=True)
     t_c = t - t.mean(dim=1, keepdim=True)
-    num   = (p_c * t_c).sum(dim=1)
+    num = (p_c * t_c).sum(dim=1)
     denom = (p_c.norm(dim=1) * t_c.norm(dim=1)).clamp(min=1e-8)
     return (num / denom).mean().item()
 
@@ -75,16 +75,16 @@ def _validate(
             pred_norm = model(x)
 
             pred = normalizer.inverse_tensor(pred_norm)
-            tgt  = normalizer.inverse_tensor(y)
+            tgt = normalizer.inverse_tensor(y)
 
-            mse_total  += nn.functional.mse_loss(pred, tgt).item()
-            mae_total  += (pred - tgt).abs().mean().item()
+            mse_total += nn.functional.mse_loss(pred, tgt).item()
+            mae_total += (pred - tgt).abs().mean().item()
             corr_total += _pearson_correlation(pred, tgt)
-            n_batches  += 1
+            n_batches += 1
 
     return {
-        "val_mse":  mse_total  / n_batches,
-        "val_mae":  mae_total  / n_batches,
+        "val_mse": mse_total / n_batches,
+        "val_mae": mae_total / n_batches,
         "val_corr": corr_total / n_batches,
     }
 
@@ -112,12 +112,12 @@ def _save_val_plots(
             pred_norm = model(inp.unsqueeze(0).to(device)).squeeze().cpu().numpy()
 
         plot_belief_sample(
-            sparse_ore_map    = inp[0].numpy(),
-            observation_mask  = inp[1].numpy(),
-            true_ore_map      = normalizer.inverse(tgt.squeeze(0).numpy()),
-            predicted_ore_map = normalizer.inverse(pred_norm),
-            save_path         = plot_dir / f"val_sample_{k:02d}.png",
-            title             = f"Val sample {k}",
+            sparse_ore_map=inp[0].numpy(),
+            observation_mask=inp[1].numpy(),
+            true_ore_map=normalizer.inverse(tgt.squeeze(0).numpy()),
+            predicted_ore_map=normalizer.inverse(pred_norm),
+            save_path=plot_dir / f"val_sample_{k:02d}.png",
+            title=f"Val sample {k}",
         )
 
     print(f"  plots saved -> {plot_dir}")
@@ -204,20 +204,26 @@ def train_neural_belief(
 
     if verbose:
         if cfg.norm_mode == "zscore":
-            print(f"  target norm   : zscore  mean={normalizer.mean:.4f}  std={normalizer.std:.4f}")
+            print(
+                f"  target norm   : zscore  mean={normalizer.mean:.4f}  std={normalizer.std:.4f}"
+            )
         elif cfg.norm_mode != "none":
             print(f"  target norm   : {cfg.norm_mode}")
 
     train_loader = DataLoader(train_ds, batch_size=cfg.batch_size, shuffle=True)
-    val_loader   = DataLoader(val_ds,   batch_size=cfg.batch_size, shuffle=False)
+    val_loader = DataLoader(val_ds, batch_size=cfg.batch_size, shuffle=False)
 
     if verbose:
         print(f"  train samples : {len(train_ds)}")
         print(f"  val   samples : {len(val_ds)}")
 
     # ---- model ----------------------------------------------------------------
-    model = UNetBelief(in_channels=cfg.in_channels, base_channels=cfg.base_channels).to(device)
-    optimiser = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
+    model = UNetBelief(in_channels=cfg.in_channels, base_channels=cfg.base_channels).to(
+        device
+    )
+    optimiser = torch.optim.AdamW(
+        model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay
+    )
 
     if verbose:
         print(f"  model params  : {sum(p.numel() for p in model.parameters()):,}")
@@ -227,13 +233,13 @@ def train_neural_belief(
         torch.save(
             {
                 "state_dict": model.state_dict(),
-                "cfg":        cfg,
-                "epoch":      epoch,
-                "history":    history,
+                "cfg": cfg,
+                "epoch": epoch,
+                "history": history,
                 "normalizer": normalizer,
-                "sim_cfg":    sim_cfg,
-                "n_x":        sim_cfg.n_x,
-                "n_y":        sim_cfg.n_y,
+                "sim_cfg": sim_cfg,
+                "n_x": sim_cfg.n_x,
+                "n_y": sim_cfg.n_y,
                 "latent_dim": cfg.latent_dim,
             },
             path,
@@ -258,7 +264,7 @@ def train_neural_belief(
             n_batches += 1
 
         train_mse_norm = train_loss_sum / n_batches
-        val_metrics    = _validate(model, val_loader, device, normalizer)
+        val_metrics = _validate(model, val_loader, device, normalizer)
 
         row = {"epoch": epoch, "train_mse_norm": train_mse_norm, **val_metrics}
         history.append(row)
@@ -282,7 +288,9 @@ def train_neural_belief(
     if verbose:
         print("\nBaseline comparison (val set, ore-value space):")
         for name, m in evaluate_baselines(val_loader, normalizer).items():
-            print(f"  {name:22s}  mse={m['mse']:.4f}  mae={m['mae']:.4f}  corr={m['corr']:.4f}")
+            print(
+                f"  {name:22s}  mse={m['mse']:.4f}  mae={m['mae']:.4f}  corr={m['corr']:.4f}"
+            )
         best = min(history, key=lambda r: r["val_mse"])
         print(
             f"  {'neural_belief':22s}  mse={best['val_mse']:.4f}"
@@ -295,7 +303,9 @@ def train_neural_belief(
         _save_val_plots(model, val_ds, normalizer, plot_dir, device)
 
     # Reload best weights before returning
-    best_ckpt = torch.load(checkpoint_dir / "belief_best.pt", map_location=device)
+    best_ckpt = torch.load(
+        checkpoint_dir / "belief_best.pt", map_location=device, weights_only=False
+    )
     model.load_state_dict(best_ckpt["state_dict"])
     model.eval()
 
@@ -316,9 +326,11 @@ def load_belief_checkpoint(
     -------
     (model, training_config, normalizer, training_history)
     """
-    ckpt = torch.load(path, map_location=device)
+    ckpt = torch.load(path, map_location=device, weights_only=False)
     cfg: NeuralBeliefTrainingConfig = ckpt["cfg"]
-    model = UNetBelief(in_channels=cfg.in_channels, base_channels=cfg.base_channels).to(device)
+    model = UNetBelief(in_channels=cfg.in_channels, base_channels=cfg.base_channels).to(
+        device
+    )
     model.load_state_dict(ckpt["state_dict"])
     model.eval()
     normalizer: TargetNormalizer = ckpt.get("normalizer", TargetNormalizer(mode="none"))
@@ -365,7 +377,9 @@ def debug_run(
     model2, loaded_cfg, loaded_norm, history = load_belief_checkpoint(
         Path(checkpoint_dir) / "belief_best.pt", device
     )
-    assert len(history) == cfg.n_epochs, f"expected {cfg.n_epochs} epochs, got {len(history)}"
+    assert (
+        len(history) == cfg.n_epochs
+    ), f"expected {cfg.n_epochs} epochs, got {len(history)}"
     print(f"  OK  ({len(history)} epochs in history)")
 
     print("[3/4] Inference ...")
@@ -388,7 +402,9 @@ def debug_run(
     print("[4/4] Dataset sample validation ...")
     GeologicalBeliefDataset.generate(
         resources,
-        BeliefDatasetConfig(n_maps=1, samples_per_map=2, min_drills=2, max_drills=4, seed=99),
+        BeliefDatasetConfig(
+            n_maps=1, samples_per_map=2, min_drills=2, max_drills=4, seed=99
+        ),
         device=device,
         sim_cfg=sim_cfg,
         validate_samples=True,
