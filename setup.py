@@ -5,8 +5,6 @@ setup(
     version="0.1.0",
     description="Modular chess tournament framework with engines and LLM players",
     packages=find_packages(),
-    install_requires=[
-        "requests==2.32.4",
-    ],
+    install_requires=["requests==2.32.4", "gstools==1.7.0"],
     python_requires=">=3.9",
 )
