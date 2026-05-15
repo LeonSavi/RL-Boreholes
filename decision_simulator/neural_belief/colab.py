@@ -13,6 +13,7 @@ from simulator.distributions import DiscoveryPrior, DistributionBank
 from simulator.formation_geometry import FormationGeometry
 from decision_simulator.resources import DecisionSimulationResources
 
+from .dataset import BeliefDatasetConfig, RawMapCache, build_dataset_from_cache, generate_raw_map_cache
 from .model import UNetBelief
 from .training import (
     NeuralBeliefTrainingConfig,
@@ -375,8 +376,12 @@ def compare_belief_encoders_from_colab(
 ) -> pd.DataFrame:
     """Train and compare multiple borehole encoder variants on identical data.
 
-    All variants are trained with the same seed, maps, train/val split, drill
-    configurations, and model hyperparameters — only the encoder type differs.
+    Maps, train/val split, and drill configurations are generated **once** and
+    shared across all variants.  Per-variant latent embeddings are computed
+    from the shared raw maps when each encoder is loaded.  Processed maps are
+    cached to disk under ``<output_root>/dataset_cache/`` so subsequent Colab
+    sessions skip regeneration.
+
     Seed defaults to 42 (``NeuralBeliefTrainingConfig`` default); pass
     ``seed=N`` in ``overrides`` to change it consistently across all variants.
 
@@ -405,9 +410,8 @@ def compare_belief_encoders_from_colab(
         Run all variants with a minimal config (2 maps, 2 epochs) for a
         quick end-to-end check.
     **overrides
-        Forwarded unchanged to every ``train_belief_from_colab`` call.
-        ``in_channels`` and ``latent_dim`` are always derived from the
-        encoder and cannot be overridden here.
+        Forwarded to every training run. ``in_channels`` and ``latent_dim``
+        are always derived from the encoder and cannot be overridden here.
 
     Returns
     -------
@@ -424,6 +428,42 @@ def compare_belief_encoders_from_colab(
         out_root = root / out_root
     out_root.mkdir(parents=True, exist_ok=True)
 
+    jepa_path, ae_path, distributions, formation_geo, discovery = _resolve_paths(
+        root, None, None, None, None, None
+    )
+    _check_sim_paths(distributions, formation_geo)
+
+    # Build a base config to extract dataset size / seed settings.
+    base_cfg = _build_config(debug, {k: v for k, v in overrides.items()
+                                     if k not in ("in_channels", "latent_dim")})
+    train_ds_cfg = BeliefDatasetConfig(
+        n_maps=base_cfg.n_train_maps,
+        samples_per_map=base_cfg.samples_per_map,
+        min_drills=base_cfg.min_drills,
+        max_drills=base_cfg.max_drills,
+        seed=base_cfg.seed,
+    )
+    val_ds_cfg = BeliefDatasetConfig(
+        n_maps=base_cfg.n_val_maps,
+        samples_per_map=base_cfg.val_samples_per_map,
+        min_drills=base_cfg.min_drills,
+        max_drills=base_cfg.max_drills,
+        seed=base_cfg.seed + 1,
+    )
+
+    # Load only the simulator components needed for map generation (no encoder).
+    sim_resources = _load_sim_resources(distributions, formation_geo, discovery)
+
+    # Generate or restore raw map caches shared across all variants.
+    cache_dir = out_root / "dataset_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    train_cache = _get_raw_cache(
+        cache_dir / "raw_train.pkl", sim_resources, train_ds_cfg, label="train"
+    )
+    val_cache = _get_raw_cache(
+        cache_dir / "raw_val.pkl", sim_resources, val_ds_cfg, label="val"
+    )
+
     rows: list[dict] = []
 
     for variant in variants:
@@ -431,18 +471,44 @@ def compare_belief_encoders_from_colab(
         print(f"  Encoder variant : {variant}")
         print(f"{'=' * 60}")
 
-        ckpt_dir = out_root / f"belief_{variant}"
-        plot_dir = ckpt_dir / "plots"
+        _check_encoder_path(variant, jepa_path, ae_path)
 
-        _, history = train_belief_from_colab(
-            storage_root=root,
-            checkpoint_dir=ckpt_dir,
-            device=device,
-            debug=debug,
-            borehole_encoder=variant,
-            plot_dir=plot_dir,
-            **overrides,
+        ckpt_dir = out_root / f"belief_{variant}"
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+        resources, latent_dim = _load_encoder_resources(
+            variant, jepa_path, ae_path, distributions, formation_geo, discovery, device
         )
+
+        encoder_defaults = {"in_channels": 2 + latent_dim, "latent_dim": latent_dim}
+        cfg = _build_config(debug, {**encoder_defaults, **overrides})
+
+        print(f"\nborehole_encoder : {variant}")
+        print(f"latent_dim       : {latent_dim}")
+        print(f"in_channels      : {cfg.in_channels}")
+
+        print("\nBuilding training dataset from shared cache ...")
+        train_ds = build_dataset_from_cache(train_cache, resources, device, verbose=True)
+        print(f"  train samples : {len(train_ds)}")
+
+        print("Building validation dataset from shared cache ...")
+        val_ds = build_dataset_from_cache(val_cache, resources, device, verbose=True)
+        print(f"  val   samples : {len(val_ds)}")
+
+        train_neural_belief(
+            resources=resources,
+            cfg=cfg,
+            device=device,
+            checkpoint_dir=ckpt_dir,
+            plot_dir=ckpt_dir / "plots",
+            verbose=True,
+            train_ds=train_ds,
+            val_ds=val_ds,
+        )
+
+        _, _, _, history = load_belief_checkpoint(ckpt_dir / "belief_best.pt", device=device)
+        print(f"\nSmoke test passed: {len(history)} epoch(s) in history.")
+        _export_history(history, ckpt_dir)
 
         best = min(history, key=lambda r: r["val_mse"])
         rows.append(
@@ -467,6 +533,58 @@ def compare_belief_encoders_from_colab(
     print(f"\nSummary -> {csv_path}")
 
     return df
+
+
+# ---------------------------------------------------------------------------
+# Shared-cache helpers
+# ---------------------------------------------------------------------------
+
+
+def _load_sim_resources(
+    distributions: Path,
+    formation_geo: Path,
+    discovery: Path,
+) -> DecisionSimulationResources:
+    """Load only the simulator components needed for map generation (no encoder)."""
+    distribution_bank = DistributionBank.load(distributions)
+    formation_geometry = FormationGeometry.load(formation_geo)
+    discovery_prior = DiscoveryPrior.load(discovery) if discovery.exists() else None
+    return DecisionSimulationResources(
+        jepa_model=None,
+        norm_stats={},
+        variable_names=[],
+        distribution_bank=distribution_bank,
+        formation_geometry=formation_geometry,
+        discovery_prior=discovery_prior,
+    )
+
+
+def _get_raw_cache(
+    cache_path: Path,
+    resources: DecisionSimulationResources,
+    cfg: BeliefDatasetConfig,
+    label: str = "dataset",
+) -> RawMapCache:
+    """Load a RawMapCache from disk if present and config matches, else generate."""
+    if cache_path.exists():
+        cache = RawMapCache.load(cache_path)
+        if cache.config_matches(cfg):
+            print(
+                f"  [cache] Loaded {label} cache from {cache_path}"
+                f" ({len(cache.maps)} maps, seed={cfg.seed})"
+            )
+            return cache
+        print(f"  [cache] Config mismatch for {label} cache — regenerating ...")
+    else:
+        print(
+            f"  [cache] No {label} cache found — generating"
+            f" {cfg.n_maps} maps (seed={cfg.seed}) ..."
+        )
+
+    cache = generate_raw_map_cache(resources, cfg, verbose=True)
+    cache.save(cache_path)
+    print(f"  [cache] Saved {label} cache -> {cache_path}")
+    return cache
 
 
 # ---------------------------------------------------------------------------

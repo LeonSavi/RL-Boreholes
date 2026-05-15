@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import pickle
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -21,6 +23,44 @@ class BeliefDatasetConfig:
     max_drills: int = 15
     latent_dim: int = 128
     seed: int = 42
+
+
+@dataclass
+class RawMapCache:
+    """Encoder-agnostic map and drill data, reusable across encoder variants.
+
+    Stores raw ``true_map`` dicts, per-map target ore arrays, and drill
+    patterns (locations + observed values) with no encoder-specific tensors.
+    Latent embeddings are computed on demand per variant via
+    ``build_dataset_from_cache``.
+    """
+
+    maps: list[dict]
+    targets: list[np.ndarray]  # per-map: (n_x, n_y) float32
+    # drill_patterns[map_idx][sample_idx] = (drill_locs, ore_vals)
+    drill_patterns: list[list[tuple[list[tuple[int, int]], list[float]]]]
+    cfg: BeliefDatasetConfig
+
+    def save(self, path: Path | str) -> None:
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "wb") as f:
+            pickle.dump(self, f)
+
+    @classmethod
+    def load(cls, path: Path | str) -> RawMapCache:
+        with open(path, "rb") as f:
+            return pickle.load(f)
+
+    def config_matches(self, other: BeliefDatasetConfig) -> bool:
+        c = self.cfg
+        return (
+            c.n_maps == other.n_maps
+            and c.samples_per_map == other.samples_per_map
+            and c.min_drills == other.min_drills
+            and c.max_drills == other.max_drills
+            and c.seed == other.seed
+        )
 
 
 def _validate_sample(
@@ -157,3 +197,92 @@ class GeologicalBeliefDataset(Dataset):
         inputs_t = torch.from_numpy(np.stack(all_inputs, axis=0))    # (N, C, n_x, n_y)
         targets_t = torch.from_numpy(np.stack(all_targets, axis=0))  # (N, 1, n_x, n_y)
         return cls(inputs_t, targets_t)
+
+
+def generate_raw_map_cache(
+    resources: DecisionSimulationResources,
+    cfg: BeliefDatasetConfig,
+    sim_cfg: SimConfig | None = None,
+    verbose: bool = True,
+) -> RawMapCache:
+    """Generate maps and drill patterns without any encoder-specific encoding.
+
+    The returned :class:`RawMapCache` can be passed to
+    :func:`build_dataset_from_cache` repeatedly with different encoders to
+    produce encoder-specific :class:`GeologicalBeliefDataset` instances while
+    keeping maps and drill patterns identical across variants.
+    """
+    if sim_cfg is None:
+        sim_cfg = SimConfig()
+
+    rng = np.random.default_rng(cfg.seed)
+    gen = MapGenerator(
+        resources.distribution_bank,
+        resources.formation_geometry,
+        sim_cfg,
+        seed=int(rng.integers(1 << 31)),
+        prior=resources.discovery_prior,
+    )
+
+    n_x, n_y = sim_cfg.n_x, sim_cfg.n_y
+    all_locations = [(i, j) for i in range(n_x) for j in range(n_y)]
+
+    maps: list[dict] = []
+    targets: list[np.ndarray] = []
+    drill_patterns: list[list[tuple[list[tuple[int, int]], list[float]]]] = []
+
+    for map_idx in range(cfg.n_maps):
+        true_map = next(gen)
+        target_ore = build_ore_target(true_map)
+
+        samples: list[tuple[list[tuple[int, int]], list[float]]] = []
+        for _ in range(cfg.samples_per_map):
+            n_drills = int(rng.integers(cfg.min_drills, cfg.max_drills + 1))
+            chosen = rng.choice(len(all_locations), size=n_drills, replace=False)
+            drill_locs = [all_locations[k] for k in chosen]
+            ore_vals = [float(target_ore[i, j]) for i, j in drill_locs]
+            samples.append((drill_locs, ore_vals))
+
+        maps.append(true_map)
+        targets.append(target_ore)
+        drill_patterns.append(samples)
+
+        if verbose and (map_idx + 1) % 10 == 0:
+            print(f"  [cache] {map_idx + 1}/{cfg.n_maps} maps generated")
+
+    return RawMapCache(maps=maps, targets=targets, drill_patterns=drill_patterns, cfg=cfg)
+
+
+def build_dataset_from_cache(
+    cache: RawMapCache,
+    resources: DecisionSimulationResources,
+    device: str,
+    verbose: bool = False,
+) -> GeologicalBeliefDataset:
+    """Build an encoder-specific dataset from a shared :class:`RawMapCache`.
+
+    Encodes boreholes once per map using the encoder in ``resources``.
+    For the no-encoder case (``resources.jepa_model=None`` and
+    ``borehole_encoder_fn=None``), ``encode_full_latent_map`` returns a
+    zero-channel array and inputs will be ``(2, n_x, n_y)``.
+    Targets are returned in raw (unnormalized) ore-value space.
+    """
+    all_inputs: list[np.ndarray] = []
+    all_targets: list[np.ndarray] = []
+
+    for map_idx, (true_map, target_ore, samples) in enumerate(
+        zip(cache.maps, cache.targets, cache.drill_patterns)
+    ):
+        full_latent_map = encode_full_latent_map(true_map, resources, device)
+
+        for drill_locs, ore_vals in samples:
+            inp = build_sample_input(drill_locs, ore_vals, full_latent_map)
+            all_inputs.append(inp)
+            all_targets.append(target_ore[np.newaxis])  # (1, n_x, n_y)
+
+        if verbose and (map_idx + 1) % 10 == 0:
+            print(f"  [encode] {map_idx + 1}/{len(cache.maps)} maps encoded")
+
+    inputs_t = torch.from_numpy(np.stack(all_inputs, axis=0))
+    targets_t = torch.from_numpy(np.stack(all_targets, axis=0))
+    return GeologicalBeliefDataset(inputs_t, targets_t)

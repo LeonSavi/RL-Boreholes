@@ -131,6 +131,8 @@ def train_neural_belief(
     sim_cfg: SimConfig | None = None,
     plot_dir: Path | None = None,
     verbose: bool = True,
+    train_ds: GeologicalBeliefDataset | None = None,
+    val_ds: GeologicalBeliefDataset | None = None,
 ) -> tuple[UNetBelief, TargetNormalizer]:
     """Train the neural geological belief updater end-to-end.
 
@@ -162,39 +164,43 @@ def train_neural_belief(
     np.random.seed(cfg.seed)
 
     # ---- datasets -------------------------------------------------------------
-    if verbose:
-        print("Generating training dataset ...")
-    train_ds = GeologicalBeliefDataset.generate(
-        resources,
-        BeliefDatasetConfig(
-            n_maps=cfg.n_train_maps,
-            samples_per_map=cfg.samples_per_map,
-            min_drills=cfg.min_drills,
-            max_drills=cfg.max_drills,
-            latent_dim=cfg.latent_dim,
-            seed=cfg.seed,
-        ),
-        device=device,
-        sim_cfg=sim_cfg,
-        verbose=verbose,
-    )
+    if train_ds is None or val_ds is None:
+        if verbose:
+            print("Generating training dataset ...")
+        train_ds = GeologicalBeliefDataset.generate(
+            resources,
+            BeliefDatasetConfig(
+                n_maps=cfg.n_train_maps,
+                samples_per_map=cfg.samples_per_map,
+                min_drills=cfg.min_drills,
+                max_drills=cfg.max_drills,
+                latent_dim=cfg.latent_dim,
+                seed=cfg.seed,
+            ),
+            device=device,
+            sim_cfg=sim_cfg,
+            verbose=verbose,
+        )
 
-    if verbose:
-        print("Generating validation dataset ...")
-    val_ds = GeologicalBeliefDataset.generate(
-        resources,
-        BeliefDatasetConfig(
-            n_maps=cfg.n_val_maps,
-            samples_per_map=cfg.val_samples_per_map,
-            min_drills=cfg.min_drills,
-            max_drills=cfg.max_drills,
-            latent_dim=cfg.latent_dim,
-            seed=cfg.seed + 1,
-        ),
-        device=device,
-        sim_cfg=sim_cfg,
-        verbose=verbose,
-    )
+        if verbose:
+            print("Generating validation dataset ...")
+        val_ds = GeologicalBeliefDataset.generate(
+            resources,
+            BeliefDatasetConfig(
+                n_maps=cfg.n_val_maps,
+                samples_per_map=cfg.val_samples_per_map,
+                min_drills=cfg.min_drills,
+                max_drills=cfg.max_drills,
+                latent_dim=cfg.latent_dim,
+                seed=cfg.seed + 1,
+            ),
+            device=device,
+            sim_cfg=sim_cfg,
+            verbose=verbose,
+        )
+    else:
+        if verbose:
+            print("Using pre-built datasets.")
 
     # ---- target normalization -------------------------------------------------
     normalizer = TargetNormalizer(mode=cfg.norm_mode)
