@@ -21,7 +21,7 @@ from .training import (
 
 # Default resource paths, resolved against storage_root at runtime.
 _JEPA_REL = Path("checkpoints/jepa.pt")
-_AE_REL = Path("checkpoints/au.pt")
+_AE_REL = Path("checkpoints/ae.pt")
 _DISTRIBUTIONS_REL = Path("data/clean/distributions.pkl")
 _FORMATION_GEO_REL = Path("data/clean/formation_geometry.pkl")
 _DISCOVERY_REL = Path("data/clean/discovery_prior.pkl")
@@ -98,7 +98,7 @@ def train_belief_from_colab(
         ``borehole_encoder="jepa"``.
     autoencoder_checkpoint
         Path to the autoencoder ``.pt`` file.  Defaults to
-        ``<storage_root>/checkpoints/au.pt``.  Required when
+        ``<storage_root>/checkpoints/ae.pt``.  Required when
         ``borehole_encoder="autoencoder"``.
     distribution_bank_path
         Path to ``distributions.pkl``.  Defaults to
