@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from typing import Literal
 
+import pandas as pd
 import torch
 
 from simulator.distributions import DiscoveryPrior, DistributionBank
@@ -38,6 +39,7 @@ def train_belief_from_colab(
     distribution_bank_path: str | Path | None = None,
     formation_geometry_path: str | Path | None = None,
     discovery_prior_path: str | Path | None = None,
+    plot_dir: str | Path | None = None,
     **overrides,
 ) -> tuple[UNetBelief, list[dict]]:
     """Train the neural geological belief updater from a Colab notebook.
@@ -142,6 +144,12 @@ def train_belief_from_colab(
         ckpt_dir = root / ckpt_dir
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
+    plot_dir_resolved: Path | None = None
+    if plot_dir is not None:
+        plot_dir_resolved = Path(plot_dir)
+        if not plot_dir_resolved.is_absolute():
+            plot_dir_resolved = root / plot_dir_resolved
+
     resources, latent_dim = _load_encoder_resources(
         borehole_encoder,
         jepa_path,
@@ -167,6 +175,7 @@ def train_belief_from_colab(
         cfg=cfg,
         device=device,
         checkpoint_dir=ckpt_dir,
+        plot_dir=plot_dir_resolved,
         verbose=True,
     )
 
@@ -349,6 +358,115 @@ def _build_config(debug: bool, overrides: dict) -> NeuralBeliefTrainingConfig:
         setattr(cfg, key, value)
 
     return cfg
+
+
+# ---------------------------------------------------------------------------
+# History export
+# ---------------------------------------------------------------------------
+
+
+def compare_belief_encoders_from_colab(
+    storage_root: str | Path,
+    output_root: str | Path = "checkpoints/belief_comparison",
+    device: str = "cuda",
+    variants: tuple[str, ...] = ("none", "autoencoder", "jepa"),
+    debug: bool = False,
+    **overrides,
+) -> pd.DataFrame:
+    """Train and compare multiple borehole encoder variants on identical data.
+
+    All variants are trained with the same seed, maps, train/val split, drill
+    configurations, and model hyperparameters — only the encoder type differs.
+    Seed defaults to 42 (``NeuralBeliefTrainingConfig`` default); pass
+    ``seed=N`` in ``overrides`` to change it consistently across all variants.
+
+    Example
+    -------
+    >>> from decision_simulator.neural_belief.colab import compare_belief_encoders_from_colab
+    >>> df = compare_belief_encoders_from_colab(
+    ...     storage_root="/content/drive/MyDrive/thesis",
+    ...     debug=True,
+    ... )
+    >>> print(df)
+
+    Parameters
+    ----------
+    storage_root
+        Absolute root for all data and checkpoint paths.
+    output_root
+        Parent directory for per-variant subdirectories. Relative paths are
+        resolved against ``storage_root``. Each variant is saved under
+        ``<output_root>/belief_<variant>/``.
+    device
+        ``"cuda"`` or ``"cpu"``.
+    variants
+        Encoder types to compare, in order.
+    debug
+        Run all variants with a minimal config (2 maps, 2 epochs) for a
+        quick end-to-end check.
+    **overrides
+        Forwarded unchanged to every ``train_belief_from_colab`` call.
+        ``in_channels`` and ``latent_dim`` are always derived from the
+        encoder and cannot be overridden here.
+
+    Returns
+    -------
+    pd.DataFrame
+        One row per variant with columns ``encoder``, ``best_epoch``,
+        ``best_val_mse``, ``best_val_mae``, ``best_val_corr``.
+        Also written to ``<output_root>/comparison_summary.csv``.
+    """
+    _check_device(device)
+    root = Path(storage_root).expanduser().resolve()
+
+    out_root = Path(output_root)
+    if not out_root.is_absolute():
+        out_root = root / out_root
+    out_root.mkdir(parents=True, exist_ok=True)
+
+    rows: list[dict] = []
+
+    for variant in variants:
+        print(f"\n{'=' * 60}")
+        print(f"  Encoder variant : {variant}")
+        print(f"{'=' * 60}")
+
+        ckpt_dir = out_root / f"belief_{variant}"
+        plot_dir = ckpt_dir / "plots"
+
+        _, history = train_belief_from_colab(
+            storage_root=root,
+            checkpoint_dir=ckpt_dir,
+            device=device,
+            debug=debug,
+            borehole_encoder=variant,
+            plot_dir=plot_dir,
+            **overrides,
+        )
+
+        best = min(history, key=lambda r: r["val_mse"])
+        rows.append(
+            {
+                "encoder": variant,
+                "best_epoch": best["epoch"],
+                "best_val_mse": best["val_mse"],
+                "best_val_mae": best["val_mae"],
+                "best_val_corr": best["val_corr"],
+            }
+        )
+
+    df = pd.DataFrame(rows)
+
+    csv_path = out_root / "comparison_summary.csv"
+    df.to_csv(csv_path, index=False)
+
+    print(f"\n{'=' * 60}")
+    print("  Comparison summary")
+    print(f"{'=' * 60}")
+    print(df.to_string(index=False))
+    print(f"\nSummary -> {csv_path}")
+
+    return df
 
 
 # ---------------------------------------------------------------------------

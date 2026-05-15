@@ -16,7 +16,7 @@ from .inference import (
 )
 from .baselines import evaluate_baselines
 from .visualize import plot_belief_sample
-from .colab import train_belief_from_colab
+from .colab import train_belief_from_colab, compare_belief_encoders_from_colab
 
 __all__ = [
     "UNetBelief",
@@ -35,4 +35,5 @@ __all__ = [
     "evaluate_baselines",
     "plot_belief_sample",
     "train_belief_from_colab",
+    "compare_belief_encoders_from_colab",
 ]
