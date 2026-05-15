@@ -379,3 +379,41 @@ def load_jepa_checkpoint(
     model.load_state_dict(ck["state_dict"])
     model.eval()
     return model, ck["stats"], ck["variables"]
+
+
+# ---------------------------------------------------------------------------
+# Backward-compatibility alias
+# ---------------------------------------------------------------------------
+def sample_context_target_masks(
+    n_tokens: int,
+    batch_size: int,
+    cfg: JEPAConfig,
+    rng: np.random.Generator,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Deprecated — use sample_context_target_positions.
+
+    Returns (context_mask, target_mask) as (B, T) bool tensors for callers
+    that only need the mask shape (e.g., visualisation).
+
+    WARNING: JEPAModel.forward() no longer accepts bool masks; it now expects
+    position-index tensors (B, T_ctx) and (B, T_tgt).  Do NOT pass the tensors
+    returned here directly to model.forward() — use sample_context_target_positions
+    instead and update your forward call accordingly.
+    """
+    import warnings
+    warnings.warn(
+        "sample_context_target_masks is deprecated; use "
+        "sample_context_target_positions, which returns (B, T_ctx) and (B, T_tgt) "
+        "long position tensors.  Note: JEPAModel.forward() now takes position "
+        "indices, not bool masks — update callers that pass these to forward().",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    ctx_pos, tgt_pos = sample_context_target_positions(
+        n_tokens, batch_size, cfg, rng
+    )
+    ctx_mask = torch.zeros(batch_size, n_tokens, dtype=torch.bool)
+    ctx_mask.scatter_(1, ctx_pos, True)
+    tgt_mask = torch.zeros(batch_size, n_tokens, dtype=torch.bool)
+    tgt_mask.scatter_(1, tgt_pos, True)
+    return ctx_mask, tgt_mask

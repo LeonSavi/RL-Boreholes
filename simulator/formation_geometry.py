@@ -750,6 +750,26 @@ class FormationGeometry:
                 s._trans_rocks = None
             if not hasattr(s, "_trans_cumP"):
                 s._trans_cumP = None
+            # backfill top_depths (added when per-formation top-depth KDE
+            # replaced the old thickness-only approach). Synthesise a rough
+            # proxy from the thickness distribution: top ≈ median cumulative
+            # depth.  Re-run FormationGeometry.fit() for accurate values.
+            if not hasattr(s, "top_depths") or s.top_depths is None:
+                import warnings as _w
+                _w.warn(
+                    f"FormationGeometry.load: FormationStats for '{s.name}' "
+                    f"has no top_depths (old pickle). Synthesising from "
+                    f"thicknesses — re-run FormationGeometry.fit() for "
+                    f"accurate formation-depth sampling.",
+                    UserWarning,
+                    stacklevel=3,
+                )
+                s.top_depths = np.clip(
+                    np.median(s.thicknesses) * np.ones(len(s.thicknesses)),
+                    0.0, None,
+                ).astype(np.float64)
+            if not hasattr(s, "_top_kde"):
+                s._top_kde = None
         # backfill Task 5b basin attrs
         if not hasattr(obj, "basin_centers"):
             obj.basin_centers = None

@@ -96,61 +96,6 @@ def build_fake_bank() -> DistributionBank:
     return bank
 
 
-def build_fake_geometry() -> FormationGeometry:
-    """FormationGeometry whose empirical distributions match the actual
-    NLOG numbers from formation_depth_stats.py output (rough, for
-    smoke-test purposes only). Each formation gets ~50 synthetic per-well
-    top depths and thicknesses so the KDEs have something to fit on."""
-    geom = FormationGeometry(list(FORMATION_ORDER))
-    geom.n_wells_total = 1500
-
-    # (formation, prevalence, top_median, top_std, thick_median, thick_std,
-    #  facies_dict)
-    fake_stats = [
-        ("NU", 0.46, 144,  150, 414, 200, {"clay": 1.0}),
-        ("NM", 0.39, 671,  300,  60,  40, {"clay": 1.0}),
-        ("NL", 0.47, 721,  300, 393, 200, {"clay": 1.0}),
-        ("CK", 0.68, 1138, 350, 662, 300, {"chalk": 1.0}),
-        ("KN", 0.74, 1785, 600, 227, 200, {"claystone": 0.46,
-                                            "claystone_cool": 0.41,
-                                            "sandstone_shaly": 0.13}),
-        ("SL", 0.21, 1950, 500, 180, 150, {"claystone_cool": 0.61,
-                                            "claystone": 0.39}),
-        ("SG", 0.08, 2476, 400, 149, 100, {"claystone": 0.69,
-                                            "claystone_hot": 0.31}),
-        ("AT", 0.21, 1945, 500, 199, 200, {"claystone_hot": 0.66,
-                                            "claystone": 0.20,
-                                            "claystone_cool": 0.14}),
-        ("RN", 0.31, 2200, 500, 262, 200, {"claystone": 0.54,
-                                            "dolomite": 0.40,
-                                            "anhydrite": 0.06}),
-        ("RB", 0.52, 2293, 600, 267, 200, {"claystone_hot": 0.67,
-                                            "sandstone_shaly": 0.33}),
-        ("ZE", 0.60, 2475, 500, 326, 250, {"halite_pure": 0.43,
-                                            "anhydrite": 0.28,
-                                            "other": 0.22,
-                                            "dolomite": 0.07}),
-        ("RO", 0.51, 3274, 500, 224, 200, {"sandstone_clean": 0.56,
-                                            "claystone_hot": 0.44}),
-        ("DC", 0.41, 3466, 600,  63, 100, {"claystone_hot": 0.59,
-                                            "claystone": 0.41}),
-    ]
-
-    rng = np.random.default_rng(0)
-    for (fm, prev, top_med, top_std, thick_med, thick_std, facies) in fake_stats:
-        n_synthetic = 50
-        tops = rng.normal(top_med, top_std, size=n_synthetic).clip(min=10.0)
-        thicks = rng.normal(thick_med, thick_std,
-                              size=n_synthetic).clip(min=20.0)
-        geom.formations[fm] = FormationStats(
-            name=fm,
-            n_wells=int(prev * 1500),
-            prevalence=prev,
-            top_depths=tops,
-            thicknesses=thicks,
-            facies=facies,
-        )
-    return geom
 
 
 def build_fake_prior(bank: DistributionBank) -> DiscoveryPrior:
@@ -215,7 +160,8 @@ def main():
     for i, b in enumerate(m["bodies"]):
         print(f"    body {i}: centre=({b.center_x:.1f}, {b.center_y:.1f}, "
               f"{b.center_z:.0f}m)  yield_peak={b.peak_yield:.2f}  "
-              f"radii=({b.radius_x:.1f}, {b.radius_y:.1f}, {b.radius_z:.0f}m)")
+              f"radii_xy=({b.radius_x:.1f}, {b.radius_y:.1f})  "
+              f"host={b.host_rock}  z=[{b.z_top:.0f}, {b.z_bot:.0f}]m")
 
     print("=" * 60)
     print("testing autoencoder forward + backward pass...")
@@ -255,7 +201,7 @@ def build_fake_geometry() -> FormationGeometry:
     geom.n_wells_total = 100
     geom.min_well_depth = 4000.0
     geom.max_well_depth = 4500.0
- 
+
     # synthetic combinations representative of deep Dutch wells
     geom.combinations = [
         (("NU", "NM", "NL", "CK", "KN", "RB", "ZE", "RO", "DC"), 15),
@@ -268,14 +214,16 @@ def build_fake_geometry() -> FormationGeometry:
         (("CK", "KN", "AT", "RN", "RB", "ZE", "RO", "DC"),         3),
         (("CK", "KN", "SL", "AT", "RN", "RB"),                     3),
     ]
- 
-    # synthetic thickness distributions (n=50 per formation)
-    fake_thickness_stats = {
-        "NU": (414, 200), "NM":  (60,  40), "NL": (393, 200),
-        "CK": (662, 300), "KN": (227, 200),
-        "SL": (180, 150), "SG": (149, 100), "AT": (199, 200),
-        "RN": (262, 200), "RB": (267, 200),
-        "ZE": (326, 250), "RO": (224, 200), "DC":  (63, 100),
+
+    # (top_median_m, top_std_m, thick_median_m, thick_std_m) per formation
+    fake_stats = {
+        "NU": (144,  150, 414, 200), "NM": (671,  300,  60,  40),
+        "NL": (721,  300, 393, 200), "CK": (1138, 350, 662, 300),
+        "KN": (1785, 600, 227, 200), "SL": (1950, 500, 180, 150),
+        "SG": (2476, 400, 149, 100), "AT": (1945, 500, 199, 200),
+        "RN": (2200, 500, 262, 200), "RB": (2293, 600, 267, 200),
+        "ZE": (2475, 500, 326, 250), "RO": (3274, 500, 224, 200),
+        "DC": (3466, 600,  63, 100),
     }
     fake_facies = {
         "NU": {"clay": 1.0},
@@ -283,25 +231,27 @@ def build_fake_geometry() -> FormationGeometry:
         "NL": {"clay": 1.0},
         "CK": {"chalk": 1.0},
         "KN": {"claystone": 0.46, "claystone_cool": 0.41,
-                "sandstone_shaly": 0.13},
+               "sandstone_shaly": 0.13},
         "SL": {"claystone_cool": 0.61, "claystone": 0.39},
         "SG": {"claystone": 0.69, "claystone_hot": 0.31},
         "AT": {"claystone_hot": 0.66, "claystone": 0.20,
-                "claystone_cool": 0.14},
+               "claystone_cool": 0.14},
         "RN": {"claystone": 0.54, "dolomite": 0.40, "anhydrite": 0.06},
         "RB": {"claystone_hot": 0.67, "sandstone_shaly": 0.33},
         "ZE": {"halite_pure": 0.43, "anhydrite": 0.28,
-                "other": 0.22, "dolomite": 0.07},
+               "other": 0.22, "dolomite": 0.07},
         "RO": {"sandstone_clean": 0.56, "claystone_hot": 0.44},
         "DC": {"claystone_hot": 0.59, "claystone": 0.41},
     }
- 
+
     rng = np.random.default_rng(0)
-    for fm, (med, std) in fake_thickness_stats.items():
-        thicks = rng.normal(med, std, size=50).clip(min=20.0)
+    for fm, (top_med, top_std, thick_med, thick_std) in fake_stats.items():
+        tops   = rng.normal(top_med,   top_std,   size=50).clip(min=0.0)
+        thicks = rng.normal(thick_med, thick_std, size=50).clip(min=20.0)
         geom.formations[fm] = FormationStats(
             name=fm,
             n_wells=50,
+            top_depths=tops,
             thicknesses=thicks,
             facies=fake_facies[fm],
         )

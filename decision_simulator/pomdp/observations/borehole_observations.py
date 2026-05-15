@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import warnings
 import numpy as np
 import torch
 
 from encoder.autoencoder import standardise
 from decision_simulator.resources import DecisionSimulationResources
 from decision_simulator.typing import DrillObservation
+
+# Tracks which missing variables have already been warned about this session.
+_warned_missing_vars: set[str] = set()
 
 
 def extract_borehole(
@@ -28,11 +32,43 @@ def extract_borehole(
     Returns
     -------
     np.ndarray of shape (V, D) — V variables, D depth layers, float32
+
+    Notes
+    -----
+    If a variable in ``variables`` is absent from the map (e.g., the JEPA
+    checkpoint was trained with ``pef`` but the current SimConfig no longer
+    generates it), a zero channel is substituted and a UserWarning is emitted
+    once per missing variable name.  Zero is appropriate for z-scored inputs
+    (it represents the training mean), but may bias embeddings if the encoder
+    saw a non-zero baseline for that variable during training.
     """
-    return np.stack(
-        [true_map["variables"][v][i, j, :] for v in variables],
-        axis=0,
-    ).astype(np.float32)
+    map_vars = true_map["variables"]
+    n_depth = next(iter(map_vars.values())).shape[2]
+
+    channels: list[np.ndarray] = []
+    missing: list[str] = []
+    for v in variables:
+        if v in map_vars:
+            channels.append(map_vars[v][i, j, :])
+        else:
+            channels.append(np.zeros(n_depth, dtype=np.float32))
+            missing.append(v)
+
+    new_missing = [v for v in missing if v not in _warned_missing_vars]
+    if new_missing:
+        _warned_missing_vars.update(new_missing)
+        warnings.warn(
+            f"extract_borehole: variable(s) {new_missing} not found in the "
+            f"generated map. This usually means the JEPA checkpoint was trained "
+            f"with a different SimConfig.variables than the one currently in use "
+            f"(e.g., 'pef' was removed). Substituting zeros for missing channels. "
+            f"Map has: {sorted(map_vars.keys())}. "
+            f"Consider retraining the encoder with the current variable set.",
+            UserWarning,
+            stacklevel=2,
+        )
+
+    return np.stack(channels, axis=0).astype(np.float32)
 
 
 def standardise_borehole(

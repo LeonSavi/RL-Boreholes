@@ -29,6 +29,10 @@ class NeuralBeliefTrainingConfig:
     max_drills: int = 15
 
     # --- model ---
+    # in_channels must equal 2 + latent_dim:
+    #   ch 0   : sparse ore map
+    #   ch 1   : observation mask
+    #   ch 2.. : JEPA latent vector (latent_dim channels)
     in_channels: int = 130
     base_channels: int = 64
 
@@ -44,6 +48,17 @@ class NeuralBeliefTrainingConfig:
     # --- misc ---
     seed: int = 42
     latent_dim: int = 128
+
+    def __post_init__(self) -> None:
+        expected = 2 + self.latent_dim
+        if self.in_channels != expected:
+            raise ValueError(
+                f"NeuralBeliefTrainingConfig: in_channels={self.in_channels} does not "
+                f"match 2 + latent_dim = {expected}. "
+                f"UNetBelief input layout is [ore_map, mask, JEPA_latent], so "
+                f"in_channels must always equal 2 + latent_dim. "
+                f"Either set in_channels={expected} or latent_dim={self.in_channels - 2}."
+            )
 
 
 def _pearson_correlation(pred: torch.Tensor, target: torch.Tensor) -> float:
