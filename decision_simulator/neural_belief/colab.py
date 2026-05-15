@@ -7,12 +7,6 @@ from pathlib import Path
 
 import torch
 
-from decision_simulator.config_decision_experiments import (
-    DISCOVERY_PRIOR,
-    DISTRIBUTIONS,
-    FORMATION_GEOMETRY,
-    JEPA_CHECKPOINT,
-)
 from decision_simulator.resources import load_resources
 
 from .model import UNetBelief
@@ -22,8 +16,15 @@ from .training import (
     train_neural_belief,
 )
 
+# Relative resource paths — resolved against storage_root at runtime.
+_JEPA_REL         = Path("checkpoints/jepa.pt")
+_DISTRIBUTIONS_REL = Path("data/clean/distributions.pkl")
+_FORMATION_GEO_REL = Path("data/clean/formation_geometry.pkl")
+_DISCOVERY_REL     = Path("data/clean/discovery_prior.pkl")
+
 
 def train_belief_from_colab(
+    storage_root: str | Path,
     checkpoint_dir: str | Path,
     device: str = "cuda",
     debug: bool = False,
@@ -39,7 +40,8 @@ def train_belief_from_colab(
     -------
     >>> from decision_simulator.neural_belief.colab import train_belief_from_colab
     >>> model, history = train_belief_from_colab(
-    ...     checkpoint_dir="/content/drive/MyDrive/thesis/checkpoints/belief",
+    ...     storage_root="/content/drive/MyDrive/thesis",
+    ...     checkpoint_dir="checkpoints/belief_v1",
     ...     device="cuda",
     ...     debug=True,
     ... )
@@ -47,7 +49,8 @@ def train_belief_from_colab(
     Override any NeuralBeliefTrainingConfig field via keyword arguments:
 
     >>> model, history = train_belief_from_colab(
-    ...     checkpoint_dir="/content/drive/MyDrive/thesis/checkpoints/belief",
+    ...     storage_root="/content/drive/MyDrive/thesis",
+    ...     checkpoint_dir="checkpoints/belief_v1",
     ...     device="cuda",
     ...     n_train_maps=100,
     ...     samples_per_map=30,
@@ -57,28 +60,33 @@ def train_belief_from_colab(
 
     Parameters
     ----------
+    storage_root
+        Absolute root for all data and checkpoint paths, e.g.
+        ``"/content/drive/MyDrive/thesis"``.  All relative paths are resolved
+        against this directory.
     checkpoint_dir
-        Directory where ``belief_best.pt``, ``belief_last.pt``,
-        ``training_history.json``, and ``training_history.csv`` are saved.
+        Where ``belief_best.pt``, ``belief_last.pt``, ``training_history.json``,
+        and ``training_history.csv`` are saved.  Relative paths are resolved
+        against ``storage_root``.
     device
         ``"cuda"`` or ``"cpu"``.  Raises a clear error when CUDA is requested
         but unavailable.
     debug
-        If True, use a minimal config (2 maps, 2 epochs, base_channels=16)
-        to verify the full pipeline end-to-end without a full training run.
+        If True, use a minimal config (2 maps, 2 epochs, base_channels=16) to
+        verify the full pipeline end-to-end without a full training run.
     jepa_checkpoint
-        Path to the JEPA ``.pt`` file.  Defaults to ``checkpoints/jepa.pt``
-        relative to the current working directory.
+        Path to the JEPA ``.pt`` file.  Defaults to
+        ``<storage_root>/checkpoints/jepa.pt``.
     distribution_bank_path
         Path to ``distributions.pkl``.  Defaults to
-        ``data/clean/distributions.pkl``.
+        ``<storage_root>/data/clean/distributions.pkl``.
     formation_geometry_path
         Path to ``formation_geometry.pkl``.  Defaults to
-        ``data/clean/formation_geometry.pkl``.
+        ``<storage_root>/data/clean/formation_geometry.pkl``.
     discovery_prior_path
         Path to ``discovery_prior.pkl``.  Defaults to
-        ``data/clean/discovery_prior.pkl``.  Optional — if the file does not
-        exist, a uniform placement prior is used.
+        ``<storage_root>/data/clean/discovery_prior.pkl``.  Optional — if the
+        file does not exist, a uniform placement prior is used.
     **overrides
         Any field of :class:`NeuralBeliefTrainingConfig` by name, e.g.
         ``n_epochs=75``.  Unknown field names raise ``ValueError``.
@@ -86,23 +94,35 @@ def train_belief_from_colab(
     Returns
     -------
     tuple[UNetBelief, list[dict]]
-        ``(model, history)`` — the trained model loaded with its best
-        weights, and the per-epoch training history.
+        ``(model, history)`` — the trained model loaded with its best weights,
+        and the per-epoch training history.
     """
     _check_device(device)
 
-    checkpoint_dir = Path(checkpoint_dir)
-    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    root = Path(storage_root).expanduser().resolve()
+
+    jepa, distributions, formation_geo, discovery = _resolve_paths(
+        root,
+        jepa_checkpoint,
+        distribution_bank_path,
+        formation_geometry_path,
+        discovery_prior_path,
+    )
+    _check_required_paths(jepa, distributions, formation_geo)
+
+    ckpt_dir = Path(checkpoint_dir)
+    if not ckpt_dir.is_absolute():
+        ckpt_dir = root / ckpt_dir
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
 
     cfg = _build_config(debug, overrides)
-
     print(f"\nTraining config:\n{cfg}\n")
 
     resources = load_resources(
-        jepa_path=Path(jepa_checkpoint) if jepa_checkpoint is not None else JEPA_CHECKPOINT,
-        distributions_path=Path(distribution_bank_path) if distribution_bank_path is not None else DISTRIBUTIONS,
-        formation_geometry_path=Path(formation_geometry_path) if formation_geometry_path is not None else FORMATION_GEOMETRY,
-        discovery_prior_path=Path(discovery_prior_path) if discovery_prior_path is not None else DISCOVERY_PRIOR,
+        jepa_path=jepa,
+        distributions_path=distributions,
+        formation_geometry_path=formation_geo,
+        discovery_prior_path=discovery,
         device=device,
     )
 
@@ -110,15 +130,15 @@ def train_belief_from_colab(
         resources=resources,
         cfg=cfg,
         device=device,
-        checkpoint_dir=checkpoint_dir,
+        checkpoint_dir=ckpt_dir,
         verbose=True,
     )
 
     # Smoke test: verify the saved checkpoint loads cleanly.
-    _, _, _, history = load_belief_checkpoint(checkpoint_dir / "belief_best.pt", device=device)
+    _, _, _, history = load_belief_checkpoint(ckpt_dir / "belief_best.pt", device=device)
     print(f"\nSmoke test passed: checkpoint loaded with {len(history)} epoch(s) of history.")
 
-    _export_history(history, checkpoint_dir)
+    _export_history(history, ckpt_dir)
 
     return model, history
 
@@ -126,6 +146,26 @@ def train_belief_from_colab(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _resolve_paths(
+    root: Path,
+    jepa_checkpoint: str | Path | None,
+    distribution_bank_path: str | Path | None,
+    formation_geometry_path: str | Path | None,
+    discovery_prior_path: str | Path | None,
+) -> tuple[Path, Path, Path, Path]:
+    jepa         = Path(jepa_checkpoint)         if jepa_checkpoint         is not None else root / _JEPA_REL
+    distributions = Path(distribution_bank_path) if distribution_bank_path  is not None else root / _DISTRIBUTIONS_REL
+    formation_geo = Path(formation_geometry_path) if formation_geometry_path is not None else root / _FORMATION_GEO_REL
+    discovery     = Path(discovery_prior_path)    if discovery_prior_path    is not None else root / _DISCOVERY_REL
+    return jepa, distributions, formation_geo, discovery
+
+
+def _check_required_paths(jepa: Path, distributions: Path, formation_geo: Path) -> None:
+    for path in (jepa, distributions, formation_geo):
+        if not path.exists():
+            raise FileNotFoundError(f"Required resource not found: {path}")
+
 
 def _check_device(device: str) -> None:
     if device == "cuda":
