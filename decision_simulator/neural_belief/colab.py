@@ -193,6 +193,81 @@ def train_belief_from_colab(
     return model, history
 
 
+def pull_belief_maps_from_colab(
+    storage_root: str | Path,
+    n_maps: int = 500,
+    out: str | Path = "data/belief_dataset/raw_pool.pkl",
+    seed: int = 42,
+    samples_per_map: int = 20,
+    min_drills: int = 1,
+    max_drills: int = 15,
+) -> Path:
+    """Pre-generate a belief map pool for later use with compare_belief_encoders_from_colab.
+
+    Run this on a CPU runtime to generate maps without occupying a GPU slot.
+    The saved pool can then be passed to compare_belief_encoders_from_colab
+    via map_pool_path on a GPU runtime.  Re-running with a larger n_maps
+    appends only the missing maps without discarding existing work.
+
+    Example
+    -------
+    >>> from decision_simulator.neural_belief.colab import pull_belief_maps_from_colab
+    >>> pool_path = pull_belief_maps_from_colab(
+    ...     storage_root="/content/drive/MyDrive/Thesis",
+    ...     n_maps=500,
+    ... )
+    >>> # then on a GPU runtime:
+    >>> results = compare_belief_encoders_from_colab(
+    ...     storage_root="/content/drive/MyDrive/Thesis",
+    ...     map_pool_path=pool_path,
+    ...     n_train_maps=200,
+    ...     n_val_maps=50,
+    ... )
+
+    Parameters
+    ----------
+    storage_root
+        Absolute root for all data paths, e.g. "/content/drive/MyDrive/Thesis".
+    n_maps
+        Total number of maps to have in the pool after this call.
+    out
+        Path for the pool pickle. Relative paths are resolved against storage_root.
+    seed
+        Base seed for map and drill-pattern generation.
+    samples_per_map
+        Drill patterns stored per map. Should be >= the samples_per_map used
+        during training (default matches NeuralBeliefTrainingConfig).
+    min_drills, max_drills
+        Range of drills per sample. Must match the values used during training.
+
+    Returns
+    -------
+    Path
+        Absolute path to the saved pool file, ready to pass as map_pool_path.
+    """
+    root = Path(storage_root).expanduser().resolve()
+    _, _, distributions, formation_geo, discovery = _resolve_paths(
+        root, None, None, None, None, None
+    )
+    _check_sim_paths(distributions, formation_geo)
+
+    out_path = Path(out)
+    if not out_path.is_absolute():
+        out_path = root / out_path
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    pool_cfg = BeliefDatasetConfig(
+        n_maps=n_maps,
+        samples_per_map=samples_per_map,
+        min_drills=min_drills,
+        max_drills=max_drills,
+        seed=seed,
+    )
+    sim_resources = _load_sim_resources(distributions, formation_geo, discovery)
+    _ensure_pool_size(out_path, sim_resources, pool_cfg, n_maps)
+    return out_path
+
+
 # ---------------------------------------------------------------------------
 # Resource loading
 # ---------------------------------------------------------------------------
@@ -372,6 +447,7 @@ def compare_belief_encoders_from_colab(
     device: str = "cuda",
     variants: tuple[str, ...] = ("none", "autoencoder", "jepa"),
     debug: bool = False,
+    map_pool_path: str | Path | None = None,
     **overrides,
 ) -> pd.DataFrame:
     """Train and compare multiple borehole encoder variants on identical data.
@@ -436,32 +512,36 @@ def compare_belief_encoders_from_colab(
     # Build a base config to extract dataset size / seed settings.
     base_cfg = _build_config(debug, {k: v for k, v in overrides.items()
                                      if k not in ("in_channels", "latent_dim")})
-    train_ds_cfg = BeliefDatasetConfig(
-        n_maps=base_cfg.n_train_maps,
-        samples_per_map=base_cfg.samples_per_map,
+
+    # Pool stores max(train, val) samples per map so both can be sliced from it.
+    pool_samples_per_map = max(base_cfg.samples_per_map, base_cfg.val_samples_per_map)
+    pool_cfg = BeliefDatasetConfig(
+        n_maps=base_cfg.n_train_maps + base_cfg.n_val_maps,
+        samples_per_map=pool_samples_per_map,
         min_drills=base_cfg.min_drills,
         max_drills=base_cfg.max_drills,
         seed=base_cfg.seed,
-    )
-    val_ds_cfg = BeliefDatasetConfig(
-        n_maps=base_cfg.n_val_maps,
-        samples_per_map=base_cfg.val_samples_per_map,
-        min_drills=base_cfg.min_drills,
-        max_drills=base_cfg.max_drills,
-        seed=base_cfg.seed + 1,
     )
 
     # Load only the simulator components needed for map generation (no encoder).
     sim_resources = _load_sim_resources(distributions, formation_geo, discovery)
 
-    # Generate or restore raw map caches shared across all variants.
+    # Resolve pool path: explicit argument takes priority, else local cache dir.
     cache_dir = out_root / "dataset_cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
-    train_cache = _get_raw_cache(
-        cache_dir / "raw_train.pkl", sim_resources, train_ds_cfg, label="train"
-    )
-    val_cache = _get_raw_cache(
-        cache_dir / "raw_val.pkl", sim_resources, val_ds_cfg, label="val"
+    if map_pool_path is not None:
+        resolved_pool_path = Path(map_pool_path)
+        if not resolved_pool_path.is_absolute():
+            resolved_pool_path = root / resolved_pool_path
+    else:
+        resolved_pool_path = cache_dir / "raw_pool.pkl"
+
+    train_cache, val_cache = _get_or_grow_pool(
+        pool_path=resolved_pool_path,
+        resources=sim_resources,
+        pool_cfg=pool_cfg,
+        n_train=base_cfg.n_train_maps,
+        n_val=base_cfg.n_val_maps,
     )
 
     rows: list[dict] = []
@@ -488,11 +568,17 @@ def compare_belief_encoders_from_colab(
         print(f"in_channels      : {cfg.in_channels}")
 
         print("\nBuilding training dataset from shared cache ...")
-        train_ds = build_dataset_from_cache(train_cache, resources, device, verbose=True)
+        train_ds = build_dataset_from_cache(
+            train_cache, resources, device, verbose=True,
+            samples_per_map=cfg.samples_per_map,
+        )
         print(f"  train samples : {len(train_ds)}")
 
         print("Building validation dataset from shared cache ...")
-        val_ds = build_dataset_from_cache(val_cache, resources, device, verbose=True)
+        val_ds = build_dataset_from_cache(
+            val_cache, resources, device, verbose=True,
+            samples_per_map=cfg.val_samples_per_map,
+        )
         print(f"  val   samples : {len(val_ds)}")
 
         train_neural_belief(
@@ -559,32 +645,69 @@ def _load_sim_resources(
     )
 
 
-def _get_raw_cache(
-    cache_path: Path,
+def _ensure_pool_size(
+    pool_path: Path,
     resources: DecisionSimulationResources,
-    cfg: BeliefDatasetConfig,
-    label: str = "dataset",
+    pool_cfg: BeliefDatasetConfig,
+    n_maps: int,
 ) -> RawMapCache:
-    """Load a RawMapCache from disk if present and config matches, else generate."""
-    if cache_path.exists():
-        cache = RawMapCache.load(cache_path)
-        if cache.config_matches(cfg):
-            print(
-                f"  [cache] Loaded {label} cache from {cache_path}"
-                f" ({len(cache.maps)} maps, seed={cfg.seed})"
-            )
-            return cache
-        print(f"  [cache] Config mismatch for {label} cache — regenerating ...")
-    else:
-        print(
-            f"  [cache] No {label} cache found — generating"
-            f" {cfg.n_maps} maps (seed={cfg.seed}) ..."
-        )
+    """Load pool from disk, grow to n_maps if needed, and return it.
 
-    cache = generate_raw_map_cache(resources, cfg, verbose=True)
-    cache.save(cache_path)
-    print(f"  [cache] Saved {label} cache -> {cache_path}")
-    return cache
+    - Pool has enough maps: load and return without regenerating.
+    - Pool is too small: generate only the missing maps, append, and save.
+    - Pool drill params changed: discard and regenerate from scratch.
+    - No pool file: generate n_maps maps and save.
+    """
+    pool: RawMapCache | None = None
+
+    if pool_path.exists():
+        pool = RawMapCache.load(pool_path)
+        if not pool.drill_params_match(pool_cfg):
+            print(
+                f"  [pool] Drill parameters changed - discarding "
+                f"{pool.pool_size}-map pool and regenerating ..."
+            )
+            pool = None
+        elif pool.pool_size >= n_maps:
+            print(
+                f"  [pool] Loaded {pool_path.name} "
+                f"({pool.pool_size} maps available, {n_maps} needed)"
+            )
+            return pool
+        else:
+            n_extra = n_maps - pool.pool_size
+            print(
+                f"  [pool] Pool has {pool.pool_size} maps, need {n_maps} - "
+                f"generating {n_extra} more ..."
+            )
+            extra_cfg = dataclasses.replace(
+                pool_cfg, n_maps=n_extra, seed=pool_cfg.seed + pool.pool_size
+            )
+            extra = generate_raw_map_cache(resources, extra_cfg, verbose=True)
+            pool.extend(extra)
+            pool.save(pool_path)
+            print(f"  [pool] Pool grown -> {pool_path} ({pool.pool_size} maps)")
+            return pool
+
+    full_cfg = dataclasses.replace(pool_cfg, n_maps=n_maps)
+    print(f"  [pool] Generating {n_maps} maps (seed={pool_cfg.seed}) ...")
+    pool = generate_raw_map_cache(resources, full_cfg, verbose=True)
+    pool.save(pool_path)
+    print(f"  [pool] Saved -> {pool_path} ({pool.pool_size} maps)")
+    return pool
+
+
+def _get_or_grow_pool(
+    pool_path: Path,
+    resources: DecisionSimulationResources,
+    pool_cfg: BeliefDatasetConfig,
+    n_train: int,
+    n_val: int,
+) -> tuple[RawMapCache, RawMapCache]:
+    pool = _ensure_pool_size(pool_path, resources, pool_cfg, n_train + n_val)
+    train_cache = pool.subset(list(range(n_train)))
+    val_cache = pool.subset(list(range(n_train, n_train + n_val)))
+    return train_cache, val_cache
 
 
 # ---------------------------------------------------------------------------

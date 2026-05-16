@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import pickle
 from dataclasses import dataclass
 from pathlib import Path
@@ -51,6 +52,36 @@ class RawMapCache:
     def load(cls, path: Path | str) -> RawMapCache:
         with open(path, "rb") as f:
             return pickle.load(f)
+
+    @property
+    def pool_size(self) -> int:
+        return len(self.maps)
+
+    def drill_params_match(self, cfg: BeliefDatasetConfig) -> bool:
+        """Check drill parameters match, ignoring n_maps (pool can be larger)."""
+        c = self.cfg
+        return (
+            c.samples_per_map == cfg.samples_per_map
+            and c.min_drills == cfg.min_drills
+            and c.max_drills == cfg.max_drills
+            and c.seed == cfg.seed
+        )
+
+    def subset(self, indices: list[int]) -> "RawMapCache":
+        """Return a new RawMapCache containing only the specified map indices."""
+        return RawMapCache(
+            maps=[self.maps[i] for i in indices],
+            targets=[self.targets[i] for i in indices],
+            drill_patterns=[self.drill_patterns[i] for i in indices],
+            cfg=dataclasses.replace(self.cfg, n_maps=len(indices)),
+        )
+
+    def extend(self, other: "RawMapCache") -> None:
+        """Append maps from another cache to this pool in-place."""
+        self.maps.extend(other.maps)
+        self.targets.extend(other.targets)
+        self.drill_patterns.extend(other.drill_patterns)
+        self.cfg = dataclasses.replace(self.cfg, n_maps=len(self.maps))
 
     def config_matches(self, other: BeliefDatasetConfig) -> bool:
         c = self.cfg
@@ -258,6 +289,7 @@ def build_dataset_from_cache(
     resources: DecisionSimulationResources,
     device: str,
     verbose: bool = False,
+    samples_per_map: int | None = None,
 ) -> GeologicalBeliefDataset:
     """Build an encoder-specific dataset from a shared :class:`RawMapCache`.
 
@@ -275,7 +307,8 @@ def build_dataset_from_cache(
     ):
         full_latent_map = encode_full_latent_map(true_map, resources, device)
 
-        for drill_locs, ore_vals in samples:
+        used_samples = samples[:samples_per_map] if samples_per_map is not None else samples
+        for drill_locs, ore_vals in used_samples:
             inp = build_sample_input(drill_locs, ore_vals, full_latent_map)
             all_inputs.append(inp)
             all_targets.append(target_ore[np.newaxis])  # (1, n_x, n_y)
