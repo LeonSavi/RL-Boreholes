@@ -312,7 +312,7 @@ def main():
                         "of pull_maps.py) instead of generating "
                         "online during training. Pass an empty string ('') "
                         "to force online generation.")
-    p.add_argument("--min-maps-warmup", type=int, default=3500,
+    p.add_argument("--min-maps-warmup", type=int, default=5000,
                    help="block early-stopping until this many maps' worth "
                         "of batches have been consumed.  At batch_size=128 "
                         "and 32×32 maps, one map = 8 batches.")

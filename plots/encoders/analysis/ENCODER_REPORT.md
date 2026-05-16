@@ -27,9 +27,9 @@ Per-label-set silhouette:
 
 | label set | AE | JEPA |
 |---|---|---|
-| formation (deepest) | +0.104 | +0.077 |
-| formation (middle 50%) | +0.131 | +0.117 |
-| rock (bottom 25%) | -0.003 | +0.004 |
+| formation (deepest) | +0.111 | +0.138 |
+| formation (middle 50%) | +0.115 | +0.150 |
+| rock (bottom 25%) | +0.003 | -0.044 |
 | rock (middle 50%) | — | — |
 
 ## 3. Autoencoder reconstruction quality
@@ -40,11 +40,11 @@ Per-variable reconstruction error (standardised units):
 
 | variable | R² | SmoothL1 | n cells |
 |---|---|---|---|
-| rhob | 0.356 | 0.3538 | 1,320,000 |
-| gr_api | -0.072 | 0.6444 | 1,320,000 |
-| dt_us_ft | 0.655 | 0.1803 | 1,320,000 |
-| nphi | 0.381 | 0.2674 | 1,320,000 |
-| res_deep_log | -0.108 | 0.6319 | 1,320,000 |
+| rhob | 0.436 | 0.3121 | 1,320,000 |
+| gr_api | 0.174 | 0.5349 | 1,320,000 |
+| dt_us_ft | 0.732 | 0.1479 | 1,320,000 |
+| nphi | 0.447 | 0.2440 | 1,320,000 |
+| res_deep_log | -0.046 | 0.5824 | 1,320,000 |
 
 R² ≈ 1 and SmoothL1 ≪ 1 indicate the autoencoder can reconstruct each channel from the latent.  Drops on a specific variable point to information loss in the bottleneck.
 

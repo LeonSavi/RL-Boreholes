@@ -11,6 +11,10 @@ data/clean/*.parquet
 *.parquet
 *.las
 *.json
+*.npz
+
+data/dataset/
+
 
 *.csv
 *.csv*
