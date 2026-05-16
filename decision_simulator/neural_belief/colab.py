@@ -254,7 +254,7 @@ def compare_belief_encoders_from_colab(
     device: str = "cuda",
     variants: tuple[str, ...] = ("none", "autoencoder", "jepa"),
     debug: bool = False,
-    map_pool_path: str | Path | None = None,
+    map_pool_path: str | Path = "data/belief_dataset/raw_pool.pkl",
     sim_cfg: SimConfig | None = None,
     **overrides,
 ) -> pd.DataFrame:
@@ -312,6 +312,11 @@ def compare_belief_encoders_from_colab(
         out_root = root / out_root
     out_root.mkdir(parents=True, exist_ok=True)
 
+    resolved_pool_path = Path(map_pool_path)
+    if not resolved_pool_path.is_absolute():
+        resolved_pool_path = root / resolved_pool_path
+    resolved_pool_path.parent.mkdir(parents=True, exist_ok=True)
+
     jepa_path, ae_path, distributions, formation_geo, discovery = (
         resolve_resource_paths(root)
     )
@@ -340,16 +345,6 @@ def compare_belief_encoders_from_colab(
         formation_geometry_path=formation_geo,
         discovery_prior_path=discovery,
     )
-
-    # Resolve pool path: explicit argument takes priority, else local cache dir.
-    cache_dir = out_root / "dataset_cache"
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    if map_pool_path is not None:
-        resolved_pool_path = Path(map_pool_path)
-        if not resolved_pool_path.is_absolute():
-            resolved_pool_path = root / resolved_pool_path
-    else:
-        resolved_pool_path = cache_dir / "raw_pool.pkl"
 
     n_total = base_cfg.n_train_maps + base_cfg.n_val_maps
     pool_manager = get_cache_handler(resolved_pool_path, pool_cfg, n_total, sim_cfg)
@@ -423,7 +418,9 @@ def compare_belief_encoders_from_colab(
         )
         print(f"\nSmoke test passed: {len(history)} epoch(s) in history.")
         export_history(history, ckpt_dir)
-        save_experiment_config(ckpt_dir, cfg, cache_path=resolved_pool_path, sim_cfg=sim_cfg)
+        save_experiment_config(
+            ckpt_dir, cfg, cache_path=resolved_pool_path, sim_cfg=sim_cfg
+        )
 
         best = min(history, key=lambda r: r["val_mse"])
         rows.append(

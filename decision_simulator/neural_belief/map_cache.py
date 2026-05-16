@@ -187,10 +187,8 @@ def get_cache_handler(
                 f"{pool.pool_size}-map pool and regenerating ..."
             )
             pool = None
-        elif (
-            pool.sim_cfg is not None
-            and sim_cfg is not None
-            and pool.sim_cfg != sim_cfg
+        elif (  # Snippet checks if the dimensions provided are different from the maps already in cache.
+            pool.sim_cfg is not None and sim_cfg is not None and pool.sim_cfg != sim_cfg
         ):
             print(
                 f"  [pool] SimConfig changed - discarding "
