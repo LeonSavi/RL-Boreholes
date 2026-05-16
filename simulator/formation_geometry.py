@@ -735,8 +735,28 @@ class FormationGeometry:
 
     @classmethod
     def load(cls, path: str | Path) -> "FormationGeometry":
-        with open(path, "rb") as f:
-            obj = pickle.load(f)
+        # Pandas changed StringDtype.__init__ between versions; old pickles may
+        # carry 3 positional args that the new version rejects.  Patch
+        # temporarily so pickle.load() can reconstruct the object.
+        _patched = False
+        try:
+            import pandas.core.arrays.string_ as _pds
+            _orig_init = _pds.StringDtype.__init__
+            def _compat_init(self, *args, **kwargs):
+                try:
+                    _orig_init(self, *args, **kwargs)
+                except TypeError:
+                    _orig_init(self)
+            _pds.StringDtype.__init__ = _compat_init
+            _patched = True
+        except (ImportError, AttributeError):
+            pass
+        try:
+            with open(path, "rb") as f:
+                obj = pickle.load(f)
+        finally:
+            if _patched:
+                _pds.StringDtype.__init__ = _orig_init
         obj._strat_idx = {fm: i for i, fm in enumerate(obj.formation_order)}
         for s in obj.formations.values():
             if not hasattr(s, "well_compositions"):
