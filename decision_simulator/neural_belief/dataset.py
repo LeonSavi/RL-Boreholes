@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import dataclasses
-import pickle
 from dataclasses import dataclass
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -12,6 +10,9 @@ from torch.utils.data import Dataset
 from simulator.map_generator import MapGenerator, SimConfig
 from decision_simulator.resources import DecisionSimulationResources
 from .utils import TargetNormalizer, build_ore_target, encode_full_latent_map, build_sample_input
+
+if TYPE_CHECKING:
+    from .map_cache import RawMapCache
 
 
 @dataclass
@@ -22,89 +23,19 @@ class BeliefDatasetConfig:
     samples_per_map: int = 20
     min_drills: int = 1
     max_drills: int = 15
-    latent_dim: int = 128
     seed: int = 42
-
-
-@dataclass
-class RawMapCache:
-    """Encoder-agnostic map and drill data, reusable across encoder variants.
-
-    Stores raw ``true_map`` dicts, per-map target ore arrays, and drill
-    patterns (locations + observed values) with no encoder-specific tensors.
-    Latent embeddings are computed on demand per variant via
-    ``build_dataset_from_cache``.
-    """
-
-    maps: list[dict]
-    targets: list[np.ndarray]  # per-map: (n_x, n_y) float32
-    # drill_patterns[map_idx][sample_idx] = (drill_locs, ore_vals)
-    drill_patterns: list[list[tuple[list[tuple[int, int]], list[float]]]]
-    cfg: BeliefDatasetConfig
-
-    def save(self, path: Path | str) -> None:
-        path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "wb") as f:
-            pickle.dump(self, f)
-
-    @classmethod
-    def load(cls, path: Path | str) -> RawMapCache:
-        with open(path, "rb") as f:
-            return pickle.load(f)
-
-    @property
-    def pool_size(self) -> int:
-        return len(self.maps)
-
-    def drill_params_match(self, cfg: BeliefDatasetConfig) -> bool:
-        """Check drill parameters match, ignoring n_maps (pool can be larger)."""
-        c = self.cfg
-        return (
-            c.samples_per_map == cfg.samples_per_map
-            and c.min_drills == cfg.min_drills
-            and c.max_drills == cfg.max_drills
-            and c.seed == cfg.seed
-        )
-
-    def subset(self, indices: list[int]) -> "RawMapCache":
-        """Return a new RawMapCache containing only the specified map indices."""
-        return RawMapCache(
-            maps=[self.maps[i] for i in indices],
-            targets=[self.targets[i] for i in indices],
-            drill_patterns=[self.drill_patterns[i] for i in indices],
-            cfg=dataclasses.replace(self.cfg, n_maps=len(indices)),
-        )
-
-    def extend(self, other: "RawMapCache") -> None:
-        """Append maps from another cache to this pool in-place."""
-        self.maps.extend(other.maps)
-        self.targets.extend(other.targets)
-        self.drill_patterns.extend(other.drill_patterns)
-        self.cfg = dataclasses.replace(self.cfg, n_maps=len(self.maps))
-
-    def config_matches(self, other: BeliefDatasetConfig) -> bool:
-        c = self.cfg
-        return (
-            c.n_maps == other.n_maps
-            and c.samples_per_map == other.samples_per_map
-            and c.min_drills == other.min_drills
-            and c.max_drills == other.max_drills
-            and c.seed == other.seed
-        )
 
 
 def _validate_sample(
     inp: np.ndarray,
     target: np.ndarray,
     drill_locs: list[tuple[int, int]],
-    latent_dim: int,
     n_x: int,
     n_y: int,
 ) -> None:
     """Assert shape and content invariants for one generated sample."""
-    assert inp.shape == (2 + latent_dim, n_x, n_y), (
-        f"input shape {inp.shape} != ({2 + latent_dim}, {n_x}, {n_y})"
+    assert inp.ndim == 3 and inp.shape[1:] == (n_x, n_y), (
+        f"input spatial shape {inp.shape[1:]} != ({n_x}, {n_y})"
     )
     assert target.shape == (1, n_x, n_y), (
         f"target shape {target.shape} != (1, {n_x}, {n_y})"
@@ -217,7 +148,7 @@ class GeologicalBeliefDataset(Dataset):
                 tgt = target_ore[np.newaxis]  # (1, n_x, n_y)
 
                 if validate_samples:
-                    _validate_sample(inp, tgt, drill_locs, cfg.latent_dim, n_x, n_y)
+                    _validate_sample(inp, tgt, drill_locs, n_x, n_y)
 
                 all_inputs.append(inp)
                 all_targets.append(tgt)
@@ -228,60 +159,6 @@ class GeologicalBeliefDataset(Dataset):
         inputs_t = torch.from_numpy(np.stack(all_inputs, axis=0))    # (N, C, n_x, n_y)
         targets_t = torch.from_numpy(np.stack(all_targets, axis=0))  # (N, 1, n_x, n_y)
         return cls(inputs_t, targets_t)
-
-
-def generate_raw_map_cache(
-    resources: DecisionSimulationResources,
-    cfg: BeliefDatasetConfig,
-    sim_cfg: SimConfig | None = None,
-    verbose: bool = True,
-) -> RawMapCache:
-    """Generate maps and drill patterns without any encoder-specific encoding.
-
-    The returned :class:`RawMapCache` can be passed to
-    :func:`build_dataset_from_cache` repeatedly with different encoders to
-    produce encoder-specific :class:`GeologicalBeliefDataset` instances while
-    keeping maps and drill patterns identical across variants.
-    """
-    if sim_cfg is None:
-        sim_cfg = SimConfig()
-
-    rng = np.random.default_rng(cfg.seed)
-    gen = MapGenerator(
-        resources.distribution_bank,
-        resources.formation_geometry,
-        sim_cfg,
-        seed=int(rng.integers(1 << 31)),
-        prior=resources.discovery_prior,
-    )
-
-    n_x, n_y = sim_cfg.n_x, sim_cfg.n_y
-    all_locations = [(i, j) for i in range(n_x) for j in range(n_y)]
-
-    maps: list[dict] = []
-    targets: list[np.ndarray] = []
-    drill_patterns: list[list[tuple[list[tuple[int, int]], list[float]]]] = []
-
-    for map_idx in range(cfg.n_maps):
-        true_map = next(gen)
-        target_ore = build_ore_target(true_map)
-
-        samples: list[tuple[list[tuple[int, int]], list[float]]] = []
-        for _ in range(cfg.samples_per_map):
-            n_drills = int(rng.integers(cfg.min_drills, cfg.max_drills + 1))
-            chosen = rng.choice(len(all_locations), size=n_drills, replace=False)
-            drill_locs = [all_locations[k] for k in chosen]
-            ore_vals = [float(target_ore[i, j]) for i, j in drill_locs]
-            samples.append((drill_locs, ore_vals))
-
-        maps.append(true_map)
-        targets.append(target_ore)
-        drill_patterns.append(samples)
-
-        if verbose and (map_idx + 1) % 10 == 0:
-            print(f"  [cache] {map_idx + 1}/{cfg.n_maps} maps generated")
-
-    return RawMapCache(maps=maps, targets=targets, drill_patterns=drill_patterns, cfg=cfg)
 
 
 def build_dataset_from_cache(

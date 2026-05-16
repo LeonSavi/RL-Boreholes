@@ -1,32 +1,33 @@
 from __future__ import annotations
 
-import csv
-import dataclasses
-import json
 from pathlib import Path
 from typing import Literal
 
 import pandas as pd
-import torch
 
-from simulator.distributions import DiscoveryPrior, DistributionBank
-from simulator.formation_geometry import FormationGeometry
-from decision_simulator.resources import DecisionSimulationResources
+from simulator.map_generator import SimConfig
 
-from .dataset import BeliefDatasetConfig, RawMapCache, build_dataset_from_cache, generate_raw_map_cache
-from .model import UNetBelief
-from .training import (
-    NeuralBeliefTrainingConfig,
-    load_belief_checkpoint,
-    train_neural_belief,
+from decision_simulator.resources import (
+    check_device,
+    check_encoder_path,
+    check_sim_paths,
+    load_decision_resources,
+    resolve_resource_paths,
 )
 
-# Default resource paths, resolved against storage_root at runtime.
-_JEPA_REL = Path("checkpoints/jepa.pt")
-_AE_REL = Path("checkpoints/ae.pt")
-_DISTRIBUTIONS_REL = Path("data/clean/distributions.pkl")
-_FORMATION_GEO_REL = Path("data/clean/formation_geometry.pkl")
-_DISCOVERY_REL = Path("data/clean/discovery_prior.pkl")
+from .dataset import (
+    BeliefDatasetConfig,
+    build_dataset_from_cache,
+)
+from .map_cache import get_cache_handler
+from .model import UNetBelief
+from .training import (
+    build_training_config,
+    export_history,
+    load_belief_checkpoint,
+    save_experiment_config,
+    train_neural_belief,
+)
 
 
 def train_belief_from_colab(
@@ -35,11 +36,6 @@ def train_belief_from_colab(
     device: str = "cuda",
     debug: bool = False,
     borehole_encoder: Literal["jepa", "autoencoder", "none"] = "jepa",
-    jepa_checkpoint: str | Path | None = None,
-    autoencoder_checkpoint: str | Path | None = None,
-    distribution_bank_path: str | Path | None = None,
-    formation_geometry_path: str | Path | None = None,
-    discovery_prior_path: str | Path | None = None,
     plot_dir: str | Path | None = None,
     **overrides,
 ) -> tuple[UNetBelief, list[dict]]:
@@ -95,24 +91,6 @@ def train_belief_from_colab(
         ``"jepa"``        — JEPA encoder; ``in_channels = 2 + latent_dim``
         ``"autoencoder"`` — 1-D CNN autoencoder; ``in_channels = 2 + latent_dim``
         ``"none"``        — no encoder; input is ore + mask only, ``in_channels = 2``
-    jepa_checkpoint
-        Path to the JEPA ``.pt`` file.  Defaults to
-        ``<storage_root>/checkpoints/jepa.pt``.  Required when
-        ``borehole_encoder="jepa"``.
-    autoencoder_checkpoint
-        Path to the autoencoder ``.pt`` file.  Defaults to
-        ``<storage_root>/checkpoints/ae.pt``.  Required when
-        ``borehole_encoder="autoencoder"``.
-    distribution_bank_path
-        Path to ``distributions.pkl``.  Defaults to
-        ``<storage_root>/data/clean/distributions.pkl``.
-    formation_geometry_path
-        Path to ``formation_geometry.pkl``.  Defaults to
-        ``<storage_root>/data/clean/formation_geometry.pkl``.
-    discovery_prior_path
-        Path to ``discovery_prior.pkl``.  Defaults to
-        ``<storage_root>/data/clean/discovery_prior.pkl``.  Optional — if the
-        file does not exist, a uniform placement prior is used.
     **overrides
         Any field of :class:`NeuralBeliefTrainingConfig` by name, e.g.
         ``n_epochs=75``.  Unknown field names raise ``ValueError``.
@@ -125,20 +103,15 @@ def train_belief_from_colab(
         ``(model, history)`` — the trained model loaded with its best weights,
         and the per-epoch training history.
     """
-    _check_device(device)
+    check_device(device)
 
     root = Path(storage_root).expanduser().resolve()
 
-    jepa_path, ae_path, distributions, formation_geo, discovery = _resolve_paths(
-        root,
-        jepa_checkpoint,
-        autoencoder_checkpoint,
-        distribution_bank_path,
-        formation_geometry_path,
-        discovery_prior_path,
+    jepa_path, ae_path, distributions, formation_geo, discovery = (
+        resolve_resource_paths(root)
     )
-    _check_encoder_path(borehole_encoder, jepa_path, ae_path)
-    _check_sim_paths(distributions, formation_geo)
+    check_encoder_path(borehole_encoder, jepa_path, ae_path)
+    check_sim_paths(distributions, formation_geo)
 
     ckpt_dir = Path(checkpoint_dir)
     if not ckpt_dir.is_absolute():
@@ -151,20 +124,21 @@ def train_belief_from_colab(
         if not plot_dir_resolved.is_absolute():
             plot_dir_resolved = root / plot_dir_resolved
 
-    resources, latent_dim = _load_encoder_resources(
-        borehole_encoder,
-        jepa_path,
-        ae_path,
-        distributions,
-        formation_geo,
-        discovery,
-        device,
+    resources, latent_dim = load_decision_resources(
+        borehole_encoder=borehole_encoder,
+        jepa_path=jepa_path,
+        ae_path=ae_path,
+        distributions_path=distributions,
+        formation_geometry_path=formation_geo,
+        discovery_prior_path=discovery,
+        device=device,
     )
 
     # in_channels and latent_dim are derived from the encoder;
     # explicit user overrides take precedence.
     encoder_defaults = {"in_channels": 2 + latent_dim, "latent_dim": latent_dim}
-    cfg = _build_config(debug, {**encoder_defaults, **overrides})
+    cfg = build_training_config(debug, {**encoder_defaults, **overrides})
+    cfg.borehole_encoder = borehole_encoder
 
     print(f"\nborehole_encoder : {borehole_encoder}")
     print(f"latent_dim       : {latent_dim}")
@@ -188,7 +162,8 @@ def train_belief_from_colab(
         f"\nSmoke test passed: checkpoint loaded with {len(history)} epoch(s) of history."
     )
 
-    _export_history(history, ckpt_dir)
+    export_history(history, ckpt_dir)
+    save_experiment_config(ckpt_dir, cfg, cache_path=None, sim_cfg=None)
 
     return model, history
 
@@ -201,6 +176,7 @@ def pull_belief_maps_from_colab(
     samples_per_map: int = 20,
     min_drills: int = 1,
     max_drills: int = 15,
+    sim_cfg: SimConfig | None = None,
 ) -> Path:
     """Pre-generate a belief map pool for later use with compare_belief_encoders_from_colab.
 
@@ -246,10 +222,8 @@ def pull_belief_maps_from_colab(
         Absolute path to the saved pool file, ready to pass as map_pool_path.
     """
     root = Path(storage_root).expanduser().resolve()
-    _, _, distributions, formation_geo, discovery = _resolve_paths(
-        root, None, None, None, None, None
-    )
-    _check_sim_paths(distributions, formation_geo)
+    _, _, distributions, formation_geo, discovery = resolve_resource_paths(root)
+    check_sim_paths(distributions, formation_geo)
 
     out_path = Path(out)
     if not out_path.is_absolute():
@@ -263,182 +237,15 @@ def pull_belief_maps_from_colab(
         max_drills=max_drills,
         seed=seed,
     )
-    sim_resources = _load_sim_resources(distributions, formation_geo, discovery)
-    _ensure_pool_size(out_path, sim_resources, pool_cfg, n_maps)
+    sim_resources, _ = load_decision_resources(
+        borehole_encoder="none",
+        distributions_path=distributions,
+        formation_geometry_path=formation_geo,
+        discovery_prior_path=discovery,
+    )
+    pool_manager = get_cache_handler(out_path, pool_cfg, n_maps, sim_cfg)
+    pool_manager.ensure_pool_size(n_maps, sim_resources, out_path, sim_cfg)
     return out_path
-
-
-# ---------------------------------------------------------------------------
-# Resource loading
-# ---------------------------------------------------------------------------
-
-
-def _load_encoder_resources(
-    borehole_encoder: str,
-    jepa_path: Path,
-    ae_path: Path,
-    distributions: Path,
-    formation_geo: Path,
-    discovery: Path,
-    device: str,
-) -> tuple[DecisionSimulationResources, int]:
-    """Load simulator components and the requested borehole encoder.
-
-    Returns (resources, latent_dim).
-    """
-    distribution_bank = DistributionBank.load(distributions)
-    formation_geometry = FormationGeometry.load(formation_geo)
-    discovery_prior = DiscoveryPrior.load(discovery) if discovery.exists() else None
-
-    if borehole_encoder == "jepa":
-        from encoder.jepa_encoder import load_jepa_checkpoint
-
-        jepa_model, norm_stats, variable_names = load_jepa_checkpoint(
-            jepa_path, device=device
-        )
-        jepa_model.eval()
-        latent_dim: int = jepa_model.cfg.latent_dim
-        resources = DecisionSimulationResources(
-            jepa_model=jepa_model,
-            norm_stats=norm_stats,
-            variable_names=variable_names,
-            distribution_bank=distribution_bank,
-            formation_geometry=formation_geometry,
-            discovery_prior=discovery_prior,
-            # borehole_encoder_fn=None → encode_full_latent_map falls back to jepa_model.embed
-        )
-
-    elif borehole_encoder == "autoencoder":
-        from encoder.autoencoder import load_checkpoint as load_ae_checkpoint
-
-        ae_model, norm_stats, variable_names = load_ae_checkpoint(
-            ae_path, device=device
-        )
-        ae_model.eval()
-        latent_dim = ae_model.cfg.latent_dim
-        resources = DecisionSimulationResources(
-            jepa_model=None,
-            norm_stats=norm_stats,
-            variable_names=variable_names,
-            distribution_bank=distribution_bank,
-            formation_geometry=formation_geometry,
-            discovery_prior=discovery_prior,
-            borehole_encoder_fn=ae_model.encoder,  # BoreholeEncoder: (B,V,D) → (B,latent_dim)
-        )
-
-    else:  # "none"
-        latent_dim = 0
-        resources = DecisionSimulationResources(
-            jepa_model=None,
-            norm_stats={},
-            variable_names=[],
-            distribution_bank=distribution_bank,
-            formation_geometry=formation_geometry,
-            discovery_prior=discovery_prior,
-            # borehole_encoder_fn=None + jepa_model=None → returns (n_x, n_y, 0) latent map
-        )
-
-    return resources, latent_dim
-
-
-# ---------------------------------------------------------------------------
-# Path helpers
-# ---------------------------------------------------------------------------
-
-
-def _resolve_paths(
-    root: Path,
-    jepa_checkpoint: str | Path | None,
-    autoencoder_checkpoint: str | Path | None,
-    distribution_bank_path: str | Path | None,
-    formation_geometry_path: str | Path | None,
-    discovery_prior_path: str | Path | None,
-) -> tuple[Path, Path, Path, Path, Path]:
-    jepa = Path(jepa_checkpoint) if jepa_checkpoint is not None else root / _JEPA_REL
-    ae = (
-        Path(autoencoder_checkpoint)
-        if autoencoder_checkpoint is not None
-        else root / _AE_REL
-    )
-    distributions = (
-        Path(distribution_bank_path)
-        if distribution_bank_path is not None
-        else root / _DISTRIBUTIONS_REL
-    )
-    formation_geo = (
-        Path(formation_geometry_path)
-        if formation_geometry_path is not None
-        else root / _FORMATION_GEO_REL
-    )
-    discovery = (
-        Path(discovery_prior_path)
-        if discovery_prior_path is not None
-        else root / _DISCOVERY_REL
-    )
-    return jepa, ae, distributions, formation_geo, discovery
-
-
-def _check_encoder_path(borehole_encoder: str, jepa_path: Path, ae_path: Path) -> None:
-    if borehole_encoder == "jepa" and not jepa_path.exists():
-        raise FileNotFoundError(f"JEPA checkpoint not found: {jepa_path}")
-    if borehole_encoder == "autoencoder" and not ae_path.exists():
-        raise FileNotFoundError(f"Autoencoder checkpoint not found: {ae_path}")
-
-
-def _check_sim_paths(distributions: Path, formation_geo: Path) -> None:
-    for path in (distributions, formation_geo):
-        if not path.exists():
-            raise FileNotFoundError(f"Required resource not found: {path}")
-
-
-# ---------------------------------------------------------------------------
-# Config / device helpers
-# ---------------------------------------------------------------------------
-
-
-def _check_device(device: str) -> None:
-    if device == "cuda":
-        if not torch.cuda.is_available():
-            raise RuntimeError(
-                "device='cuda' was requested but CUDA is not available. "
-                "In Colab: Runtime > Change runtime type > GPU. "
-                "Or pass device='cpu' to run on CPU."
-            )
-        print(f"CUDA available : {torch.cuda.is_available()}")
-        print(f"GPU            : {torch.cuda.get_device_name(0)}")
-
-
-def _build_config(debug: bool, overrides: dict) -> NeuralBeliefTrainingConfig:
-    valid_fields = {f.name for f in dataclasses.fields(NeuralBeliefTrainingConfig)}
-    invalid = set(overrides) - valid_fields
-    if invalid:
-        raise ValueError(
-            f"Unknown NeuralBeliefTrainingConfig field(s): {sorted(invalid)}.\n"
-            f"Valid fields: {sorted(valid_fields)}"
-        )
-
-    if debug:
-        cfg = NeuralBeliefTrainingConfig(
-            n_train_maps=2,
-            samples_per_map=2,
-            n_val_maps=1,
-            val_samples_per_map=2,
-            n_epochs=2,
-            batch_size=2,
-            base_channels=16,
-        )
-    else:
-        cfg = NeuralBeliefTrainingConfig()
-
-    for key, value in overrides.items():
-        setattr(cfg, key, value)
-
-    return cfg
-
-
-# ---------------------------------------------------------------------------
-# History export
-# ---------------------------------------------------------------------------
 
 
 def compare_belief_encoders_from_colab(
@@ -448,6 +255,7 @@ def compare_belief_encoders_from_colab(
     variants: tuple[str, ...] = ("none", "autoencoder", "jepa"),
     debug: bool = False,
     map_pool_path: str | Path | None = None,
+    sim_cfg: SimConfig | None = None,
     **overrides,
 ) -> pd.DataFrame:
     """Train and compare multiple borehole encoder variants on identical data.
@@ -496,7 +304,7 @@ def compare_belief_encoders_from_colab(
         ``best_val_mse``, ``best_val_mae``, ``best_val_corr``.
         Also written to ``<output_root>/comparison_summary.csv``.
     """
-    _check_device(device)
+    check_device(device)
     root = Path(storage_root).expanduser().resolve()
 
     out_root = Path(output_root)
@@ -504,14 +312,16 @@ def compare_belief_encoders_from_colab(
         out_root = root / out_root
     out_root.mkdir(parents=True, exist_ok=True)
 
-    jepa_path, ae_path, distributions, formation_geo, discovery = _resolve_paths(
-        root, None, None, None, None, None
+    jepa_path, ae_path, distributions, formation_geo, discovery = (
+        resolve_resource_paths(root)
     )
-    _check_sim_paths(distributions, formation_geo)
+    check_sim_paths(distributions, formation_geo)
 
     # Build a base config to extract dataset size / seed settings.
-    base_cfg = _build_config(debug, {k: v for k, v in overrides.items()
-                                     if k not in ("in_channels", "latent_dim")})
+    base_cfg = build_training_config(
+        debug,
+        {k: v for k, v in overrides.items() if k not in ("in_channels", "latent_dim")},
+    )
 
     # Pool stores max(train, val) samples per map so both can be sliced from it.
     pool_samples_per_map = max(base_cfg.samples_per_map, base_cfg.val_samples_per_map)
@@ -524,7 +334,12 @@ def compare_belief_encoders_from_colab(
     )
 
     # Load only the simulator components needed for map generation (no encoder).
-    sim_resources = _load_sim_resources(distributions, formation_geo, discovery)
+    sim_resources, _ = load_decision_resources(
+        borehole_encoder="none",
+        distributions_path=distributions,
+        formation_geometry_path=formation_geo,
+        discovery_prior_path=discovery,
+    )
 
     # Resolve pool path: explicit argument takes priority, else local cache dir.
     cache_dir = out_root / "dataset_cache"
@@ -536,13 +351,11 @@ def compare_belief_encoders_from_colab(
     else:
         resolved_pool_path = cache_dir / "raw_pool.pkl"
 
-    train_cache, val_cache = _get_or_grow_pool(
-        pool_path=resolved_pool_path,
-        resources=sim_resources,
-        pool_cfg=pool_cfg,
-        n_train=base_cfg.n_train_maps,
-        n_val=base_cfg.n_val_maps,
-    )
+    n_total = base_cfg.n_train_maps + base_cfg.n_val_maps
+    pool_manager = get_cache_handler(resolved_pool_path, pool_cfg, n_total, sim_cfg)
+    pool_manager.ensure_pool_size(n_total, sim_resources, resolved_pool_path, sim_cfg)
+    train_cache = pool_manager.subset(list(range(base_cfg.n_train_maps)))
+    val_cache = pool_manager.subset(list(range(base_cfg.n_train_maps, n_total)))
 
     rows: list[dict] = []
 
@@ -551,17 +364,24 @@ def compare_belief_encoders_from_colab(
         print(f"  Encoder variant : {variant}")
         print(f"{'=' * 60}")
 
-        _check_encoder_path(variant, jepa_path, ae_path)
+        check_encoder_path(variant, jepa_path, ae_path)
 
         ckpt_dir = out_root / f"belief_{variant}"
         ckpt_dir.mkdir(parents=True, exist_ok=True)
 
-        resources, latent_dim = _load_encoder_resources(
-            variant, jepa_path, ae_path, distributions, formation_geo, discovery, device
+        resources, latent_dim = load_decision_resources(
+            borehole_encoder=variant,
+            jepa_path=jepa_path,
+            ae_path=ae_path,
+            distributions_path=distributions,
+            formation_geometry_path=formation_geo,
+            discovery_prior_path=discovery,
+            device=device,
         )
 
         encoder_defaults = {"in_channels": 2 + latent_dim, "latent_dim": latent_dim}
-        cfg = _build_config(debug, {**encoder_defaults, **overrides})
+        cfg = build_training_config(debug, {**encoder_defaults, **overrides})
+        cfg.borehole_encoder = variant
 
         print(f"\nborehole_encoder : {variant}")
         print(f"latent_dim       : {latent_dim}")
@@ -569,14 +389,20 @@ def compare_belief_encoders_from_colab(
 
         print("\nBuilding training dataset from shared cache ...")
         train_ds = build_dataset_from_cache(
-            train_cache, resources, device, verbose=True,
+            train_cache,
+            resources,
+            device,
+            verbose=True,
             samples_per_map=cfg.samples_per_map,
         )
         print(f"  train samples : {len(train_ds)}")
 
         print("Building validation dataset from shared cache ...")
         val_ds = build_dataset_from_cache(
-            val_cache, resources, device, verbose=True,
+            val_cache,
+            resources,
+            device,
+            verbose=True,
             samples_per_map=cfg.val_samples_per_map,
         )
         print(f"  val   samples : {len(val_ds)}")
@@ -592,9 +418,12 @@ def compare_belief_encoders_from_colab(
             val_ds=val_ds,
         )
 
-        _, _, _, history = load_belief_checkpoint(ckpt_dir / "belief_best.pt", device=device)
+        _, _, _, history = load_belief_checkpoint(
+            ckpt_dir / "belief_best.pt", device=device
+        )
         print(f"\nSmoke test passed: {len(history)} epoch(s) in history.")
-        _export_history(history, ckpt_dir)
+        export_history(history, ckpt_dir)
+        save_experiment_config(ckpt_dir, cfg, cache_path=resolved_pool_path, sim_cfg=sim_cfg)
 
         best = min(history, key=lambda r: r["val_mse"])
         rows.append(
@@ -619,114 +448,3 @@ def compare_belief_encoders_from_colab(
     print(f"\nSummary -> {csv_path}")
 
     return df
-
-
-# ---------------------------------------------------------------------------
-# Shared-cache helpers
-# ---------------------------------------------------------------------------
-
-
-def _load_sim_resources(
-    distributions: Path,
-    formation_geo: Path,
-    discovery: Path,
-) -> DecisionSimulationResources:
-    """Load only the simulator components needed for map generation (no encoder)."""
-    distribution_bank = DistributionBank.load(distributions)
-    formation_geometry = FormationGeometry.load(formation_geo)
-    discovery_prior = DiscoveryPrior.load(discovery) if discovery.exists() else None
-    return DecisionSimulationResources(
-        jepa_model=None,
-        norm_stats={},
-        variable_names=[],
-        distribution_bank=distribution_bank,
-        formation_geometry=formation_geometry,
-        discovery_prior=discovery_prior,
-    )
-
-
-def _ensure_pool_size(
-    pool_path: Path,
-    resources: DecisionSimulationResources,
-    pool_cfg: BeliefDatasetConfig,
-    n_maps: int,
-) -> RawMapCache:
-    """Load pool from disk, grow to n_maps if needed, and return it.
-
-    - Pool has enough maps: load and return without regenerating.
-    - Pool is too small: generate only the missing maps, append, and save.
-    - Pool drill params changed: discard and regenerate from scratch.
-    - No pool file: generate n_maps maps and save.
-    """
-    pool: RawMapCache | None = None
-
-    if pool_path.exists():
-        pool = RawMapCache.load(pool_path)
-        if not pool.drill_params_match(pool_cfg):
-            print(
-                f"  [pool] Drill parameters changed - discarding "
-                f"{pool.pool_size}-map pool and regenerating ..."
-            )
-            pool = None
-        elif pool.pool_size >= n_maps:
-            print(
-                f"  [pool] Loaded {pool_path.name} "
-                f"({pool.pool_size} maps available, {n_maps} needed)"
-            )
-            return pool
-        else:
-            n_extra = n_maps - pool.pool_size
-            print(
-                f"  [pool] Pool has {pool.pool_size} maps, need {n_maps} - "
-                f"generating {n_extra} more ..."
-            )
-            extra_cfg = dataclasses.replace(
-                pool_cfg, n_maps=n_extra, seed=pool_cfg.seed + pool.pool_size
-            )
-            extra = generate_raw_map_cache(resources, extra_cfg, verbose=True)
-            pool.extend(extra)
-            pool.save(pool_path)
-            print(f"  [pool] Pool grown -> {pool_path} ({pool.pool_size} maps)")
-            return pool
-
-    full_cfg = dataclasses.replace(pool_cfg, n_maps=n_maps)
-    print(f"  [pool] Generating {n_maps} maps (seed={pool_cfg.seed}) ...")
-    pool = generate_raw_map_cache(resources, full_cfg, verbose=True)
-    pool.save(pool_path)
-    print(f"  [pool] Saved -> {pool_path} ({pool.pool_size} maps)")
-    return pool
-
-
-def _get_or_grow_pool(
-    pool_path: Path,
-    resources: DecisionSimulationResources,
-    pool_cfg: BeliefDatasetConfig,
-    n_train: int,
-    n_val: int,
-) -> tuple[RawMapCache, RawMapCache]:
-    pool = _ensure_pool_size(pool_path, resources, pool_cfg, n_train + n_val)
-    train_cache = pool.subset(list(range(n_train)))
-    val_cache = pool.subset(list(range(n_train, n_train + n_val)))
-    return train_cache, val_cache
-
-
-# ---------------------------------------------------------------------------
-# History export
-# ---------------------------------------------------------------------------
-
-
-def _export_history(history: list[dict], checkpoint_dir: Path) -> None:
-    if not history:
-        return
-
-    json_path = checkpoint_dir / "training_history.json"
-    with open(json_path, "w") as f:
-        json.dump(history, f, indent=2)
-    print(f"History -> {json_path}")
-
-    csv_path = checkpoint_dir / "training_history.csv"
-    with open(csv_path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=list(history[0].keys()))
-        writer.writeheader()
-        writer.writerows(history)
-    print(f"History -> {csv_path}")

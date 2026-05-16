@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import csv
+import dataclasses
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -48,6 +51,7 @@ class NeuralBeliefTrainingConfig:
     # --- misc ---
     seed: int = 42
     latent_dim: int = 128
+    borehole_encoder: str = "unknown"
 
     def __post_init__(self) -> None:
         expected = 2 + self.latent_dim
@@ -189,7 +193,6 @@ def train_neural_belief(
                 samples_per_map=cfg.samples_per_map,
                 min_drills=cfg.min_drills,
                 max_drills=cfg.max_drills,
-                latent_dim=cfg.latent_dim,
                 seed=cfg.seed,
             ),
             device=device,
@@ -206,7 +209,6 @@ def train_neural_belief(
                 samples_per_map=cfg.val_samples_per_map,
                 min_drills=cfg.min_drills,
                 max_drills=cfg.max_drills,
-                latent_dim=cfg.latent_dim,
                 seed=cfg.seed + 1,
             ),
             device=device,
@@ -358,79 +360,64 @@ def load_belief_checkpoint(
     return model, cfg, normalizer, ckpt.get("history", [])
 
 
-def make_debug_config() -> NeuralBeliefTrainingConfig:
-    """Return a minimal training config for fast pipeline verification."""
-    return NeuralBeliefTrainingConfig(
-        n_train_maps=2,
-        samples_per_map=3,
-        n_val_maps=1,
-        val_samples_per_map=3,
-        min_drills=2,
-        max_drills=6,
-        batch_size=4,
-        n_epochs=3,
-        seed=0,
-    )
+def build_training_config(debug: bool, overrides: dict) -> NeuralBeliefTrainingConfig:
+    valid_fields = {f.name for f in dataclasses.fields(NeuralBeliefTrainingConfig)}
+    invalid = set(overrides) - valid_fields
+    if invalid:
+        raise ValueError(
+            f"Unknown NeuralBeliefTrainingConfig field(s): {sorted(invalid)}.\n"
+            f"Valid fields: {sorted(valid_fields)}"
+        )
+
+    if debug:
+        cfg = NeuralBeliefTrainingConfig(
+            n_train_maps=2,
+            samples_per_map=2,
+            n_val_maps=1,
+            val_samples_per_map=2,
+            n_epochs=2,
+            batch_size=2,
+            base_channels=16,
+        )
+    else:
+        cfg = NeuralBeliefTrainingConfig()
+
+    for key, value in overrides.items():
+        setattr(cfg, key, value)
+
+    return cfg
 
 
-def debug_run(
-    resources: DecisionSimulationResources,
-    device: str,
+def export_history(history: list[dict], checkpoint_dir: Path) -> None:
+    if not history:
+        return
+
+    json_path = checkpoint_dir / "training_history.json"
+    with open(json_path, "w") as f:
+        json.dump(history, f, indent=2)
+    print(f"History -> {json_path}")
+
+    csv_path = checkpoint_dir / "training_history.csv"
+    with open(csv_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(history[0].keys()))
+        writer.writeheader()
+        writer.writerows(history)
+    print(f"History -> {csv_path}")
+
+
+def save_experiment_config(
     checkpoint_dir: Path,
-    sim_cfg: SimConfig | None = None,
+    cfg: NeuralBeliefTrainingConfig,
+    cache_path: Path | None,
+    sim_cfg: SimConfig | None,
 ) -> None:
-    """Minimal end-to-end pipeline check.
-
-    Verifies dataset generation (with sample validation), training loop,
-    checkpoint saving/loading, and inference.  Raises on any failure.
-    """
-    from .dataset import BeliefDatasetConfig
-    from .inference import predict_from_observations
-
-    print("=== Neural Belief Debug Run ===")
-    cfg = make_debug_config()
-
-    print("[1/4] Training (3 epochs) ...")
-    train_neural_belief(resources, cfg, device, checkpoint_dir, sim_cfg, verbose=True)
-    print("  OK")
-
-    print("[2/4] Loading checkpoint ...")
-    model2, loaded_cfg, loaded_norm, history = load_belief_checkpoint(
-        Path(checkpoint_dir) / "belief_best.pt", device
-    )
-    assert (
-        len(history) == cfg.n_epochs
-    ), f"expected {cfg.n_epochs} epochs, got {len(history)}"
-    print(f"  OK  ({len(history)} epochs in history)")
-
-    print("[3/4] Inference ...")
-    obs = [
-        {
-            "location": (5, 5),
-            "latent": np.ones(loaded_cfg.latent_dim, dtype=np.float32),
-            "ore_value": 1.0,
-        },
-        {
-            "location": (10, 12),
-            "latent": np.zeros(loaded_cfg.latent_dim, dtype=np.float32),
-            "ore_value": 0.0,
-        },
-    ]
-    pred = predict_from_observations(obs, model2, device, normalizer=loaded_norm)
-    assert pred.shape == (32, 32), f"expected (32, 32), got {pred.shape}"
-    print(f"  OK  output shape: {pred.shape}")
-
-    print("[4/4] Dataset sample validation ...")
-    GeologicalBeliefDataset.generate(
-        resources,
-        BeliefDatasetConfig(
-            n_maps=1, samples_per_map=2, min_drills=2, max_drills=4, seed=99
-        ),
-        device=device,
-        sim_cfg=sim_cfg,
-        validate_samples=True,
-        verbose=False,
-    )
-    print("  OK  shape/content invariants passed")
-
-    print("\n=== Debug Run PASSED ===")
+    """Save a JSON capturing full experiment provenance next to the checkpoints."""
+    record = {
+        **dataclasses.asdict(cfg),
+        "cache_path": str(cache_path) if cache_path is not None else None,
+        "sim_cfg": dataclasses.asdict(sim_cfg) if sim_cfg is not None else None,
+    }
+    out = Path(checkpoint_dir) / "experiment_config.json"
+    with open(out, "w") as f:
+        json.dump(record, f, indent=2)
+    print(f"  experiment config -> {out}")

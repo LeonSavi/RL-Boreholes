@@ -2,10 +2,9 @@ from .model import UNetBelief
 from .dataset import (
     BeliefDatasetConfig,
     GeologicalBeliefDataset,
-    RawMapCache,
-    generate_raw_map_cache,
     build_dataset_from_cache,
 )
+from .map_cache import RawMapCache
 from .utils import TargetNormalizer
 from .training import (
     NeuralBeliefTrainingConfig,
@@ -29,7 +28,6 @@ __all__ = [
     "BeliefDatasetConfig",
     "GeologicalBeliefDataset",
     "RawMapCache",
-    "generate_raw_map_cache",
     "build_dataset_from_cache",
     "TargetNormalizer",
     "NeuralBeliefTrainingConfig",

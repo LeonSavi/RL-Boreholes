@@ -5,6 +5,7 @@ METHOD_GREEDY = "greedy_jepa_knn"
 METHOD_PARTICLE_BELIEF = "particle_belief_expected_ore"
 
 JEPA_CHECKPOINT = Path("checkpoints/jepa.pt")
+AUTOENCODER_CHECKPOINT = Path("checkpoints/ae.pt")
 DISTRIBUTIONS = Path("data/clean/distributions.pkl")
 FORMATION_GEOMETRY = Path("data/clean/formation_geometry.pkl")
 DISCOVERY_PRIOR = Path("data/clean/discovery_prior.pkl")
