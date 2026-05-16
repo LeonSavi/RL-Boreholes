@@ -10,8 +10,6 @@ from .training import (
     NeuralBeliefTrainingConfig,
     train_neural_belief,
     load_belief_checkpoint,
-    make_debug_config,
-    debug_run,
 )
 from .inference import (
     predict_ore_map,
@@ -33,8 +31,6 @@ __all__ = [
     "NeuralBeliefTrainingConfig",
     "train_neural_belief",
     "load_belief_checkpoint",
-    "make_debug_config",
-    "debug_run",
     "predict_ore_map",
     "predict_from_observations",
     "build_latent_map_from_observations",
