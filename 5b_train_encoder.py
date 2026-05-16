@@ -177,7 +177,7 @@ def stream_batches_from_dir(
     """Yield training batches from a directory produced by
     pull_maps.py.  Same shuffling discipline as
     stream_batches(): pool `maps_per_refill` maps, shuffle pooled
-    boreholes, emit full-size batches, then refill.  Infinite stream —
+    boreholes, emit full-size batches, then refill.  Infinite stream -
     after a full pass through the dataset, the map order reshuffles.
 
     If `recompute_stats_n_maps` is given, re-derive per-variable mean/std
@@ -259,7 +259,7 @@ class _TrainLog:
     column per metric, with blanks where a metric wasn't recorded.
 
     On finalise(): writes <stem>_log.csv next to the checkpoint and
-    renders <stem>_log.png — a two-panel chart with the loss curve up
+    renders <stem>_log.png - a two-panel chart with the loss curve up
     top and auxiliary metrics underneath.
     """
 

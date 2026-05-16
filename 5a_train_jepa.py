@@ -172,7 +172,7 @@ def train_jepa(
     if min_maps_warmup is not None:
         bpm = batches_per_map(batch_size, sim_cfg.n_x, sim_cfg.n_y)
         es_min_steps = max(50, min_maps_warmup * bpm)
-        print(f"early-stop warmup pinned to {min_maps_warmup} maps × "
+        print(f"early-stop warmup pinned to {min_maps_warmup} maps x "
               f"{bpm} batches/map = {es_min_steps} steps")
     else:
         es_min_steps = min(500, max(50, steps // 10))
@@ -274,7 +274,7 @@ def train_jepa(
 
     train_log.save_csv()
     train_log.plot(
-        title=f"JEPA training — {last_step} steps "
+        title=f"JEPA training - {last_step} steps "
               f"(best ema {stopper.best:.4f} @ {stopper.best_step})",
         best_step=stopper.best_step if stopper.best_step else None,
     )
@@ -293,7 +293,7 @@ def main():
     p.add_argument("--ema-momentum", type=float, default=0.996)
     p.add_argument("--amp", action="store_true",
                    help="enable bf16/fp16 autocast (helps mostly at large "
-                        "batch_size or latent_dim — can be neutral or slow "
+                        "batch_size or latent_dim - can be neutral or slow "
                         "on small configs; benchmark first)")
     p.add_argument("--compile", dest="compile_model", action="store_true",
                    help="wrap model in torch.compile (one-time compile cost, "
@@ -315,7 +315,7 @@ def main():
     p.add_argument("--min-maps-warmup", type=int, default=3500,
                    help="block early-stopping until this many maps' worth "
                         "of batches have been consumed.  At batch_size=128 "
-                        "and 32×32 maps, one map = 8 batches.")
+                        "and 32x32 maps, one map = 8 batches.")
     args = p.parse_args()
     # Resolve --dataset-dir: empty string = online generation, missing
     # directory = warn and fall back to online so a fresh checkout still works.

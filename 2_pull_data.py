@@ -399,7 +399,7 @@ class PullReport:
                                      key=lambda x: -x[1]):
                 add(f"    {reason:<45s} {n:>12,}")
 
-        add("\n## NLOG — file-level (Tier 1)")
+        add("\n## NLOG - file-level (Tier 1)")
         add(f"  wells scanned                     {self.nlog_wells_in:>14,}")
         add(f"    with LAS                        {self.nlog_wells_with_las:>14,}")
         add(f"    with strat.json                 {self.nlog_wells_with_strat:>14,}")
@@ -449,16 +449,16 @@ class PullReport:
             add(f"\n## Alias hits (how often each raw mnemonic was used)")
             for (out_name, alias), n in sorted(self.alias_hits.items(),
                                                 key=lambda x: -x[1])[:30]:
-                add(f"    {out_name:<14s} ← {alias:<10s} {n:>8}")
+                add(f"    {out_name:<14s} <- {alias:<10s} {n:>8}")
 
         add(f"\n## NLOG formation hits (interval count)")
         for f, n in sorted(self.formation_hits.items(), key=lambda x: -x[1]):
             add(f"    {f:<4s} {n:>10,}")
 
-        add(f"\n## Sub-unit (stratUnitId) hits — mapped")
+        add(f"\n## Sub-unit (stratUnitId) hits - mapped")
         for su, n in sorted(self.strat_unit_hits.items(), key=lambda x: -x[1])[:30]:
             rock = classify_strat_unit(su, su[:2] if len(su) >= 2 else None)
-            add(f"    {su:<10s} → {rock:<12s} {n:>10,}")
+            add(f"    {su:<10s} -> {rock:<12s} {n:>10,}")
 
         if self.strat_unit_unknown:
             add(f"\n## Sub-unit codes NOT in dictionary (fell back to formation)")
@@ -508,14 +508,14 @@ class PullReport:
 
         if self.outlier_wells:
             add(f"\n  population-outlier wells "
-                f"(> {OUTLIER_MAD_MULTIPLIER}× MAD from corpus median):")
+                f"(> {OUTLIER_MAD_MULTIPLIER}x MAD from corpus median):")
             for key, wells in self.outlier_wells.items():
                 add(f"    {key:<22s} ({len(wells)} wells)")
                 for bh in wells[:5]:
                     add(f"        {bh}")
 
-        path.write_text("\n".join(L))
-        print(f"\n→ report written to {path}")
+        path.write_text("\n".join(L), encoding="utf-8")
+        print(f"\n-> report written to {path}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1290,11 +1290,11 @@ def main() -> None:
 
     out_path = args.out / "samples.parquet"
     df.to_parquet(out_path, index=False)
-    print(f"\n→ wrote {out_path}  ({len(df):,} rows, "
+    print(f"\n-> wrote {out_path}  ({len(df):,} rows, "
           f"{out_path.stat().st_size/1e6:.1f} MB)")
 
     report.write(args.out / "pull_report.txt")
-    print(f"→ done. outputs in {args.out}/")
+    print(f"-> done. outputs in {args.out}/")
 
 
 if __name__ == "__main__":

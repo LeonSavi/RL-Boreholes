@@ -28,6 +28,7 @@ temp.ipynb
 *.pkl
 data/clean/*.pkl
 data/clean/*.parquet
+data/dataset
 # checkpoints/
 
 test.py
