@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import re
 import warnings
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
@@ -262,10 +263,12 @@ NLOG_PRIMARY: dict[str, CurveSpec] = {
     "pef":      CurveSpec(("PEF", "PE"),                   (1.0, 10.0)),
     "cali_in":  CurveSpec(("CALI", "CAL"),                 (4.0, 30.0)),
     "sp_mv":    CurveSpec(("SP",),                         (-200.0, 200.0)),
-    "res_deep_log":  CurveSpec(("ILD", "LLD", "RT", "RD"),
+    "res_deep_log":  CurveSpec(("ILD", "LLD", "RT", "RD",
+                                 "DILD", "RILD", "RDEP"),
                                 bounds=(-1.0, 4.0),
                                 transform=lambda v: np.log10(v) if v > 0 else np.nan),
-    "res_shal_log":  CurveSpec(("ILM", "LLS", "RS", "SFLU", "MSFL"),
+    "res_shal_log":  CurveSpec(("ILM", "LLS", "RS", "SFLU", "MSFL",
+                                 "RILM", "RLLS", "RLL8"),
                                 bounds=(-1.0, 4.0),
                                 transform=lambda v: np.log10(v) if v > 0 else np.nan),
 }
@@ -664,8 +667,21 @@ def _load_boreholes_metadata(
     report.xlsx_rows = len(df)
     print(f"  loaded {xlsx_path.name}: {len(df)} rows, {len(df.columns)} cols")
 
-    # Exact column names from the NLOG export (case-sensitive).
+    # Column names from the current NLOG xlsx export (Dutch).
+    # The older English-named export (Borehole name, Result code, etc.) was
+    # replaced by the Dutch column set; we look for the Dutch names first
+    # and fall back to the English ones for backward compatibility.
     EXPECTED = {
+        "id":          "Boorgatnaam",       # was 'Borehole name'
+        "x":           "X Rijksdriehoek",   # was 'X Dutch National Grid'
+        "y":           "Y Rijksdriehoek",   # was 'Y Dutch National Grid'
+        "onshore":     "On offshore",       # column kept the English name
+        "result_code": "Resultaat Code",    # was 'Result code'
+        "result_label": "Resultaat",        # was 'Result'
+        "field":       "Veldnaam",          # was 'Field name'
+        "objective":   "Boorgatdoel Code",  # was 'Borehole objective code'
+    }
+    EXPECTED_LEGACY = {
         "id":          "Borehole name",
         "x":           "X Dutch National Grid",
         "y":           "Y Dutch National Grid",
@@ -675,6 +691,11 @@ def _load_boreholes_metadata(
         "field":       "Field name",
         "objective":   "Borehole objective code",
     }
+    # If the primary (Dutch) id column is missing but the legacy English
+    # one is present, use the legacy mapping wholesale.
+    if EXPECTED["id"] not in df.columns and EXPECTED_LEGACY["id"] in df.columns:
+        print(f"  using legacy English column names")
+        EXPECTED = EXPECTED_LEGACY
 
     # Verify each expected column exists; warn about missing ones
     missing = [col for col in EXPECTED.values() if col not in df.columns]
@@ -722,12 +743,27 @@ def _load_boreholes_metadata(
         }
         wells_meta[bh] = entry
 
-    # alias keys — folder names on disk often use different case/separators
+    # alias keys — folder names on disk use different case/separators and
+    # contract sidetrack labels (xlsx writes "SIDETRACK1", folders write "S1").
+    def _name_variants(k: str) -> set[str]:
+        base = {k, k.upper(), k.lower(),
+                k.replace("-", "_"), k.replace("_", "-"),
+                k.replace(" ", "_"), k.replace(" ", "")}
+        # SIDETRACK(\d+) → S(\d+)  (and the reverse, so xlsx-style keys also
+        # match folder-style lookups)
+        extras = set()
+        for v in base:
+            s1 = re.sub(r"(?i)SIDETRACK(\d+)", r"S\1", v)
+            if s1 != v:
+                extras.add(s1)
+            s2 = re.sub(r"-S(\d+)\b", r"-SIDETRACK\1", v)
+            if s2 != v:
+                extras.add(s2)
+        return base | extras
+
     aliased = dict(wells_meta)
     for k, v in wells_meta.items():
-        for variant in {k.upper(), k.lower(),
-                        k.replace("-", "_"), k.replace("_", "-"),
-                        k.replace(" ", "_"), k.replace(" ", "")}:
+        for variant in _name_variants(k):
             if variant and variant not in aliased:
                 aliased[variant] = v
     print(f"  indexed {len(wells_meta)} unique wells "
@@ -738,9 +774,18 @@ def _load_boreholes_metadata(
 def _lookup_well_meta(folder_name: str, wells_meta: dict) -> dict | None:
     if not wells_meta:
         return None
-    for variant in (folder_name, folder_name.upper(), folder_name.lower(),
-                    folder_name.replace("-", "_"),
-                    folder_name.replace("_", "-")):
+    variants = [folder_name, folder_name.upper(), folder_name.lower(),
+                folder_name.replace("-", "_"),
+                folder_name.replace("_", "-")]
+    # also try contracting/expanding the sidetrack suffix
+    for v in list(variants):
+        s1 = re.sub(r"(?i)SIDETRACK(\d+)", r"S\1", v)
+        if s1 != v:
+            variants.append(s1)
+        s2 = re.sub(r"-S(\d+)\b", r"-SIDETRACK\1", v)
+        if s2 != v:
+            variants.append(s2)
+    for variant in variants:
         if variant in wells_meta:
             return wells_meta[variant]
     return None
@@ -863,9 +908,19 @@ def _read_strat(folder: Path, report: PullReport) -> list[dict]:
 
 
 def _read_details(folder: Path, report: PullReport) -> dict:
-    """Fallback: per-well location from details.json if not in boreholes.xlsx."""
+    """Per-well metadata from details.json.
+
+    details.json is the canonical per-well metadata source — it carries
+    more fields than the global xlsx and is correctly populated for every
+    scraped well. We extract everything useful here and the caller decides
+    whether to prefer the xlsx (if it matched the folder) or this dict.
+    """
     f = folder / "details.json"
-    out = {"x_rd": np.nan, "y_rd": np.nan, "location_type": None}
+    out = {
+        "x_rd": np.nan, "y_rd": np.nan, "location_type": None,
+        "hc_result": None, "field_name": None,
+        "borehole_name_long": None, "nitg_nr": None,
+    }
     if not f.exists() or f.stat().st_size <= 4:
         return out
     try:
@@ -876,9 +931,8 @@ def _read_details(folder: Path, report: PullReport) -> dict:
     if not data:
         return out
 
-    # NLOG details.json actually stores RD coords under "xcoordRD"/"ycoordRD"
-    # (lowercase "coord", uppercase "RD"). The earlier guesses below remain
-    # as long-tail fallbacks for unusual files.
+    # NLOG details.json stores RD coords under "xcoordRD"/"ycoordRD"
+    # (lowercase "coord", uppercase "RD").
     for xk in ("xcoordRD", "xCoordRd", "xCoord", "x", "easting", "xRd"):
         if xk in data and data[xk] is not None:
             try:
@@ -894,12 +948,14 @@ def _read_details(folder: Path, report: PullReport) -> dict:
             except (TypeError, ValueError):
                 pass
 
-    onsh = data.get("onshore")
-    if onsh is True or (isinstance(onsh, str) and onsh.lower().startswith("j")):
-        out["location_type"] = "onshore"
-    elif onsh is False or (isinstance(onsh, str) and onsh.lower().startswith("n")):
-        out["location_type"] = "offshore"
-    else:
+    # NLOG uses "onOffshore" ("ON" / "OFF"); the earlier code looked at
+    # the non-existent "onshore" key. Reuse _classify_on_offshore so the
+    # mapping stays consistent with the xlsx path.
+    onsh = data.get("onOffshore") or data.get("onshore")
+    out["location_type"] = _classify_on_offshore(onsh)
+    if out["location_type"] is None:
+        # very-old details files only carry the block code (e.g. "A12");
+        # offshore Dutch sector blocks start with a letter + digit.
         loc = (data.get("location") or data.get("blok") or "")
         if isinstance(loc, str):
             loc_u = loc.upper()
@@ -907,6 +963,25 @@ def _read_details(folder: Path, report: PullReport) -> dict:
                 out["location_type"] = "offshore"
             elif loc_u:
                 out["location_type"] = "onshore"
+
+    # hydrocarbon result + field name — these were previously discarded
+    # by the fallback path, which is why ~60 % of wells had no hc_result.
+    out["hc_result"] = _classify_result_code(
+        data.get("resultCode"), data.get("resultDescription"),
+    )
+    fn = data.get("fieldName")
+    if isinstance(fn, str) and fn.strip():
+        out["field_name"] = fn.strip()
+
+    # join keys — used by pull_nlog to find this well in the xlsx even
+    # when the folder name uses a short code (AKM-01) while xlsx uses the
+    # full Dutch name (OUDEGA-AKKRUM-01).
+    bn = data.get("boreholeName")
+    if isinstance(bn, str) and bn.strip():
+        out["borehole_name_long"] = bn.strip()
+    nn = data.get("nitgNr")
+    if isinstance(nn, str) and nn.strip():
+        out["nitg_nr"] = nn.strip()
     return out
 
 
@@ -1057,21 +1132,25 @@ def pull_nlog(
         if set(df.columns) & SONIC_SHEAR_MNEMONICS:
             report.nlog_shear_wells.append(folder.name)
 
-        # location + hc_result metadata
-        # primary source: boreholes.xlsx; fallback: details.json (no hc_result)
+        # Metadata: read details.json upfront — it carries hc_result and
+        # field_name too, and its `borehole_name_long` lets us find xlsx
+        # rows whose ID uses the full Dutch name (e.g. "OUDEGA-AKKRUM-01")
+        # while the folder uses the 3-letter short code ("AKM-01").
+        details = _read_details(folder, report)
         meta = _lookup_well_meta(folder.name, wells_meta)
+        if meta is None and details.get("borehole_name_long"):
+            meta = _lookup_well_meta(details["borehole_name_long"], wells_meta)
         if meta is not None:
             report.xlsx_matched += 1
         else:
             report.xlsx_unmatched.append(folder.name)
-            details = _read_details(folder, report)
             meta = {
                 "x_rd":          details["x_rd"],
                 "y_rd":          details["y_rd"],
                 "location_type": details["location_type"],
-                "hc_result":     None,
-                "hc_discovery":  None,
-                "field_name":    None,
+                "hc_result":     details["hc_result"],
+                "hc_discovery":  _hc_discovery(details["hc_result"]),
+                "field_name":    details["field_name"],
             }
 
         if np.isnan(meta["x_rd"]) or np.isnan(meta["y_rd"]):
