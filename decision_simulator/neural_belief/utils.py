@@ -1,11 +1,65 @@
 from __future__ import annotations
 
 import json
+import pickle
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import torch
+
+
+class LatentPCAReducer:
+    """PCA dimensionality reducer for borehole latent embeddings.
+
+    Fitted from observed (drilled) cells only.  After ``transform``, callers
+    are responsible for re-zeroing unobserved cells (handled by
+    ``GeologicalBeliefDataset.apply_latent_pca``).
+
+    Parameters
+    ----------
+    n_components
+        Target number of PCA dimensions.  Clamped to
+        ``min(n_components, original_dim, n_observed_samples)`` at fit time.
+    """
+
+    def __init__(self, n_components: int = 32) -> None:
+        self.n_components = n_components
+        self._pca: Any = None  # sklearn PCA, set after fit()
+
+    def fit(self, observed_latents: np.ndarray) -> "LatentPCAReducer":
+        """Fit PCA on an ``(N_obs, latent_dim)`` array of observed latent vectors."""
+        from sklearn.decomposition import PCA
+
+        n_obs, orig_dim = observed_latents.shape
+        n_comp = min(self.n_components, orig_dim, n_obs)
+        self._pca = PCA(n_components=n_comp)
+        self._pca.fit(observed_latents.astype(np.float64))
+        return self
+
+    def transform(self, latents: np.ndarray) -> np.ndarray:
+        """Project ``(N, original_dim)`` → ``(N, n_components)`` float32."""
+        if self._pca is None:
+            raise RuntimeError("Call fit() before transform()")
+        return self._pca.transform(latents.astype(np.float64)).astype(np.float32)
+
+    @property
+    def n_output_components(self) -> int:
+        return int(self._pca.n_components_) if self._pca is not None else self.n_components
+
+    @property
+    def explained_variance_ratio(self) -> np.ndarray | None:
+        return self._pca.explained_variance_ratio_ if self._pca is not None else None
+
+    def save(self, path: Path | str) -> None:
+        with open(path, "wb") as f:
+            pickle.dump(self, f)
+
+    @classmethod
+    def load(cls, path: Path | str) -> "LatentPCAReducer":
+        with open(path, "rb") as f:
+            return pickle.load(f)
 
 
 @dataclass

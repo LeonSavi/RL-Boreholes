@@ -15,7 +15,7 @@ from simulator.map_generator import SimConfig
 from decision_simulator.resources import DecisionSimulationResources
 from .dataset import BeliefDatasetConfig, GeologicalBeliefDataset
 from .model import UNetBelief
-from .utils import LatentNormalizer, TargetNormalizer
+from .utils import LatentNormalizer, LatentPCAReducer, TargetNormalizer
 from .baselines import evaluate_baselines
 
 
@@ -50,6 +50,10 @@ class NeuralBeliefTrainingConfig:
 
     # --- latent normalization ---
     latent_norm_mode: str = "none"  # "zscore" | "none"
+
+    # --- latent PCA ---
+    use_latent_pca: bool = True
+    latent_pca_components: int = 32
 
     # --- misc ---
     seed: int = 42
@@ -345,6 +349,61 @@ def train_neural_belief(
             else:
                 print(f"  latent norm   : {cfg.latent_norm_mode}")
 
+    # ---- latent PCA reduction ------------------------------------------------
+    pca_reducer: LatentPCAReducer | None = None
+
+    if cfg.use_latent_pca and cfg.latent_dim > 0:
+        original_latent_dim = cfg.latent_dim
+
+        # Fit PCA only on observed (drilled) training latents.
+        inputs_np = train_ds.inputs.numpy()       # (N, 2+D, n_x, n_y)
+        obs_mask  = inputs_np[:, 1, :, :] > 0.0  # (N, n_x, n_y) bool
+        latent_t  = inputs_np[:, 2:, :, :].transpose(0, 2, 3, 1)  # (N, n_x, n_y, D)
+        observed  = latent_t[obs_mask]            # (N_obs, D)
+
+        pca_reducer = LatentPCAReducer(n_components=cfg.latent_pca_components)
+        pca_reducer.fit(observed)
+
+        train_ds.apply_latent_pca(pca_reducer)
+        val_ds.apply_latent_pca(pca_reducer)
+
+        # Update cfg so the model is built with the reduced channel count.
+        actual_k = pca_reducer.n_output_components
+        cfg.latent_dim   = actual_k
+        cfg.in_channels  = 2 + actual_k
+
+        evr = pca_reducer.explained_variance_ratio
+        pca_meta = {
+            "original_latent_dim": original_latent_dim,
+            "n_components": actual_k,
+            "explained_variance_ratio": evr.tolist() if evr is not None else [],
+            "explained_variance_total": float(evr.sum()) if evr is not None else 0.0,
+            "encoder_variant": cfg.borehole_encoder,
+            "n_observed_samples": int(observed.shape[0]),
+        }
+        pca_path = checkpoint_dir / "latent_pca_stats.json"
+        with open(pca_path, "w") as f:
+            json.dump(pca_meta, f, indent=2)
+
+        # Also persist the fitted reducer so it can be reloaded for inference.
+        pca_reducer.save(checkpoint_dir / "latent_pca_reducer.pkl")
+
+        if verbose:
+            print(
+                f"  PCA reduction : {original_latent_dim} → {actual_k}"
+                f"  (fitted on {observed.shape[0]:,} observed cells)"
+            )
+            if evr is not None:
+                print(f"  expl. variance: {evr.sum():.3f}")
+            print(f"  in_channels   : {cfg.in_channels}")
+            print(f"  PCA stats     -> {pca_path}")
+    else:
+        if verbose:
+            if cfg.latent_dim == 0:
+                print("  PCA reduction : skipped (no encoder)")
+            else:
+                print("  PCA reduction : disabled")
+
     train_loader = DataLoader(train_ds, batch_size=cfg.batch_size, shuffle=True)
     val_loader = DataLoader(val_ds, batch_size=cfg.batch_size, shuffle=False)
 
@@ -373,6 +432,7 @@ def train_neural_belief(
                 "history": history,
                 "normalizer": normalizer,
                 "latent_normalizer": latent_normalizer,
+                "pca_reducer": pca_reducer,
                 "sim_cfg": sim_cfg,
                 "n_x": sim_cfg.n_x,
                 "n_y": sim_cfg.n_y,

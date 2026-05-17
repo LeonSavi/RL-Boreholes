@@ -10,7 +10,7 @@ from torch.utils.data import Dataset
 from simulator.map_generator import MapGenerator, SimConfig
 from encoder.autoencoder import standardise
 from decision_simulator.resources import DecisionSimulationResources
-from .utils import LatentNormalizer, TargetNormalizer, build_ore_target, encode_full_latent_map, build_sample_input
+from .utils import LatentNormalizer, LatentPCAReducer, TargetNormalizer, build_ore_target, encode_full_latent_map, build_sample_input
 
 if TYPE_CHECKING:
     from .map_cache import NpzMapCache
@@ -117,6 +117,35 @@ class GeologicalBeliefDataset(Dataset):
         """Normalize stored targets in-place using a fitted TargetNormalizer."""
         targets_np = normalizer.transform(self.targets.numpy())
         self.targets = torch.from_numpy(targets_np)
+
+    def apply_latent_pca(self, reducer: LatentPCAReducer) -> None:
+        """Apply PCA dimensionality reduction to latent input channels in-place.
+
+        Replaces channels ``[2:]`` with their PCA projections, changing the
+        tensor from ``(N, 2+original_dim, n_x, n_y)`` to
+        ``(N, 2+n_components, n_x, n_y)``.  Unobserved cells are re-zeroed
+        after projection (PCA mean subtraction would otherwise give non-zero
+        values at zero-filled positions).
+        """
+        if self.inputs.shape[1] <= 2:
+            return  # no-encoder mode: nothing to reduce
+        inputs_np = self.inputs.numpy()          # (N, 2+D, n_x, n_y)
+        N, _, n_x, n_y = inputs_np.shape
+        ore  = inputs_np[:, 0:1, :, :]           # (N, 1, n_x, n_y)
+        mask = inputs_np[:, 1:2, :, :]           # (N, 1, n_x, n_y)
+        latent_ch = inputs_np[:, 2:, :, :]       # (N, D, n_x, n_y)
+
+        D = latent_ch.shape[1]
+        lat_flat = latent_ch.transpose(0, 2, 3, 1).reshape(-1, D)  # (N*n_x*n_y, D)
+        reduced  = reducer.transform(lat_flat)                       # (N*n_x*n_y, K)
+        K = reduced.shape[1]
+
+        reduced = reduced.reshape(N, n_x, n_y, K).transpose(0, 3, 1, 2)  # (N, K, n_x, n_y)
+        reduced *= (mask > 0.0)                  # re-zero unobserved cells
+
+        self.inputs = torch.from_numpy(
+            np.concatenate([ore, mask, reduced], axis=1)
+        )
 
     def apply_latent_normalizer(self, lnorm: LatentNormalizer) -> None:
         """Normalize latent input channels in-place, keeping unobserved cells at zero.
