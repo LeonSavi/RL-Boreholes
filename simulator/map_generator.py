@@ -337,3 +337,151 @@ class MapGenerator:
             self.bank, self.geometry, self.config, self.rng,
             prior=self.prior,
         )
+
+
+# ---------------------------------------------------------------------------
+# Formation-resolution variant
+# ---------------------------------------------------------------------------
+
+def generate_map_formation(
+    bank,                            # FormationDistributionBank
+    geometry: FormationGeometry,
+    config: SimConfig | None = None,
+    rng: np.random.Generator | None = None,
+    prior: DiscoveryPrior | None = None,
+) -> dict[str, Any]:
+    """Same as `generate_map` but draws variable values from a formation-
+    indexed `FormationDistributionBank` instead of a rock-indexed
+    `DistributionBank`.
+
+    Step 1 (stratigraphic columns) and step 3 (ore bodies) are identical
+    to `generate_map`. Step 2 (per-cell variable sampling) iterates over
+    formations and reads `formations[:, :, z_idx]` instead of
+    `rock_types[:, :, z_idx]`. Rock labels are still produced by step 1
+    and saved alongside formation labels so the dataset stays directly
+    comparable to the rock-resolution one.
+    """
+    if config is None:
+        config = SimConfig()
+    if rng is None:
+        rng = np.random.default_rng()
+
+    nx, ny, nz = config.n_x, config.n_y, config.n_depth
+    depth_axis = np.linspace(0, config.max_depth, nz, dtype=np.float32)
+
+    # --- 1. sample spatial stratigraphic columns (unchanged) --------------
+    columns = sample_spatial_column_field(
+        rng=rng,
+        n_x=nx,
+        n_y=ny,
+        geometry=geometry,
+        max_depth=config.max_depth,
+        layer_perturbation_std=config.layer_perturbation_std,
+        layer_perturbation_range_cells=config.layer_perturbation_range_cells,
+        cell_height=config.dz,
+        facies_persistence=config.facies_persistence,
+    )
+
+    rock_types = np.empty((nx, ny, nz), dtype=object)
+    formations = np.empty((nx, ny, nz), dtype=object)
+    for x in range(nx):
+        for y in range(ny):
+            r, f = columns[x][y].rasterise(depth_axis)
+            rock_types[x, y, :] = r
+            formations[x, y, :] = f
+
+    # --- 2. sample variable values per cell, indexed by FORMATION ---------
+    variables_out = {
+        v: np.full((nx, ny, nz), np.nan, dtype=np.float32)
+        for v in config.variables
+    }
+
+    noise_fields = _make_noise_fields(
+        rng, nx, ny, nz, config.variables,
+        lateral_len_scale=config.lateral_correlation_cells,
+        vertical_len_scale=config.vertical_correlation_cells,
+        method=config.grf_method,
+        mode_no=config.grf_mode_no,
+    )
+
+    for z_idx, depth in enumerate(depth_axis):
+        for fm in bank.formations:
+            mask = (formations[:, :, z_idx] == fm)
+            n_cells = int(mask.sum())
+            if n_cells == 0:
+                continue
+            samples = bank.sample(fm, float(depth), n=n_cells, rng=rng)
+            xs, ys = np.where(mask)
+            for var in config.variables:
+                if var not in samples:
+                    continue
+                iid = samples[var]
+                if np.all(np.isnan(iid)):
+                    continue
+                cell = bank.cells.get((fm, _bin_for(bank, depth)))
+                if cell is None or var not in cell.kdes:
+                    variables_out[var][xs, ys, z_idx] = iid.astype(np.float32)
+                    continue
+                mu = cell.means.get(var, float(np.nanmean(iid)))
+                sigma = cell.stds.get(var, float(np.nanstd(iid)))
+                grf_values = noise_fields[var][xs, ys, z_idx]
+                smooth_baseline = mu + sigma * grf_values
+                alpha = config.spatial_correlation_strength
+                blended = alpha * smooth_baseline + (1 - alpha) * iid
+                lo, hi = bank.bounds_for(var)
+                blended = np.clip(blended, lo, hi)
+                variables_out[var][xs, ys, z_idx] = blended.astype(np.float32)
+
+    # --- 3. 3D ore yield field (unchanged, uses rock_types) ---------------
+    yield_field, bodies = sample_orebodies(
+        rng=rng,
+        n_x=nx,
+        n_y=ny,
+        n_depth=nz,
+        depth_axis=depth_axis,
+        rock_types=rock_types,
+        prior=prior,
+        ore_depth_window=config.ore_depth_window,
+        n_candidates=config.n_ore_candidates,
+        softmax_temperature=config.ore_softmax_temperature,
+        radius_xy_range=config.ore_radius_xy_range,
+        radius_z_range=config.ore_radius_z_range,
+        yield_peak_range=config.ore_yield_peak_range,
+    )
+
+    return {
+        "rock_types": rock_types,
+        "formations": formations,
+        "variables": variables_out,
+        "yield_field": yield_field,
+        "depth_axis": depth_axis,
+        "bodies": bodies,
+        "config": asdict(config),
+    }
+
+
+class FormationMapGenerator:
+    """Stateful wrapper for formation-resolution map streaming."""
+
+    def __init__(
+        self,
+        bank,                          # FormationDistributionBank
+        geometry: FormationGeometry,
+        config: SimConfig | None = None,
+        seed: int | None = None,
+        prior: DiscoveryPrior | None = None,
+    ):
+        self.bank = bank
+        self.geometry = geometry
+        self.config = config or SimConfig()
+        self.rng = np.random.default_rng(seed)
+        self.prior = prior
+
+    def __iter__(self):
+        return self
+
+    def __next__(self) -> dict[str, Any]:
+        return generate_map_formation(
+            self.bank, self.geometry, self.config, self.rng,
+            prior=self.prior,
+        )
