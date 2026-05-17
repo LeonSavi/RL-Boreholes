@@ -10,7 +10,7 @@ from torch.utils.data import Dataset
 from simulator.map_generator import MapGenerator, SimConfig
 from encoder.autoencoder import standardise
 from decision_simulator.resources import DecisionSimulationResources
-from .utils import TargetNormalizer, build_ore_target, encode_full_latent_map, build_sample_input
+from .utils import LatentNormalizer, TargetNormalizer, build_ore_target, encode_full_latent_map, build_sample_input
 
 if TYPE_CHECKING:
     from .map_cache import NpzMapCache
@@ -117,6 +117,25 @@ class GeologicalBeliefDataset(Dataset):
         """Normalize stored targets in-place using a fitted TargetNormalizer."""
         targets_np = normalizer.transform(self.targets.numpy())
         self.targets = torch.from_numpy(targets_np)
+
+    def apply_latent_normalizer(self, lnorm: LatentNormalizer) -> None:
+        """Normalize latent input channels in-place, keeping unobserved cells at zero.
+
+        Channels 0 (sparse ore) and 1 (mask) are untouched.
+        Channels 2+ (latent) are z-score normalized using ``lnorm``.
+        Cells where the mask is 0 are explicitly re-zeroed after normalization.
+        """
+        if lnorm.mode == "none" or lnorm.mean is None or self.inputs.shape[1] <= 2:
+            return
+        inputs_np = self.inputs.numpy().copy()        # (N, 2+latent_dim, n_x, n_y)
+        mask = inputs_np[:, 1, :, :]                 # (N, n_x, n_y)
+        latent_ch = inputs_np[:, 2:, :, :]           # (N, latent_dim, n_x, n_y)
+        mean = lnorm.mean[None, :, None, None]        # (1, latent_dim, 1, 1)
+        std = lnorm.std[None, :, None, None]
+        latent_norm = (latent_ch - mean) / std
+        latent_norm *= (mask[:, None, :, :] > 0.0)   # re-zero unobserved cells
+        inputs_np[:, 2:, :, :] = latent_norm
+        self.inputs = torch.from_numpy(inputs_np)
 
     @classmethod
     def generate(

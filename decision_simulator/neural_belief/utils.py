@@ -1,9 +1,61 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+from dataclasses import dataclass, field
+from pathlib import Path
 
 import numpy as np
 import torch
+
+
+@dataclass
+class LatentNormalizer:
+    """Per-channel z-score normalization for borehole latent embeddings.
+
+    Fitted from observed (drilled) cells only so that zero-filled unobserved
+    cells do not bias the statistics.  After transformation, unobserved cells
+    are explicitly re-zeroed so the mask semantics are preserved.
+
+    mode: "zscore" | "none"
+    """
+
+    mode: str = "zscore"
+    mean: np.ndarray | None = field(default=None, repr=False)
+    std: np.ndarray | None = field(default=None, repr=False)
+
+    def fit(self, observed_latents: np.ndarray) -> "LatentNormalizer":
+        """Fit from an ``(N_obs, latent_dim)`` array of observed latent vectors."""
+        latent_dim = observed_latents.shape[1] if observed_latents.ndim == 2 else 0
+        if self.mode == "zscore" and observed_latents.shape[0] > 0:
+            self.mean = observed_latents.mean(axis=0).astype(np.float32)
+            self.std = np.maximum(observed_latents.std(axis=0), 1e-8).astype(np.float32)
+        else:
+            self.mean = np.zeros(latent_dim, dtype=np.float32)
+            self.std = np.ones(latent_dim, dtype=np.float32)
+        return self
+
+    def to_dict(self) -> dict:
+        return {
+            "mode": self.mode,
+            "mean": self.mean.tolist() if self.mean is not None else [],
+            "std": self.std.tolist() if self.std is not None else [],
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "LatentNormalizer":
+        lnorm = cls(mode=d["mode"])
+        lnorm.mean = np.array(d["mean"], dtype=np.float32)
+        lnorm.std = np.array(d["std"], dtype=np.float32)
+        return lnorm
+
+    def save(self, path: Path | str) -> None:
+        with open(path, "w") as f:
+            json.dump(self.to_dict(), f, indent=2)
+
+    @classmethod
+    def load(cls, path: Path | str) -> "LatentNormalizer":
+        with open(path) as f:
+            return cls.from_dict(json.load(f))
 
 
 @dataclass

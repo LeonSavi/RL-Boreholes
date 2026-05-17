@@ -15,7 +15,7 @@ from simulator.map_generator import SimConfig
 from decision_simulator.resources import DecisionSimulationResources
 from .dataset import BeliefDatasetConfig, GeologicalBeliefDataset
 from .model import UNetBelief
-from .utils import TargetNormalizer
+from .utils import LatentNormalizer, TargetNormalizer
 from .baselines import evaluate_baselines
 
 
@@ -47,6 +47,9 @@ class NeuralBeliefTrainingConfig:
     lr: float = 3e-4
     weight_decay: float = 1e-4
     n_epochs: int = 50
+
+    # --- latent normalization ---
+    latent_norm_mode: str = "zscore"  # "zscore" | "none"
 
     # --- misc ---
     seed: int = 42
@@ -295,6 +298,53 @@ def train_neural_belief(
         elif cfg.norm_mode != "none":
             print(f"  target norm   : {cfg.norm_mode}")
 
+    # ---- latent normalization -------------------------------------------------
+    latent_normalizer: LatentNormalizer | None = None
+
+    if cfg.latent_dim > 0 and cfg.latent_norm_mode != "none":
+        # Collect observed latent vectors from training inputs.
+        # Only cells where mask==1 contributed real encoder output;
+        # zero-filled unobserved cells must not bias the statistics.
+        inputs_np = train_ds.inputs.numpy()      # (N, 2+latent_dim, n_x, n_y)
+        obs_mask = inputs_np[:, 1, :, :] > 0.0  # (N, n_x, n_y) bool
+        latent_t = inputs_np[:, 2:, :, :].transpose(0, 2, 3, 1)  # (N, n_x, n_y, latent_dim)
+        observed = latent_t[obs_mask]            # (N_obs, latent_dim)
+
+        latent_normalizer = LatentNormalizer(mode=cfg.latent_norm_mode)
+        latent_normalizer.fit(observed)
+
+        train_ds.apply_latent_normalizer(latent_normalizer)
+        val_ds.apply_latent_normalizer(latent_normalizer)
+
+        lnorm_path = checkpoint_dir / "latent_norm_stats.json"
+        d = latent_normalizer.to_dict()
+        d["encoder_variant"] = cfg.borehole_encoder
+        d["n_observed_samples"] = int(observed.shape[0])
+        with open(lnorm_path, "w") as f:
+            json.dump(d, f, indent=2)
+
+        if verbose:
+            assert latent_normalizer.mean is not None and latent_normalizer.std is not None
+            print(
+                f"  latent norm   : {cfg.latent_norm_mode}"
+                f"  (fitted on {observed.shape[0]:,} observed cells)"
+            )
+            print(
+                f"  latent mean   : min={latent_normalizer.mean.min():.4f}"
+                f"  max={latent_normalizer.mean.max():.4f}"
+            )
+            print(
+                f"  latent std    : min={latent_normalizer.std.min():.4f}"
+                f"  max={latent_normalizer.std.max():.4f}"
+            )
+            print(f"  latent stats  -> {lnorm_path}")
+    else:
+        if verbose:
+            if cfg.latent_dim == 0:
+                print("  latent norm   : skipped (no encoder)")
+            else:
+                print(f"  latent norm   : {cfg.latent_norm_mode}")
+
     train_loader = DataLoader(train_ds, batch_size=cfg.batch_size, shuffle=True)
     val_loader = DataLoader(val_ds, batch_size=cfg.batch_size, shuffle=False)
 
@@ -322,6 +372,7 @@ def train_neural_belief(
                 "epoch": epoch,
                 "history": history,
                 "normalizer": normalizer,
+                "latent_normalizer": latent_normalizer,
                 "sim_cfg": sim_cfg,
                 "n_x": sim_cfg.n_x,
                 "n_y": sim_cfg.n_y,
