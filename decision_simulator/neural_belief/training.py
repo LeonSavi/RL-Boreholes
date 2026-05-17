@@ -52,8 +52,11 @@ class NeuralBeliefTrainingConfig:
     latent_norm_mode: str = "none"  # "zscore" | "none"
 
     # --- latent PCA ---
-    use_latent_pca: bool = True
+    use_latent_pca: bool = False
     latent_pca_components: int = 32
+
+    # --- coordinate channels ---
+    use_coordinate_channels: bool = False
 
     # --- misc ---
     seed: int = 42
@@ -403,6 +406,17 @@ def train_neural_belief(
                 print("  PCA reduction : skipped (no encoder)")
             else:
                 print("  PCA reduction : disabled")
+
+    # ---- coordinate channels -------------------------------------------------
+    if cfg.use_coordinate_channels:
+        train_ds.apply_coordinate_channels()
+        val_ds.apply_coordinate_channels()
+        cfg.in_channels += 2
+        if verbose:
+            print(f"  coord channels: enabled  →  in_channels={cfg.in_channels}")
+    else:
+        if verbose:
+            print("  coord channels: disabled")
 
     train_loader = DataLoader(train_ds, batch_size=cfg.batch_size, shuffle=True)
     val_loader = DataLoader(val_ds, batch_size=cfg.batch_size, shuffle=False)

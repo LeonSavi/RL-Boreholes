@@ -10,7 +10,7 @@ from torch.utils.data import Dataset
 from simulator.map_generator import MapGenerator, SimConfig
 from encoder.autoencoder import standardise
 from decision_simulator.resources import DecisionSimulationResources
-from .utils import LatentNormalizer, LatentPCAReducer, TargetNormalizer, build_ore_target, encode_full_latent_map, build_sample_input
+from .utils import LatentNormalizer, LatentPCAReducer, TargetNormalizer, build_ore_target, encode_full_latent_map, build_sample_input, make_coordinate_grid
 
 if TYPE_CHECKING:
     from .map_cache import NpzMapCache
@@ -146,6 +146,19 @@ class GeologicalBeliefDataset(Dataset):
         self.inputs = torch.from_numpy(
             np.concatenate([ore, mask, reduced], axis=1)
         )
+
+    def apply_coordinate_channels(self) -> None:
+        """Append normalized x and y coordinate channels to every sample in-place.
+
+        The two new channels are appended after all existing channels so the
+        final layout becomes ``[ore, mask, latents..., x_coord, y_coord]``.
+        Both grids are in ``[0, 1]``: x varies along the row axis, y along
+        the column axis.
+        """
+        N, _, n_x, n_y = self.inputs.shape
+        coord = torch.from_numpy(make_coordinate_grid(n_x, n_y))  # (2, n_x, n_y)
+        coord = coord.unsqueeze(0).expand(N, -1, -1, -1)          # (N, 2, n_x, n_y)
+        self.inputs = torch.cat([self.inputs, coord], dim=1)
 
     def apply_latent_normalizer(self, lnorm: LatentNormalizer) -> None:
         """Normalize latent input channels in-place, keeping unobserved cells at zero.

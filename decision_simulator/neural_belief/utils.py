@@ -166,6 +166,18 @@ class TargetNormalizer:
         return x
 
 
+def make_coordinate_grid(n_x: int, n_y: int) -> np.ndarray:
+    """Return normalized (x, y) coordinate channels of shape ``(2, n_x, n_y)`` float32.
+
+    x varies along axis 0 (rows), y along axis 1 (columns), both in ``[0, 1]``.
+    """
+    x = np.linspace(0.0, 1.0, n_x, dtype=np.float32)
+    y = np.linspace(0.0, 1.0, n_y, dtype=np.float32)
+    x_grid = np.broadcast_to(x[:, None], (n_x, n_y)).copy()
+    y_grid = np.broadcast_to(y[None, :], (n_x, n_y)).copy()
+    return np.stack([x_grid, y_grid], axis=0)  # (2, n_x, n_y)
+
+
 def build_ore_target(true_map: dict) -> np.ndarray:
     """Max-pool yield_field over depth.
 
