@@ -8,11 +8,12 @@ import torch
 from torch.utils.data import Dataset
 
 from simulator.map_generator import MapGenerator, SimConfig
+from encoder.autoencoder import standardise
 from decision_simulator.resources import DecisionSimulationResources
 from .utils import TargetNormalizer, build_ore_target, encode_full_latent_map, build_sample_input
 
 if TYPE_CHECKING:
-    from .map_cache import RawMapCache
+    from .map_cache import NpzMapCache
 
 
 @dataclass
@@ -41,22 +42,44 @@ def _validate_sample(
         f"target shape {target.shape} != (1, {n_x}, {n_y})"
     )
 
-    # Mask must be strictly binary
     mask = inp[1]
     assert np.all((mask == 0.0) | (mask == 1.0)), (
         "observation mask contains non-binary values"
     )
 
-    # Latent channels must be zero at every unobserved cell
     drilled = {(i, j) for i, j in drill_locs}
     unobserved = np.array(
         [[(i, j) not in drilled for j in range(n_y)] for i in range(n_x)],
         dtype=bool,
-    )  # (n_x, n_y)
-    latents = inp[2:]  # (latent_dim, n_x, n_y)
+    )
+    latents = inp[2:]
     assert np.all(latents[:, unobserved] == 0.0), (
         "latent channels are non-zero at unobserved cells"
     )
+
+
+def _extract_and_standardise_boreholes(
+    true_map: dict,
+    resources: DecisionSimulationResources,
+) -> np.ndarray:
+    """Extract borehole variables from a true_map dict and standardise them.
+
+    Returns
+    -------
+    np.ndarray of shape (n_x * n_y, V, D) float32, standardised and nan-zeroed.
+    """
+    variables = resources.variable_names
+    n_x, n_y = true_map["yield_field"].shape[:2]
+    n_depth = len(true_map["depth_axis"])
+
+    bh = np.empty((n_x * n_y, len(variables), n_depth), dtype=np.float32)
+    for vi, v in enumerate(variables):
+        bh[:, vi, :] = true_map["variables"][v].reshape(n_x * n_y, n_depth)
+
+    if resources.norm_stats:
+        bh = standardise(bh, resources.norm_stats, variables)
+
+    return np.nan_to_num(bh, nan=0.0).astype(np.float32)
 
 
 class GeologicalBeliefDataset(Dataset):
@@ -98,17 +121,17 @@ class GeologicalBeliefDataset(Dataset):
         validate_samples: bool = False,
         verbose: bool = True,
     ) -> "GeologicalBeliefDataset":
-        """Generate the full dataset from scratch using map synthesis + JEPA encoding.
+        """Generate the full dataset from scratch using map synthesis + encoding.
 
-        For each map the full latent map is computed once (1024 boreholes encoded
+        For each map the full latent map is computed once (all boreholes encoded
         in a single batched pass), then ``cfg.samples_per_map`` random drill
-        patterns are drawn from it.  This amortises the encoding cost.
+        patterns are drawn from it.
 
         Parameters
         ----------
-        resources        : shared experiment resources (JEPA model, norm stats, ...)
+        resources        : shared experiment resources (encoder model, norm stats, ...)
         cfg              : dataset size and drilling parameters
-        device           : torch device for JEPA forward passes
+        device           : torch device for encoder forward passes
         sim_cfg          : map dimensions / ore parameters (defaults to SimConfig())
         validate_samples : if True, assert shape/content invariants on every sample
         verbose          : print progress every 10 maps
@@ -134,8 +157,8 @@ class GeologicalBeliefDataset(Dataset):
         for map_idx in range(cfg.n_maps):
             true_map = next(gen)
 
-            # Expensive per-map computation done once.
-            full_latent_map = encode_full_latent_map(true_map, resources, device)
+            bh_arr = _extract_and_standardise_boreholes(true_map, resources)
+            full_latent_map = encode_full_latent_map(bh_arr, n_x, n_y, resources, device)
             target_ore = build_ore_target(true_map)  # (n_x, n_y)
 
             for _ in range(cfg.samples_per_map):
@@ -156,33 +179,40 @@ class GeologicalBeliefDataset(Dataset):
             if verbose and (map_idx + 1) % 10 == 0:
                 print(f"  [dataset] {map_idx + 1}/{cfg.n_maps} maps generated")
 
-        inputs_t = torch.from_numpy(np.stack(all_inputs, axis=0))    # (N, C, n_x, n_y)
-        targets_t = torch.from_numpy(np.stack(all_targets, axis=0))  # (N, 1, n_x, n_y)
+        inputs_t = torch.from_numpy(np.stack(all_inputs, axis=0))
+        targets_t = torch.from_numpy(np.stack(all_targets, axis=0))
         return cls(inputs_t, targets_t)
 
 
 def build_dataset_from_cache(
-    cache: RawMapCache,
+    cache: "NpzMapCache",
     resources: DecisionSimulationResources,
     device: str,
     verbose: bool = False,
     samples_per_map: int | None = None,
 ) -> GeologicalBeliefDataset:
-    """Build an encoder-specific dataset from a shared :class:`RawMapCache`.
+    """Build an encoder-specific dataset from a shared :class:`NpzMapCache`.
 
-    Encodes boreholes once per map using the encoder in ``resources``.
-    For the no-encoder case (``resources.jepa_model=None`` and
-    ``borehole_encoder_fn=None``), ``encode_full_latent_map`` returns a
-    zero-channel array and inputs will be ``(2, n_x, n_y)``.
+    Standardises and encodes boreholes once per map using the encoder in
+    ``resources``.  For the no-encoder case (both ``resources.jepa_model``
+    and ``borehole_encoder_fn`` are ``None``), inputs will be ``(2, n_x, n_y)``.
     Targets are returned in raw (unnormalized) ore-value space.
     """
     all_inputs: list[np.ndarray] = []
     all_targets: list[np.ndarray] = []
 
-    for map_idx, (true_map, target_ore, samples) in enumerate(
-        zip(cache.maps, cache.targets, cache.drill_patterns)
+    for map_idx, (bh_arr, target_ore, samples) in enumerate(
+        zip(cache.borehole_arrays, cache.targets, cache.drill_patterns)
     ):
-        full_latent_map = encode_full_latent_map(true_map, resources, device)
+        n_x, n_y = cache.n_x, cache.n_y
+
+        # Standardise raw boreholes with this encoder's norm stats
+        bh_std = bh_arr.astype(np.float32)
+        if resources.norm_stats and resources.variable_names:
+            bh_std = standardise(bh_std, resources.norm_stats, resources.variable_names)
+            bh_std = np.nan_to_num(bh_std, nan=0.0)
+
+        full_latent_map = encode_full_latent_map(bh_std, n_x, n_y, resources, device)
 
         used_samples = samples[:samples_per_map] if samples_per_map is not None else samples
         for drill_locs, ore_vals in used_samples:
@@ -191,7 +221,7 @@ def build_dataset_from_cache(
             all_targets.append(target_ore[np.newaxis])  # (1, n_x, n_y)
 
         if verbose and (map_idx + 1) % 10 == 0:
-            print(f"  [encode] {map_idx + 1}/{len(cache.maps)} maps encoded")
+            print(f"  [encode] {map_idx + 1}/{len(cache.borehole_arrays)} maps encoded")
 
     inputs_t = torch.from_numpy(np.stack(all_inputs, axis=0))
     targets_t = torch.from_numpy(np.stack(all_targets, axis=0))

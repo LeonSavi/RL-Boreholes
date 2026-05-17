@@ -4,7 +4,7 @@ from .dataset import (
     GeologicalBeliefDataset,
     build_dataset_from_cache,
 )
-from .map_cache import RawMapCache
+from .map_cache import NpzMapCache, NpzMapCacheStore, NpzMapCacheHandler, RawMapCache
 from .utils import TargetNormalizer
 from .training import (
     NeuralBeliefTrainingConfig,
@@ -25,6 +25,9 @@ __all__ = [
     "UNetBelief",
     "BeliefDatasetConfig",
     "GeologicalBeliefDataset",
+    "NpzMapCache",
+    "NpzMapCacheStore",
+    "NpzMapCacheHandler",
     "RawMapCache",
     "build_dataset_from_cache",
     "TargetNormalizer",

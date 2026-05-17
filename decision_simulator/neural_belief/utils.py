@@ -5,11 +5,6 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
-from decision_simulator.pomdp.observations.borehole_observations import (
-    extract_borehole,
-    standardise_borehole,
-)
-
 
 @dataclass
 class TargetNormalizer:
@@ -76,24 +71,36 @@ def build_ore_target(true_map: dict) -> np.ndarray:
 
 
 def encode_full_latent_map(
-    true_map: dict,
+    borehole_array: np.ndarray,
+    n_x: int,
+    n_y: int,
     resources,
     device: str,
     batch_size: int = 256,
 ) -> np.ndarray:
     """Encode every borehole in a map in one batched pass.
 
-    Encoder resolution order:
-      1. ``resources.borehole_encoder_fn`` if set
-      2. ``resources.jepa_model.embed`` as backward-compatible fallback
-      3. Neither set → return empty ``(n_x, n_y, 0)`` array (no-encoder mode)
+    Parameters
+    ----------
+    borehole_array
+        Pre-computed borehole tensor of shape ``(n_x * n_y, V, D)`` float32.
+        Must already be standardised and nan-zeroed before calling.
+    n_x, n_y
+        Spatial grid dimensions.
+    resources
+        Shared experiment resources; encoder is resolved as:
+        1. ``resources.borehole_encoder_fn`` if set
+        2. ``resources.jepa_model.embed`` as fallback
+        3. Neither set → returns empty ``(n_x, n_y, 0)`` array (no-encoder mode)
+    device
+        Torch device string.
+    batch_size
+        Boreholes encoded per forward pass.
 
     Returns
     -------
-    np.ndarray of shape (n_x, n_y, latent_dim) float32
+    np.ndarray of shape ``(n_x, n_y, latent_dim)`` float32
     """
-    n_x, n_y = true_map["yield_field"].shape[:2]
-
     encoder_fn = getattr(resources, "borehole_encoder_fn", None)
     if encoder_fn is None:
         jepa = getattr(resources, "jepa_model", None)
@@ -103,18 +110,10 @@ def encode_full_latent_map(
     if encoder_fn is None:
         return np.zeros((n_x, n_y, 0), dtype=np.float32)
 
-    boreholes: list[np.ndarray] = []
-    for i in range(n_x):
-        for j in range(n_y):
-            bh = extract_borehole(true_map, i, j, resources.variable_names)
-            bh_std = standardise_borehole(bh, resources.norm_stats, resources.variable_names)
-            boreholes.append(np.nan_to_num(bh_std, nan=0.0))
-
-    bh_arr = np.stack(boreholes, axis=0).astype(np.float32)  # (n_x*n_y, V, D)
-    bh_tensor = torch.from_numpy(bh_arr).to(device)
+    bh_tensor = torch.from_numpy(borehole_array.astype(np.float32)).to(device)
 
     chunks: list[np.ndarray] = []
-    for start in range(0, bh_arr.shape[0], batch_size):
+    for start in range(0, bh_tensor.shape[0], batch_size):
         with torch.no_grad():
             lat = encoder_fn(bh_tensor[start : start + batch_size])
         chunks.append(lat.cpu().numpy())

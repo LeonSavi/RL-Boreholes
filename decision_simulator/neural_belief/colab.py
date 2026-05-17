@@ -19,7 +19,7 @@ from .dataset import (
     BeliefDatasetConfig,
     build_dataset_from_cache,
 )
-from .map_cache import get_cache_handler
+from .map_cache import NpzMapCacheStore, NpzMapCacheHandler
 from .model import UNetBelief
 from .training import (
     build_training_config,
@@ -171,12 +171,13 @@ def train_belief_from_colab(
 def pull_belief_maps_from_colab(
     storage_root: str | Path,
     n_maps: int = 500,
-    out: str | Path = "data/belief_dataset/raw_pool.pkl",
+    out: str | Path = "data/belief_dataset",
     seed: int = 42,
     samples_per_map: int = 20,
     min_drills: int = 1,
     max_drills: int = 15,
     sim_cfg: SimConfig | None = None,
+    overwrite_cache: bool = False,
 ) -> Path:
     """Pre-generate a belief map pool for later use with compare_belief_encoders_from_colab.
 
@@ -207,7 +208,7 @@ def pull_belief_maps_from_colab(
     n_maps
         Total number of maps to have in the pool after this call.
     out
-        Path for the pool pickle. Relative paths are resolved against storage_root.
+        Directory for the npz pool. Relative paths are resolved against storage_root.
     seed
         Base seed for map and drill-pattern generation.
     samples_per_map
@@ -219,7 +220,7 @@ def pull_belief_maps_from_colab(
     Returns
     -------
     Path
-        Absolute path to the saved pool file, ready to pass as map_pool_path.
+        Absolute path to the saved pool directory, ready to pass as map_pool_path.
     """
     root = Path(storage_root).expanduser().resolve()
     _, _, distributions, formation_geo, discovery = resolve_resource_paths(root)
@@ -228,7 +229,7 @@ def pull_belief_maps_from_colab(
     out_path = Path(out)
     if not out_path.is_absolute():
         out_path = root / out_path
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.mkdir(parents=True, exist_ok=True)
 
     pool_cfg = BeliefDatasetConfig(
         n_maps=n_maps,
@@ -243,8 +244,12 @@ def pull_belief_maps_from_colab(
         formation_geometry_path=formation_geo,
         discovery_prior_path=discovery,
     )
-    pool_manager = get_cache_handler(out_path, pool_cfg, n_maps, sim_cfg)
-    pool_manager.ensure_pool_size(n_maps, sim_resources, out_path, sim_cfg)
+    resolved_sim_cfg = sim_cfg or SimConfig()
+    store = NpzMapCacheStore(out_path)
+    handler = NpzMapCacheHandler(
+        store=store, cfg=pool_cfg, sim_cfg=resolved_sim_cfg, overwrite_cache=overwrite_cache
+    )
+    handler.ensure_pool_size(n_maps, sim_resources)
     return out_path
 
 
@@ -254,17 +259,17 @@ def compare_belief_encoders_from_colab(
     device: str = "cuda",
     variants: tuple[str, ...] = ("none", "autoencoder", "jepa"),
     debug: bool = False,
-    map_pool_path: str | Path = "data/belief_dataset/raw_pool.pkl",
+    map_pool_path: str | Path = "data/belief_dataset",
     sim_cfg: SimConfig | None = None,
+    overwrite_cache: bool = False,
     **overrides,
 ) -> pd.DataFrame:
     """Train and compare multiple borehole encoder variants on identical data.
 
-    Maps, train/val split, and drill configurations are generated **once** and
-    shared across all variants.  Per-variant latent embeddings are computed
-    from the shared raw maps when each encoder is loaded.  Processed maps are
-    cached to disk under ``<output_root>/dataset_cache/`` so subsequent Colab
-    sessions skip regeneration.
+    Raw maps, train/val split, and drill patterns are generated **once** and
+    stored in an npz pool directory shared across all variants.  Per-variant
+    latent embeddings are computed from the raw maps when each encoder is loaded;
+    no encoder-specific tensors are cached to disk.
 
     Seed defaults to 42 (``NeuralBeliefTrainingConfig`` default); pass
     ``seed=N`` in ``overrides`` to change it consistently across all variants.
@@ -315,7 +320,7 @@ def compare_belief_encoders_from_colab(
     resolved_pool_path = Path(map_pool_path)
     if not resolved_pool_path.is_absolute():
         resolved_pool_path = root / resolved_pool_path
-    resolved_pool_path.parent.mkdir(parents=True, exist_ok=True)
+    resolved_pool_path.mkdir(parents=True, exist_ok=True)
 
     jepa_path, ae_path, distributions, formation_geo, discovery = (
         resolve_resource_paths(root)
@@ -346,11 +351,17 @@ def compare_belief_encoders_from_colab(
         discovery_prior_path=discovery,
     )
 
+    resolved_sim_cfg = sim_cfg or SimConfig()
     n_total = base_cfg.n_train_maps + base_cfg.n_val_maps
-    pool_manager = get_cache_handler(resolved_pool_path, pool_cfg, n_total, sim_cfg)
-    pool_manager.ensure_pool_size(n_total, sim_resources, resolved_pool_path, sim_cfg)
-    train_cache = pool_manager.subset(list(range(base_cfg.n_train_maps)))
-    val_cache = pool_manager.subset(list(range(base_cfg.n_train_maps, n_total)))
+    store = NpzMapCacheStore(resolved_pool_path)
+    handler = NpzMapCacheHandler(
+        store=store, cfg=pool_cfg, sim_cfg=resolved_sim_cfg, overwrite_cache=overwrite_cache
+    )
+    handler.ensure_pool_size(n_total, sim_resources)
+    train_cache, val_cache = handler.load_train_val_split(
+        n_train_maps=base_cfg.n_train_maps,
+        n_val_maps=base_cfg.n_val_maps,
+    )
 
     rows: list[dict] = []
 
@@ -419,7 +430,7 @@ def compare_belief_encoders_from_colab(
         print(f"\nSmoke test passed: {len(history)} epoch(s) in history.")
         export_history(history, ckpt_dir)
         save_experiment_config(
-            ckpt_dir, cfg, cache_path=resolved_pool_path, sim_cfg=sim_cfg
+            ckpt_dir, cfg, cache_path=resolved_pool_path, sim_cfg=resolved_sim_cfg
         )
 
         best = min(history, key=lambda r: r["val_mse"])
