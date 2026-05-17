@@ -25,43 +25,43 @@
     with strat.json                          6,508
     used                                     1,537
     feet-depth auto-converted                  428
-  rows written                           7,710,488
+  rows written                           7,715,821
 
 ## boreholes.xlsx (location + hc_result)
-  rows read                                  6,698
-  matched to NLOG folders                      717
-  unmatched NLOG folders                     1,350
+  rows read                                  6,721
+  matched to NLOG folders                    2,067
+  unmatched NLOG folders                         0
   columns used:
-    id               'Borehole name'
-    x                'X Dutch National Grid'
-    y                'Y Dutch National Grid'
+    id               'Boorgatnaam'
+    x                'X Rijksdriehoek'
+    y                'Y Rijksdriehoek'
     onshore          'On offshore'
-    result_code      'Result code'
-    result_label     'Result'
-    field            'Field name'
-    objective        'Borehole objective code'
+    result_code      'Resultaat Code'
+    result_label     'Resultaat'
+    field            'Veldnaam'
+    objective        'Boorgatdoel Code'
 
 ## Location metadata (xlsx → details.json fallback)
   coords missing                                 0
-    offshore         wells=   716
-    onshore          wells=     1
+    onshore          wells= 1,042
+    offshore         wells= 1,025
 
 ## Hydrocarbon result labels (from boreholes.xlsx)
-    dry              wells=   254
-    gas              wells=   245
-    other            wells=    74
-    oil              wells=    55
-    show             wells=    47
-    gas+oil          wells=    41
-    water            wells=     1
+    gas              wells=   958
+    dry              wells=   480
+    other            wells=   166
+    oil              wells=   165
+    gas+oil          wells=   128
+    show             wells=    95
+    water            wells=    75
 
 ## Pooled discovery label (hc_discovery)
   positive = gas | oil | gas+oil
   negative = dry | water | abandoned
   unknown  = show | other | unlabelled
-    positive   wells=   341
-    negative   wells=   255
-    unknown    wells= 1,471
+    positive   wells= 1,251
+    negative   wells=   555
+    unknown    wells=   261
 
 ## Feature availability in NLOG output
     rhob             wells=   998   rows= 1,028,604
@@ -71,8 +71,8 @@
     pef              wells=    95   rows=    61,560
     cali_in          wells=   307   rows=   336,435
     sp_mv            wells=   187   rows=   196,162
-    res_deep_log     wells=   345   rows=   313,452
-    res_shal_log     wells=   216   rows=   165,064
+    res_deep_log     wells=   348   rows=   317,378
+    res_shal_log     wells=   221   rows=   166,471
     drho             wells=   644   rows=   699,113
     vsh              wells=    16   rows=    13,816
     vcl              wells=    16   rows=     2,245
@@ -110,8 +110,9 @@
     vdol           ← VDOL              8
     res_deep_log   ← RD                6
     vsilt          ← VSILT             4
-    dt_us_ft       ← DTP               1
-    res_shal_log   ← MSFL              1
+    res_shal_log   ← RLLS              4
+    res_deep_log   ← RDEP              2
+    res_shal_log   ← RILM              2
 
 ## NLOG formation hits (interval count)
     ZE        7,535
@@ -195,7 +196,7 @@
     RV                    7
     RVVE                  6
     XX                    5
- 
+
 ## Zechstein group-level codes (reclassified to 'other')
   these rows have only ZEZ1/ZEZ2/... (no H/A/C member suffix)
   so we cannot assign halite/anhydrite/carbonate safely
@@ -262,7 +263,7 @@
     dt_us_ft         below                   1,506
     vdol             above                     891
     drho             below                     741
-    res_shal_log     above                     354
+    res_shal_log     above                     355
     pef              below                     256
 
 ## Tier 2 — statistical sanity
@@ -295,9 +296,9 @@
     dt_us_ft             63,209
     drho                 42,147
     cali_in             148,433
-    res_deep_log         73,677
+    res_deep_log         73,741
     sp_mv                11,527
-    res_shal_log         45,226
+    res_shal_log         45,380
     vsh                  10,145
     phie                 39,275
     sw                   65,659
