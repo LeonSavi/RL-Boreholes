@@ -4,7 +4,7 @@ from .dataset import (
     GeologicalBeliefDataset,
     build_dataset_from_cache,
 )
-from .map_cache import NpzMapCache, NpzMapCacheStore, NpzMapCacheHandler, RawMapCache
+from .map_cache import NpzMapCache, NpzMapCacheStore
 from .utils import TargetNormalizer
 from .training import (
     NeuralBeliefTrainingConfig,
@@ -19,7 +19,10 @@ from .inference import (
 )
 from .baselines import evaluate_baselines
 from .visualize import plot_belief_sample
-from .colab import train_belief_from_colab, compare_belief_encoders_from_colab
+from .colab import (
+    train_belief_from_colab,
+    compare_belief_encoders_from_colab,
+)
 
 __all__ = [
     "UNetBelief",
@@ -27,8 +30,6 @@ __all__ = [
     "GeologicalBeliefDataset",
     "NpzMapCache",
     "NpzMapCacheStore",
-    "NpzMapCacheHandler",
-    "RawMapCache",
     "build_dataset_from_cache",
     "TargetNormalizer",
     "NeuralBeliefTrainingConfig",
