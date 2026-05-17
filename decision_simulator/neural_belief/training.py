@@ -77,6 +77,68 @@ def _pearson_correlation(pred: torch.Tensor, target: torch.Tensor) -> float:
     return (num / denom).mean().item()
 
 
+_DRILL_BINS: list[tuple[int, int]] = [(1, 3), (4, 8), (9, 15)]
+
+
+def validate_by_drill_bins(
+    model: UNetBelief,
+    val_ds: GeologicalBeliefDataset,
+    normalizer: TargetNormalizer,
+    device: str,
+    bins: list[tuple[int, int]] | None = None,
+    batch_size: int = 64,
+) -> dict[str, float | int]:
+    """Compute val metrics grouped by number of drilled boreholes.
+
+    Returns a flat dict with keys ``mse_<lo>_<hi>``, ``mae_<lo>_<hi>``,
+    ``corr_<lo>_<hi>``, and ``n_<lo>_<hi>`` for each bin ``(lo, hi)``.
+    Returns an empty dict when ``val_ds.drill_counts`` is not set.
+    Metrics are in ore-value space (predictions and targets are denormalized).
+    """
+    if val_ds.drill_counts is None:
+        return {}
+
+    if bins is None:
+        bins = _DRILL_BINS
+
+    model.eval()
+    counts = val_ds.drill_counts  # (N,) int64, on CPU
+
+    # Full inference pass — collect all predictions and targets
+    loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
+    all_pred: list[torch.Tensor] = []
+    all_tgt: list[torch.Tensor] = []
+    with torch.no_grad():
+        for x, y in loader:
+            x, y = x.to(device), y.to(device)
+            pred = normalizer.inverse_tensor(model(x)).cpu()
+            tgt = normalizer.inverse_tensor(y).cpu()
+            all_pred.append(pred)
+            all_tgt.append(tgt)
+
+    preds = torch.cat(all_pred, dim=0)   # (N, 1, n_x, n_y)
+    tgts = torch.cat(all_tgt, dim=0)    # (N, 1, n_x, n_y)
+
+    result: dict[str, float | int] = {}
+    for lo, hi in bins:
+        key = f"{lo}_{hi}"
+        sel = (counts >= lo) & (counts <= hi)
+        n = int(sel.sum().item())
+        result[f"n_{key}"] = n
+        if n == 0:
+            result[f"mse_{key}"] = float("nan")
+            result[f"mae_{key}"] = float("nan")
+            result[f"corr_{key}"] = float("nan")
+            continue
+        p = preds[sel]
+        t = tgts[sel]
+        result[f"mse_{key}"] = nn.functional.mse_loss(p, t).item()
+        result[f"mae_{key}"] = (p - t).abs().mean().item()
+        result[f"corr_{key}"] = _pearson_correlation(p, t)
+
+    return result
+
+
 def _validate(
     model: UNetBelief,
     loader: DataLoader,
@@ -335,6 +397,30 @@ def train_neural_belief(
     if verbose:
         print(f"\nTraining complete. Best val MSE: {best_val_mse:.4f}")
         print(f"  checkpoints -> {checkpoint_dir}")
+
+    # ---- per-bin validation ---------------------------------------------------
+    bin_metrics = validate_by_drill_bins(model, val_ds, normalizer, device)
+    if bin_metrics:
+        if verbose:
+            print("\nValidation metrics by drill count (best model, ore-value space):")
+            for lo, hi in _DRILL_BINS:
+                key = f"{lo}_{hi}"
+                n = bin_metrics.get(f"n_{key}", 0)
+                mse = bin_metrics.get(f"mse_{key}", float("nan"))
+                mae = bin_metrics.get(f"mae_{key}", float("nan"))
+                corr = bin_metrics.get(f"corr_{key}", float("nan"))
+                print(
+                    f"  drills {lo:2d}-{hi:2d}"
+                    f"  n={n:5d}"
+                    f"  mse={mse:.4f}"
+                    f"  mae={mae:.4f}"
+                    f"  corr={corr:.4f}"
+                )
+        bin_path = checkpoint_dir / "val_metrics_by_drills.json"
+        with open(bin_path, "w") as f:
+            json.dump(bin_metrics, f, indent=2)
+        if verbose:
+            print(f"  drill-bin metrics -> {bin_path}")
 
     return model, normalizer
 

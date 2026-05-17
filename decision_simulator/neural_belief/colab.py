@@ -22,6 +22,7 @@ from .training import (
     load_belief_checkpoint,
     save_experiment_config,
     train_neural_belief,
+    validate_by_drill_bins,
 )
 
 
@@ -257,13 +258,18 @@ def compare_belief_encoders_from_colab(
         print(f"  Encoder variant : {variant}")
         print(f"{'=' * 60}")
 
-        check_encoder_path(variant, jepa_path, ae_path)
+        # "shuffled_jepa" / "shuffled_autoencoder" use the real encoder checkpoint
+        # but scramble latent positions spatially — a control for spatial latent info.
+        is_shuffled = variant.startswith("shuffled_")
+        base_variant = variant[len("shuffled_"):] if is_shuffled else variant
+
+        check_encoder_path(base_variant, jepa_path, ae_path)
 
         ckpt_dir = out_root / f"belief_{variant}"
         ckpt_dir.mkdir(parents=True, exist_ok=True)
 
         resources, latent_dim = load_decision_resources(
-            borehole_encoder=variant,
+            borehole_encoder=base_variant,
             jepa_path=jepa_path,
             ae_path=ae_path,
             distributions_path=distributions,
@@ -274,11 +280,13 @@ def compare_belief_encoders_from_colab(
 
         encoder_defaults = {"in_channels": 2 + latent_dim, "latent_dim": latent_dim}
         cfg = build_training_config(debug, {**encoder_defaults, **overrides})
-        cfg.borehole_encoder = variant
+        cfg.borehole_encoder = variant  # record full variant name (e.g. "shuffled_jepa")
 
         print(f"\nborehole_encoder : {variant}")
         print(f"latent_dim       : {latent_dim}")
         print(f"in_channels      : {cfg.in_channels}")
+        if is_shuffled:
+            print("  (shuffled-latent control: spatial latent positions will be permuted)")
 
         print("\nBuilding training dataset from shared cache ...")
         train_ds = build_dataset_from_cache(
@@ -287,6 +295,8 @@ def compare_belief_encoders_from_colab(
             device,
             verbose=True,
             samples_per_map=cfg.samples_per_map,
+            shuffle_latents=is_shuffled,
+            shuffle_seed=cfg.seed,
         )
         print(f"  train samples : {len(train_ds)}")
 
@@ -297,10 +307,12 @@ def compare_belief_encoders_from_colab(
             device,
             verbose=True,
             samples_per_map=cfg.val_samples_per_map,
+            shuffle_latents=is_shuffled,
+            shuffle_seed=cfg.seed + 10000,
         )
         print(f"  val   samples : {len(val_ds)}")
 
-        train_neural_belief(
+        model, normalizer = train_neural_belief(
             resources=resources,
             cfg=cfg,
             device=device,
@@ -321,6 +333,7 @@ def compare_belief_encoders_from_colab(
         )
 
         best = min(history, key=lambda r: r["val_mse"])
+        bin_metrics = validate_by_drill_bins(model, val_ds, normalizer, device)
         rows.append(
             {
                 "encoder": variant,
@@ -328,6 +341,7 @@ def compare_belief_encoders_from_colab(
                 "best_val_mse": best["val_mse"],
                 "best_val_mae": best["val_mae"],
                 "best_val_corr": best["val_corr"],
+                **bin_metrics,
             }
         )
 

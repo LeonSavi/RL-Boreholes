@@ -94,11 +94,18 @@ class GeologicalBeliefDataset(Dataset):
     target : (1, n_x, n_y) float32 tensor
                ch 0   : true max-pooled ore map (yield_field.max(depth))
                NOTE   : may be in normalized space after apply_target_normalizer()
+    drill_counts : (N,) int64 tensor, number of drills per sample (optional)
     """
 
-    def __init__(self, inputs: torch.Tensor, targets: torch.Tensor) -> None:
+    def __init__(
+        self,
+        inputs: torch.Tensor,
+        targets: torch.Tensor,
+        drill_counts: torch.Tensor | None = None,
+    ) -> None:
         self.inputs = inputs
         self.targets = targets
+        self.drill_counts = drill_counts
 
     def __len__(self) -> int:
         return len(self.inputs)
@@ -153,6 +160,7 @@ class GeologicalBeliefDataset(Dataset):
 
         all_inputs: list[np.ndarray] = []
         all_targets: list[np.ndarray] = []
+        drill_count_list: list[int] = []
 
         for map_idx in range(cfg.n_maps):
             true_map = next(gen)
@@ -175,13 +183,15 @@ class GeologicalBeliefDataset(Dataset):
 
                 all_inputs.append(inp)
                 all_targets.append(tgt)
+                drill_count_list.append(n_drills)
 
             if verbose and (map_idx + 1) % 10 == 0:
                 print(f"  [dataset] {map_idx + 1}/{cfg.n_maps} maps generated")
 
         inputs_t = torch.from_numpy(np.stack(all_inputs, axis=0))
         targets_t = torch.from_numpy(np.stack(all_targets, axis=0))
-        return cls(inputs_t, targets_t)
+        drill_counts_t = torch.tensor(drill_count_list, dtype=torch.long)
+        return cls(inputs_t, targets_t, drill_counts=drill_counts_t)
 
 
 def build_dataset_from_cache(
@@ -190,6 +200,8 @@ def build_dataset_from_cache(
     device: str,
     verbose: bool = False,
     samples_per_map: int | None = None,
+    shuffle_latents: bool = False,
+    shuffle_seed: int = 0,
 ) -> GeologicalBeliefDataset:
     """Build an encoder-specific dataset from a shared :class:`NpzMapCache`.
 
@@ -197,9 +209,22 @@ def build_dataset_from_cache(
     ``resources``.  For the no-encoder case (both ``resources.jepa_model``
     and ``borehole_encoder_fn`` are ``None``), inputs will be ``(2, n_x, n_y)``.
     Targets are returned in raw (unnormalized) ore-value space.
+
+    Parameters
+    ----------
+    shuffle_latents
+        If True, randomly permute the spatial positions of the full latent map
+        before building sample inputs.  Ore observations and drill locations are
+        unchanged — only the latent-channel content is spatially scrambled.
+        Used to create shuffled-latent control variants.
+    shuffle_seed
+        Base seed for the per-map shuffle RNG.  Map ``i`` uses seed
+        ``shuffle_seed + i`` so each map gets a different but reproducible
+        permutation.
     """
     all_inputs: list[np.ndarray] = []
     all_targets: list[np.ndarray] = []
+    drill_count_list: list[int] = []
 
     for map_idx, (bh_arr, target_ore, samples) in enumerate(
         zip(cache.borehole_arrays, cache.targets, cache.drill_patterns)
@@ -214,15 +239,24 @@ def build_dataset_from_cache(
 
         full_latent_map = encode_full_latent_map(bh_std, n_x, n_y, resources, device)
 
+        # Shuffle spatial positions of latent vectors (control variant).
+        # Latent_dim==0 means no encoder — nothing to shuffle.
+        if shuffle_latents and full_latent_map.shape[2] > 0:
+            flat = full_latent_map.reshape(-1, full_latent_map.shape[2])
+            np.random.default_rng(shuffle_seed + map_idx).shuffle(flat)
+            full_latent_map = flat.reshape(n_x, n_y, -1)
+
         used_samples = samples[:samples_per_map] if samples_per_map is not None else samples
         for drill_locs, ore_vals in used_samples:
             inp = build_sample_input(drill_locs, ore_vals, full_latent_map)
             all_inputs.append(inp)
             all_targets.append(target_ore[np.newaxis])  # (1, n_x, n_y)
+            drill_count_list.append(len(drill_locs))
 
         if verbose and (map_idx + 1) % 10 == 0:
             print(f"  [encode] {map_idx + 1}/{len(cache.borehole_arrays)} maps encoded")
 
     inputs_t = torch.from_numpy(np.stack(all_inputs, axis=0))
     targets_t = torch.from_numpy(np.stack(all_targets, axis=0))
-    return GeologicalBeliefDataset(inputs_t, targets_t)
+    drill_counts_t = torch.tensor(drill_count_list, dtype=torch.long)
+    return GeologicalBeliefDataset(inputs_t, targets_t, drill_counts=drill_counts_t)
