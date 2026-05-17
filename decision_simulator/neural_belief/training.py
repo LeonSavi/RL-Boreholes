@@ -49,7 +49,7 @@ class NeuralBeliefTrainingConfig:
     n_epochs: int = 50
 
     # --- latent normalization ---
-    latent_norm_mode: str = "zscore"  # "zscore" | "none"
+    latent_norm_mode: str = "none"  # "zscore" | "none"
 
     # --- misc ---
     seed: int = 42
