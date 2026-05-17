@@ -171,7 +171,7 @@ def train_belief_from_colab(
 def pull_belief_maps_from_colab(
     storage_root: str | Path,
     n_maps: int = 500,
-    out: str | Path = "data/belief_dataset",
+    out: str | Path = "data/train_maps",
     seed: int = 42,
     samples_per_map: int = 20,
     min_drills: int = 1,
@@ -247,7 +247,10 @@ def pull_belief_maps_from_colab(
     resolved_sim_cfg = sim_cfg or SimConfig()
     store = NpzMapCacheStore(out_path)
     handler = NpzMapCacheHandler(
-        store=store, cfg=pool_cfg, sim_cfg=resolved_sim_cfg, overwrite_cache=overwrite_cache
+        store=store,
+        cfg=pool_cfg,
+        sim_cfg=resolved_sim_cfg,
+        overwrite_cache=overwrite_cache,
     )
     handler.ensure_pool_size(n_maps, sim_resources)
     return out_path
@@ -259,7 +262,7 @@ def compare_belief_encoders_from_colab(
     device: str = "cuda",
     variants: tuple[str, ...] = ("none", "autoencoder", "jepa"),
     debug: bool = False,
-    map_pool_path: str | Path = "data/belief_dataset",
+    map_pool_path: str | Path = "data/train_maps",
     sim_cfg: SimConfig | None = None,
     overwrite_cache: bool = False,
     **overrides,
@@ -355,7 +358,10 @@ def compare_belief_encoders_from_colab(
     n_total = base_cfg.n_train_maps + base_cfg.n_val_maps
     store = NpzMapCacheStore(resolved_pool_path)
     handler = NpzMapCacheHandler(
-        store=store, cfg=pool_cfg, sim_cfg=resolved_sim_cfg, overwrite_cache=overwrite_cache
+        store=store,
+        cfg=pool_cfg,
+        sim_cfg=resolved_sim_cfg,
+        overwrite_cache=overwrite_cache,
     )
     handler.ensure_pool_size(n_total, sim_resources)
     train_cache, val_cache = handler.load_train_val_split(
