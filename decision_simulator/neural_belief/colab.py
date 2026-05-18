@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Literal
 
@@ -27,7 +28,6 @@ from .training import (
     save_experiment_config,
     train_neural_belief,
     train_map_belief,
-    validate_by_drill_bins,
 )
 
 # Fields present in NeuralBeliefTrainingConfig but not in MapBeliefTrainingConfig.
@@ -380,7 +380,7 @@ def compare_belief_encoders_from_colab(
                     )
 
                 if is_transformer:
-                    model, normalizer = train_map_belief(
+                    train_map_belief(
                         resources=resources,
                         cfg=cfg,
                         device=device,
@@ -394,7 +394,7 @@ def compare_belief_encoders_from_colab(
                         ckpt_dir / "map_belief_best.pt", device=device
                     )
                 else:
-                    model, normalizer = train_neural_belief(
+                    train_neural_belief(
                         resources=resources,
                         cfg=cfg,
                         device=device,
@@ -415,7 +415,8 @@ def compare_belief_encoders_from_colab(
                 )
 
                 best = min(history, key=lambda r: r["val_mse"])
-                bin_metrics = validate_by_drill_bins(model, val_ds, normalizer, device)
+                bin_path = ckpt_dir / "val_metrics_by_drills.json"
+                bin_metrics = json.loads(bin_path.read_text()) if bin_path.exists() else {}
                 rows.append(
                     {
                         "map_encoder": map_encoder,
