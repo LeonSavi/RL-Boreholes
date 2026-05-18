@@ -164,6 +164,10 @@ def train_neural_belief(
     else:
         if verbose:
             print("Using pre-built datasets.")
+        # Wrap in new objects so attribute reassignments (normalisation, PCA,
+        # coordinate channels) do not mutate the caller's datasets.
+        train_ds = GeologicalBeliefDataset(train_ds.inputs, train_ds.targets, train_ds.drill_counts)
+        val_ds   = GeologicalBeliefDataset(val_ds.inputs,   val_ds.targets,   val_ds.drill_counts)
 
     # ---- target normalization -------------------------------------------------
     normalizer = TargetNormalizer(mode=cfg.norm_mode)
