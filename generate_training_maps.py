@@ -79,6 +79,7 @@ def _worker_init(
     min_drills,
     max_drills,
     main_seed,
+    n_ore_bodies,
 ):
     global _WORKER_GEN, _WORKER_VARS, _WORKER_OUT
     global _WORKER_ROCK_VOCAB, _WORKER_FM_VOCAB
@@ -90,7 +91,7 @@ def _worker_init(
     geom = FormationGeometry.load(geom_path)
     prior = DiscoveryPrior.load(prior_path)
     seed = worker_seed_base + os.getpid()
-    _WORKER_GEN = MapGenerator(bank, geom, SimConfig(), seed=seed, prior=prior)
+    _WORKER_GEN = MapGenerator(bank, geom, SimConfig(n_ore_bodies=n_ore_bodies), seed=seed, prior=prior)
     _WORKER_VARS = list(variables)
     _WORKER_OUT = Path(out_dir)
     _WORKER_ROCK_VOCAB = rock_vocab
@@ -196,6 +197,7 @@ def _generate_one(map_idx: int) -> tuple[int, float]:
         drill_locs=drill_locs_arr,
         drill_ore_vals=drill_ore_arr,
         drill_counts=drill_counts_arr,
+        n_bodies=np.int8(len(m["bodies"])),
     )
 
     return map_idx, time.perf_counter() - t0
@@ -224,10 +226,14 @@ def main() -> None:
         "--geom", type=Path, default=Path("data/clean/formation_geometry.pkl")
     )
     p.add_argument("--prior", type=Path, default=Path("data/clean/discovery_prior.pkl"))
+    p.add_argument(
+        "--n-bodies", type=int, default=None,
+        help="fix ore body count per map (0-3); omit for random 0-3",
+    )
     args = p.parse_args()
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
-    sim_cfg = SimConfig()
+    sim_cfg = SimConfig(n_ore_bodies=args.n_bodies)
     n_x, n_y = sim_cfg.n_x, sim_cfg.n_y
     variables = list(sim_cfg.variables)
 
@@ -304,6 +310,7 @@ def main() -> None:
         args.min_drills,
         args.max_drills,
         args.seed,  # main_seed for drill-pattern RNG
+        args.n_bodies,
     )
     with mp.Pool(args.workers, initializer=_worker_init, initargs=init_args) as pool:
         for idx, dt in pool.imap_unordered(_generate_one, pending, chunksize=4):
@@ -322,6 +329,21 @@ def main() -> None:
 
     print(f"\n  done in {(time.perf_counter() - t0) / 60:.1f} min")
     print(f"  pool -> {args.out_dir}  ({args.n_maps} maps)")
+
+    # Write a flat index so NpzMapCacheStore can stratify by body count without
+    # opening every map file at load time.
+    index_path = args.out_dir / "n_bodies_index.npy"
+    index = np.array(
+        [int(np.load(args.out_dir / f"map_{i:05d}.npz")["n_bodies"])
+         for i in range(args.n_maps)],
+        dtype=np.int8,
+    )
+    np.save(index_path, index)
+    unique, counts = np.unique(index, return_counts=True)
+    print("  ore-body distribution:")
+    for u, c in zip(unique, counts):
+        print(f"    {u} bodies: {c} maps ({c/args.n_maps:.1%})")
+    print(f"  index -> {index_path}")
 
 
 if __name__ == "__main__":

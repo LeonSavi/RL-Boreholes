@@ -93,6 +93,7 @@ class MapBeliefTrainingConfig:
     # --- Misc ---
     seed: int = 42
     borehole_encoder: str = "unknown"
+    n_val_plots: int = 20
 
     def __post_init__(self) -> None:
         if self.d_model % self.n_heads != 0:
@@ -330,7 +331,7 @@ def train_map_belief(
 
     # ---- optional validation plots ----------------------------------------------
     if plot_dir is not None:
-        save_val_plots(model, val_ds, normalizer, plot_dir, device)
+        save_val_plots(model, val_ds, normalizer, plot_dir, device, n_plots=cfg.n_val_plots)
 
     # ---- per-bin validation (best model) ----------------------------------------
     # Reload best weights first

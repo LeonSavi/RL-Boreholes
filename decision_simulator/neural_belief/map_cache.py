@@ -164,3 +164,65 @@ class NpzMapCacheStore:
         train_cache = self.load_subset(list(range(n_train_maps)))
         val_cache = self.load_subset(list(range(n_train_maps, n_train_maps + n_val_maps)))
         return train_cache, val_cache
+
+    def load_stratified_split(
+        self,
+        n_train_maps: int,
+        n_val_maps: int,
+        n_orebodies: int,
+        seed: int = 42,
+    ) -> tuple[NpzMapCache, NpzMapCache]:
+        """Load train/val subsets stratified by ore body count.
+
+        Samples maps so each body-count class is equally represented:
+
+        * ``n_orebodies=1`` — 50 % zero-body, 50 % one-body
+        * ``n_orebodies=2`` — 33 % each of 0, 1, 2 bodies
+        * ``n_orebodies=3`` — 25 % each of 0, 1, 2, 3 bodies
+
+        Requires ``n_bodies_index.npy`` to exist in the pool directory
+        (written automatically by ``generate_training_maps.py``).
+
+        Raises
+        ------
+        ValueError
+            If the index file is missing, ``n_orebodies`` is out of range,
+            or any required body-count class has too few maps.
+        """
+        if n_orebodies not in (1, 2, 3):
+            raise ValueError(f"n_orebodies must be 1, 2, or 3; got {n_orebodies}")
+
+        index_path = self.path / "n_bodies_index.npy"
+        if not index_path.exists():
+            raise ValueError(
+                f"n_bodies_index.npy not found in '{self.path}'. "
+                "Regenerate the map pool with generate_training_maps.py."
+            )
+
+        body_index = np.load(index_path)          # shape (n_maps,) int8
+        classes = list(range(n_orebodies + 1))    # [0] or [0,1] or [0,1,2] or [0,1,2,3]
+        n_classes = len(classes)
+        n_needed = n_train_maps + n_val_maps
+
+        # maps per class, rounded so total >= n_needed
+        per_class = int(np.ceil(n_needed / n_classes))
+
+        rng = np.random.default_rng(seed)
+        selected: list[int] = []
+        for cls in classes:
+            candidates = np.where(body_index == cls)[0].tolist()
+            if len(candidates) < per_class:
+                raise ValueError(
+                    f"Not enough maps with {cls} ore bodies in pool "
+                    f"(need {per_class}, have {len(candidates)}). "
+                    "Generate more maps or reduce n_train_maps/n_val_maps."
+                )
+            chosen = rng.choice(candidates, size=per_class, replace=False).tolist()
+            selected.extend(chosen)
+
+        rng.shuffle(selected)
+        selected = selected[:n_needed]            # trim any rounding excess
+
+        train_indices = selected[:n_train_maps]
+        val_indices   = selected[n_train_maps:]
+        return self.load_subset(train_indices), self.load_subset(val_indices)

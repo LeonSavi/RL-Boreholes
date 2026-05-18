@@ -90,6 +90,7 @@ class SimConfig:
     ore_radius_xy_range: tuple[float, float] = (3.0, 8.0)
     ore_radius_z_range: tuple[float, float] = (50.0, 200.0)
     ore_yield_peak_range: tuple[float, float] = (0.5, 5.0)
+    n_ore_bodies: int | None = None  # None → random 0-3 per map
 
     @property
     def dz(self) -> float:
@@ -184,6 +185,7 @@ def generate_map(
         depth_axis=depth_axis,
         rock_types=rock_types,
         prior=prior,
+        n_bodies=config.n_ore_bodies,
         ore_depth_window=config.ore_depth_window,
         n_candidates=config.n_ore_candidates,
         softmax_temperature=config.ore_softmax_temperature,

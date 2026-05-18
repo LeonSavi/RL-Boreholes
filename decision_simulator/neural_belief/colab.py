@@ -189,14 +189,16 @@ def compare_belief_encoders_from_colab(
     map_encoder_variants: tuple[str, ...] = ("unet",),
     debug: bool = False,
     map_pool_path: str | Path = "data/train_maps",
+    n_orebodies: int | None = None,
+    run_shuffled: bool = False,
     **overrides,
 ) -> pd.DataFrame:
     """Train and compare all combinations of borehole and map encoder variants.
 
     Iterates over every combination of ``borehole_encoder_variants`` ×
-    ``map_encoder_variants``.  For each combination both a non-shuffled and a
-    shuffled-latent run are executed automatically, giving a built-in spatial
-    control.  Resources are loaded once per borehole encoder; datasets are built
+    ``map_encoder_variants``.  When ``run_shuffled=True``, both a non-shuffled
+    and a shuffled-latent run are executed, giving a built-in spatial control.
+    Resources are loaded once per borehole encoder; datasets are built
     once per (borehole encoder, shuffled) pair and reused across map encoders.
 
     The map pool must already exist at ``map_pool_path``, generated in advance
@@ -241,6 +243,12 @@ def compare_belief_encoders_from_colab(
     map_pool_path
         Path to the pre-generated npz map pool directory, resolved against
         ``storage_root`` if relative.
+    n_orebodies
+        Stratify the map sample by ore body count.  ``None`` (default) uses
+        a contiguous slice of the pool.  Set to 1, 2, or 3 to draw maps
+        in equal proportions across body counts 0…n_orebodies.  Requires
+        ``n_bodies_index.npy`` to be present in the pool (written by
+        ``generate_training_maps.py``).
     **overrides
         Forwarded to every training run.  ``in_channels`` and ``latent_dim``
         are always derived from the encoder and cannot be overridden here.
@@ -277,10 +285,18 @@ def compare_belief_encoders_from_colab(
     )
 
     store = NpzMapCacheStore(resolved_pool_path)
-    train_cache, val_cache = store.load_train_val_split(
-        n_train_maps=base_cfg.n_train_maps,
-        n_val_maps=base_cfg.n_val_maps,
-    )
+    if n_orebodies is not None:
+        train_cache, val_cache = store.load_stratified_split(
+            n_train_maps=base_cfg.n_train_maps,
+            n_val_maps=base_cfg.n_val_maps,
+            n_orebodies=n_orebodies,
+            seed=overrides.get("seed", 42),
+        )
+    else:
+        train_cache, val_cache = store.load_train_val_split(
+            n_train_maps=base_cfg.n_train_maps,
+            n_val_maps=base_cfg.n_val_maps,
+        )
 
     # ---- pre-build all datasets -------------------------------------------------
     # Resources and datasets depend only on (borehole_encoder, is_shuffled), not
@@ -301,7 +317,7 @@ def compare_belief_encoders_from_colab(
         )
         resources_by_encoder[borehole_encoder] = (resources, latent_dim)
 
-        for is_shuffled in [False, True]:
+        for is_shuffled in ([False, True] if run_shuffled else [False]):
             print(
                 f"\nBuilding {'shuffled ' if is_shuffled else ''}datasets  borehole_encoder={borehole_encoder} ..."
             )
@@ -333,7 +349,7 @@ def compare_belief_encoders_from_colab(
         for borehole_encoder in borehole_encoder_variants:
             resources, latent_dim = resources_by_encoder[borehole_encoder]
 
-            for is_shuffled in [False, True]:
+            for is_shuffled in ([False, True] if run_shuffled else [False]):
                 shuffle_label = "shuffled_" if is_shuffled else ""
                 run_label = f"{map_encoder}_{shuffle_label}{borehole_encoder}"
                 train_ds, val_ds = datasets_by_key[(borehole_encoder, is_shuffled)]

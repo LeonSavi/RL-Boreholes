@@ -75,6 +75,7 @@ class NeuralBeliefTrainingConfig:
     seed: int = 42
     latent_dim: int = 128
     borehole_encoder: str = "unknown"
+    n_val_plots: int = 20
 
     def __post_init__(self) -> None:
         expected = 2 + self.latent_dim
@@ -307,7 +308,7 @@ def train_neural_belief(
 
     # ---- optional plots -------------------------------------------------------
     if plot_dir is not None:
-        save_val_plots(model, val_ds, normalizer, plot_dir, device)
+        save_val_plots(model, val_ds, normalizer, plot_dir, device, n_plots=cfg.n_val_plots)
 
     # Reload best weights before returning
     best_ckpt = torch.load(
