@@ -16,6 +16,8 @@ from decision_simulator.resources import (
 from .dataset import build_dataset_from_cache
 from .map_cache import NpzMapCacheStore
 from .models.unet_belief import UNetBelief
+
+
 from .training import (
     build_training_config,
     build_map_belief_training_config,
@@ -26,6 +28,18 @@ from .training import (
     train_neural_belief,
     train_map_belief,
     validate_by_drill_bins,
+)
+
+# Fields present in NeuralBeliefTrainingConfig but not in MapBeliefTrainingConfig.
+# These are silently dropped when building a transformer config from **overrides.
+_UNET_ONLY_OVERRIDE_FIELDS = frozenset(
+    {
+        "in_channels",
+        "base_channels",
+        "use_latent_pca",
+        "latent_pca_components",
+        "use_coordinate_channels",
+    }
 )
 
 
@@ -288,16 +302,22 @@ def compare_belief_encoders_from_colab(
         resources_by_encoder[borehole_encoder] = (resources, latent_dim)
 
         for is_shuffled in [False, True]:
-            print(f"\nBuilding {'shuffled ' if is_shuffled else ''}datasets  borehole_encoder={borehole_encoder} ...")
+            print(
+                f"\nBuilding {'shuffled ' if is_shuffled else ''}datasets  borehole_encoder={borehole_encoder} ..."
+            )
             train_ds = build_dataset_from_cache(
-                train_cache, resources, device,
+                train_cache,
+                resources,
+                device,
                 verbose=True,
                 samples_per_map=base_cfg.samples_per_map,
                 shuffle_latents=is_shuffled,
                 shuffle_seed=base_cfg.seed,
             )
             val_ds = build_dataset_from_cache(
-                val_cache, resources, device,
+                val_cache,
+                resources,
+                device,
                 verbose=True,
                 samples_per_map=base_cfg.val_samples_per_map,
                 shuffle_latents=is_shuffled,
@@ -319,7 +339,9 @@ def compare_belief_encoders_from_colab(
                 train_ds, val_ds = datasets_by_key[(borehole_encoder, is_shuffled)]
 
                 print(f"\n{'=' * 60}")
-                print(f"  map_encoder={map_encoder}  borehole_encoder={borehole_encoder}  shuffled={is_shuffled}")
+                print(
+                    f"  map_encoder={map_encoder}  borehole_encoder={borehole_encoder}  shuffled={is_shuffled}"
+                )
                 print(f"{'=' * 60}")
 
                 ckpt_dir = out_root / run_label
@@ -329,33 +351,58 @@ def compare_belief_encoders_from_colab(
                 if is_transformer:
                     cfg = build_map_belief_training_config(
                         debug,
-                        {"latent_dim": latent_dim, **{k: v for k, v in overrides.items() if k != "in_channels"}},
+                        {
+                            "latent_dim": latent_dim,
+                            **{
+                                k: v
+                                for k, v in overrides.items()
+                                if k not in _UNET_ONLY_OVERRIDE_FIELDS
+                            },
+                        },
                     )
                 else:
                     cfg = build_training_config(
                         debug,
-                        {"in_channels": 2 + latent_dim, "latent_dim": latent_dim, **overrides},
+                        {
+                            "in_channels": 2 + latent_dim,
+                            "latent_dim": latent_dim,
+                            **overrides,
+                        },
                     )
                 cfg.borehole_encoder = f"{shuffle_label}{borehole_encoder}"
 
-                print(f"  latent_dim    : {latent_dim}  in_channels : {cfg.in_channels}")
+                print(
+                    f"  latent_dim    : {latent_dim}  in_channels : {cfg.in_channels}"
+                )
                 if is_shuffled:
-                    print("  (shuffled-latent control: spatial latent positions are permuted)")
+                    print(
+                        "  (shuffled-latent control: spatial latent positions are permuted)"
+                    )
 
                 if is_transformer:
                     model, normalizer = train_map_belief(
-                        resources=resources, cfg=cfg, device=device,
-                        checkpoint_dir=ckpt_dir, plot_dir=ckpt_dir / "plots",
-                        verbose=True, train_ds=train_ds, val_ds=val_ds,
+                        resources=resources,
+                        cfg=cfg,
+                        device=device,
+                        checkpoint_dir=ckpt_dir,
+                        plot_dir=ckpt_dir / "plots",
+                        verbose=True,
+                        train_ds=train_ds,
+                        val_ds=val_ds,
                     )
                     _, _, _, history = load_map_belief_checkpoint(
                         ckpt_dir / "map_belief_best.pt", device=device
                     )
                 else:
                     model, normalizer = train_neural_belief(
-                        resources=resources, cfg=cfg, device=device,
-                        checkpoint_dir=ckpt_dir, plot_dir=ckpt_dir / "plots",
-                        verbose=True, train_ds=train_ds, val_ds=val_ds,
+                        resources=resources,
+                        cfg=cfg,
+                        device=device,
+                        checkpoint_dir=ckpt_dir,
+                        plot_dir=ckpt_dir / "plots",
+                        verbose=True,
+                        train_ds=train_ds,
+                        val_ds=val_ds,
                     )
                     _, _, _, history = load_belief_checkpoint(
                         ckpt_dir / "belief_best.pt", device=device
@@ -363,7 +410,9 @@ def compare_belief_encoders_from_colab(
 
                 print(f"\nSmoke test passed: {len(history)} epoch(s) in history.")
                 export_history(history, ckpt_dir)
-                save_experiment_config(ckpt_dir, cfg, cache_path=resolved_pool_path, sim_cfg=None)
+                save_experiment_config(
+                    ckpt_dir, cfg, cache_path=resolved_pool_path, sim_cfg=None
+                )
 
                 best = min(history, key=lambda r: r["val_mse"])
                 bin_metrics = validate_by_drill_bins(model, val_ds, normalizer, device)
