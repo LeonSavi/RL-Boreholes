@@ -1,3 +1,31 @@
+"""U-Net reconstruction model for geological belief prediction.
+
+UNetBelief is the first belief model in the architecture family:
+
+  * UNetBelief (this file) — convolutional reconstruction model; maps sparse
+    borehole observations to a dense predicted ore grid using skip connections.
+    Fast to train, no explicit map-level latent.
+
+  * MapBeliefTransformer — transformer encoder with a learnable CLS token that
+    produces a global map belief latent (d_model-dimensional vector) suitable
+    for downstream tasks such as RL policy conditioning, next-drill value
+    estimation, or total ore prediction.
+
+  * RawBoreholeBeliefEncoder — planned; will process raw borehole observation
+    sequences directly, without requiring a pre-trained spatial encoder.
+
+Input format  (same across all models)
+--------------------------------------
+  (B, 2 + latent_dim, n_x, n_y)  float32
+    channel 0   : sparse observed ore value  (0 at unobserved cells)
+    channel 1   : binary observation mask    (1 = drilled, 0 = not drilled)
+    channels 2+ : borehole encoder latent    (zero vector at unobserved cells)
+
+Output
+------
+  (B, 1, n_x, n_y)  float32 — predicted ore distribution (normalised space)
+"""
+
 from __future__ import annotations
 
 import torch

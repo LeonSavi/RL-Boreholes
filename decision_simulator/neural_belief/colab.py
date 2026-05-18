@@ -15,13 +15,16 @@ from decision_simulator.resources import (
 
 from .dataset import build_dataset_from_cache
 from .map_cache import NpzMapCacheStore
-from .model import UNetBelief
+from .models.unet_belief import UNetBelief
 from .training import (
     build_training_config,
+    build_map_belief_training_config,
     export_history,
     load_belief_checkpoint,
+    load_map_belief_checkpoint,
     save_experiment_config,
     train_neural_belief,
+    train_map_belief,
     validate_by_drill_bins,
 )
 
@@ -168,26 +171,35 @@ def compare_belief_encoders_from_colab(
     storage_root: str | Path,
     output_root: str | Path = "checkpoints/belief_comparison",
     device: str = "cuda",
-    variants: tuple[str, ...] = ("none", "autoencoder", "jepa"),
+    borehole_encoder_variants: tuple[str, ...] = ("none", "autoencoder", "jepa"),
+    map_encoder_variants: tuple[str, ...] = ("unet",),
     debug: bool = False,
     map_pool_path: str | Path = "data/train_maps",
     **overrides,
 ) -> pd.DataFrame:
-    """Train and compare multiple borehole encoder variants on identical data.
+    """Train and compare all combinations of borehole and map encoder variants.
+
+    Iterates over every combination of ``borehole_encoder_variants`` ×
+    ``map_encoder_variants``.  For each combination both a non-shuffled and a
+    shuffled-latent run are executed automatically, giving a built-in spatial
+    control.  Resources are loaded once per borehole encoder; datasets are built
+    once per (borehole encoder, shuffled) pair and reused across map encoders.
 
     The map pool must already exist at ``map_pool_path``, generated in advance
-    by ``generate_training_maps.py``.  Per-variant latent embeddings are
-    computed from the raw maps when each encoder is loaded; no encoder-specific
-    tensors are cached to disk.
+    by ``generate_training_maps.py``.
 
-    Seed defaults to 42 (``NeuralBeliefTrainingConfig`` default); pass
-    ``seed=N`` in ``overrides`` to change it consistently across all variants.
+    Seed defaults to 42; pass ``seed=N`` in ``overrides`` to change it
+    consistently across all runs.
 
     Example
     -------
     >>> from decision_simulator.neural_belief.colab import compare_belief_encoders_from_colab
+
+    # Compare UNet vs Transformer, all three borehole encoders:
     >>> df = compare_belief_encoders_from_colab(
     ...     storage_root="/content/drive/MyDrive/thesis",
+    ...     borehole_encoder_variants=("none", "jepa"),
+    ...     map_encoder_variants=("unet", "transformer"),
     ...     debug=True,
     ... )
     >>> print(df)
@@ -197,29 +209,34 @@ def compare_belief_encoders_from_colab(
     storage_root
         Absolute root for all data and checkpoint paths.
     output_root
-        Parent directory for per-variant subdirectories. Relative paths are
-        resolved against ``storage_root``. Each variant is saved under
-        ``<output_root>/belief_<variant>/``.
+        Parent directory for per-run subdirectories, resolved against
+        ``storage_root`` if relative.  Each run is saved under
+        ``<output_root>/<map_encoder>_[shuffled_]<borehole_encoder>/``.
     device
         ``"cuda"`` or ``"cpu"``.
-    variants
-        Encoder types to compare, in order.
+    borehole_encoder_variants
+        Which borehole encoders to evaluate: ``"none"``, ``"autoencoder"``,
+        and/or ``"jepa"``.  Controls which latent embeddings are fed to the
+        map encoder.  Both shuffled and non-shuffled embeddings are always run.
+    map_encoder_variants
+        Which map encoder models to evaluate: ``"unet"`` and/or
+        ``"transformer"``.
     debug
-        Run all variants with a minimal config (2 maps, 2 epochs) for a
+        Run all combinations with a minimal config (2 maps, 2 epochs) for a
         quick end-to-end check.
     map_pool_path
-        Path to the pre-generated npz map pool directory. Relative paths are
-        resolved against ``storage_root``. The pool must already exist;
-        generate it with ``generate_training_maps.py`` beforehand.
+        Path to the pre-generated npz map pool directory, resolved against
+        ``storage_root`` if relative.
     **overrides
-        Forwarded to every training run. ``in_channels`` and ``latent_dim``
+        Forwarded to every training run.  ``in_channels`` and ``latent_dim``
         are always derived from the encoder and cannot be overridden here.
 
     Returns
     -------
     pd.DataFrame
-        One row per variant with columns ``encoder``, ``best_epoch``,
-        ``best_val_mse``, ``best_val_mae``, ``best_val_corr``.
+        One row per run with columns ``map_encoder``, ``borehole_encoder``,
+        ``shuffled``, ``best_epoch``, ``best_val_mse``, ``best_val_mae``,
+        ``best_val_corr``, plus per-drill-bin metrics.
         Also written to ``<output_root>/comparison_summary.csv``.
     """
     check_device(device)
@@ -239,7 +256,7 @@ def compare_belief_encoders_from_colab(
     )
     check_sim_paths(distributions, formation_geo)
 
-    # Build a base config to extract dataset size / seed settings.
+    # Both config types share the same dataset fields, so UNet config suffices here.
     base_cfg = build_training_config(
         debug,
         {k: v for k, v in overrides.items() if k not in ("in_channels", "latent_dim")},
@@ -251,25 +268,16 @@ def compare_belief_encoders_from_colab(
         n_val_maps=base_cfg.n_val_maps,
     )
 
-    rows: list[dict] = []
+    # ---- pre-build all datasets -------------------------------------------------
+    # Resources and datasets depend only on (borehole_encoder, is_shuffled), not
+    # on the map encoder, so we build them once and reuse across map encoders.
+    resources_by_encoder: dict[str, tuple] = {}
+    datasets_by_key: dict[tuple, tuple] = {}
 
-    for variant in variants:
-        print(f"\n{'=' * 60}")
-        print(f"  Encoder variant : {variant}")
-        print(f"{'=' * 60}")
-
-        # "shuffled_jepa" / "shuffled_autoencoder" use the real encoder checkpoint
-        # but scramble latent positions spatially — a control for spatial latent info.
-        is_shuffled = variant.startswith("shuffled_")
-        base_variant = variant[len("shuffled_"):] if is_shuffled else variant
-
-        check_encoder_path(base_variant, jepa_path, ae_path)
-
-        ckpt_dir = out_root / f"belief_{variant}"
-        ckpt_dir.mkdir(parents=True, exist_ok=True)
-
+    for borehole_encoder in borehole_encoder_variants:
+        check_encoder_path(borehole_encoder, jepa_path, ae_path)
         resources, latent_dim = load_decision_resources(
-            borehole_encoder=base_variant,
+            borehole_encoder=borehole_encoder,
             jepa_path=jepa_path,
             ae_path=ae_path,
             distributions_path=distributions,
@@ -277,73 +285,100 @@ def compare_belief_encoders_from_colab(
             discovery_prior_path=discovery,
             device=device,
         )
+        resources_by_encoder[borehole_encoder] = (resources, latent_dim)
 
-        encoder_defaults = {"in_channels": 2 + latent_dim, "latent_dim": latent_dim}
-        cfg = build_training_config(debug, {**encoder_defaults, **overrides})
-        cfg.borehole_encoder = variant  # record full variant name (e.g. "shuffled_jepa")
+        for is_shuffled in [False, True]:
+            print(f"\nBuilding {'shuffled ' if is_shuffled else ''}datasets  borehole_encoder={borehole_encoder} ...")
+            train_ds = build_dataset_from_cache(
+                train_cache, resources, device,
+                verbose=True,
+                samples_per_map=base_cfg.samples_per_map,
+                shuffle_latents=is_shuffled,
+                shuffle_seed=base_cfg.seed,
+            )
+            val_ds = build_dataset_from_cache(
+                val_cache, resources, device,
+                verbose=True,
+                samples_per_map=base_cfg.val_samples_per_map,
+                shuffle_latents=is_shuffled,
+                shuffle_seed=base_cfg.seed + 10000,
+            )
+            print(f"  train={len(train_ds)}  val={len(val_ds)}")
+            datasets_by_key[(borehole_encoder, is_shuffled)] = (train_ds, val_ds)
 
-        print(f"\nborehole_encoder : {variant}")
-        print(f"latent_dim       : {latent_dim}")
-        print(f"in_channels      : {cfg.in_channels}")
-        if is_shuffled:
-            print("  (shuffled-latent control: spatial latent positions will be permuted)")
+    # ---- training loop ----------------------------------------------------------
+    rows: list[dict] = []
 
-        print("\nBuilding training dataset from shared cache ...")
-        train_ds = build_dataset_from_cache(
-            train_cache,
-            resources,
-            device,
-            verbose=True,
-            samples_per_map=cfg.samples_per_map,
-            shuffle_latents=is_shuffled,
-            shuffle_seed=cfg.seed,
-        )
-        print(f"  train samples : {len(train_ds)}")
+    for map_encoder in map_encoder_variants:
+        for borehole_encoder in borehole_encoder_variants:
+            resources, latent_dim = resources_by_encoder[borehole_encoder]
 
-        print("Building validation dataset from shared cache ...")
-        val_ds = build_dataset_from_cache(
-            val_cache,
-            resources,
-            device,
-            verbose=True,
-            samples_per_map=cfg.val_samples_per_map,
-            shuffle_latents=is_shuffled,
-            shuffle_seed=cfg.seed + 10000,
-        )
-        print(f"  val   samples : {len(val_ds)}")
+            for is_shuffled in [False, True]:
+                shuffle_label = "shuffled_" if is_shuffled else ""
+                run_label = f"{map_encoder}_{shuffle_label}{borehole_encoder}"
+                train_ds, val_ds = datasets_by_key[(borehole_encoder, is_shuffled)]
 
-        model, normalizer = train_neural_belief(
-            resources=resources,
-            cfg=cfg,
-            device=device,
-            checkpoint_dir=ckpt_dir,
-            plot_dir=ckpt_dir / "plots",
-            verbose=True,
-            train_ds=train_ds,
-            val_ds=val_ds,
-        )
+                print(f"\n{'=' * 60}")
+                print(f"  map_encoder={map_encoder}  borehole_encoder={borehole_encoder}  shuffled={is_shuffled}")
+                print(f"{'=' * 60}")
 
-        _, _, _, history = load_belief_checkpoint(
-            ckpt_dir / "belief_best.pt", device=device
-        )
-        print(f"\nSmoke test passed: {len(history)} epoch(s) in history.")
-        export_history(history, ckpt_dir)
-        save_experiment_config(
-            ckpt_dir, cfg, cache_path=resolved_pool_path, sim_cfg=None
-        )
+                ckpt_dir = out_root / run_label
+                ckpt_dir.mkdir(parents=True, exist_ok=True)
 
-        best = min(history, key=lambda r: r["val_mse"])
-        bin_metrics = validate_by_drill_bins(model, val_ds, normalizer, device)
-        rows.append(
-            {
-                "encoder": variant,
-                "best_epoch": best["epoch"],
-                "best_val_mse": best["val_mse"],
-                "best_val_mae": best["val_mae"],
-                "best_val_corr": best["val_corr"],
-                **bin_metrics,
-            }
-        )
+                is_transformer = map_encoder == "transformer"
+                if is_transformer:
+                    cfg = build_map_belief_training_config(
+                        debug,
+                        {"latent_dim": latent_dim, **{k: v for k, v in overrides.items() if k != "in_channels"}},
+                    )
+                else:
+                    cfg = build_training_config(
+                        debug,
+                        {"in_channels": 2 + latent_dim, "latent_dim": latent_dim, **overrides},
+                    )
+                cfg.borehole_encoder = f"{shuffle_label}{borehole_encoder}"
+
+                print(f"  latent_dim    : {latent_dim}  in_channels : {cfg.in_channels}")
+                if is_shuffled:
+                    print("  (shuffled-latent control: spatial latent positions are permuted)")
+
+                if is_transformer:
+                    model, normalizer = train_map_belief(
+                        resources=resources, cfg=cfg, device=device,
+                        checkpoint_dir=ckpt_dir, plot_dir=ckpt_dir / "plots",
+                        verbose=True, train_ds=train_ds, val_ds=val_ds,
+                    )
+                    _, _, _, history = load_map_belief_checkpoint(
+                        ckpt_dir / "map_belief_best.pt", device=device
+                    )
+                else:
+                    model, normalizer = train_neural_belief(
+                        resources=resources, cfg=cfg, device=device,
+                        checkpoint_dir=ckpt_dir, plot_dir=ckpt_dir / "plots",
+                        verbose=True, train_ds=train_ds, val_ds=val_ds,
+                    )
+                    _, _, _, history = load_belief_checkpoint(
+                        ckpt_dir / "belief_best.pt", device=device
+                    )
+
+                print(f"\nSmoke test passed: {len(history)} epoch(s) in history.")
+                export_history(history, ckpt_dir)
+                save_experiment_config(ckpt_dir, cfg, cache_path=resolved_pool_path, sim_cfg=None)
+
+                best = min(history, key=lambda r: r["val_mse"])
+                bin_metrics = validate_by_drill_bins(model, val_ds, normalizer, device)
+                rows.append(
+                    {
+                        "map_encoder": map_encoder,
+                        "borehole_encoder": borehole_encoder,
+                        "shuffled": is_shuffled,
+                        "best_epoch": best["epoch"],
+                        "best_val_mse": best["val_mse"],
+                        "best_val_mae": best["val_mae"],
+                        "best_val_corr": best["val_corr"],
+                        **bin_metrics,
+                    }
+                )
 
     df = pd.DataFrame(rows)
 
