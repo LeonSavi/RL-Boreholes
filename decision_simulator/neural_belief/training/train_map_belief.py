@@ -39,6 +39,9 @@ from ..training_utils import (
     DRILL_BINS,
     validate_by_drill_bins,
     validate,
+    validate_no_ore,
+    false_positive_loss,
+    save_no_ore_metrics,
     save_val_plots,
 )
 from ..models.map_belief_transformer import MapBeliefConfig, MapBeliefTransformer
@@ -95,6 +98,11 @@ class MapBeliefTrainingConfig:
     n_sequences_per_map: int = 3
     prefix_steps: list[int] = field(default_factory=lambda: [1, 2, 3, 5, 8, 10, 15])
     sequential_seed: int = 42
+
+    # --- False-positive penalty ---
+    use_false_positive_penalty: bool = False
+    false_positive_weight: float = 0.1
+    false_positive_threshold: float = 0.05
 
     # --- Misc ---
     seed: int = 42
@@ -323,6 +331,8 @@ def train_map_belief(
 
             pred = model(x)
             loss = nn.functional.mse_loss(pred, y)  # MSE in normalised space
+            if cfg.use_false_positive_penalty:
+                loss = loss + cfg.false_positive_weight * false_positive_loss(pred, y, normalizer)
 
             optimiser.zero_grad()
             loss.backward()
@@ -435,6 +445,35 @@ def train_map_belief(
                 json.dump({str(k): v for k, v in step_metrics.items()}, f, indent=2)
             if verbose:
                 print(f"  step metrics -> {step_path}")
+
+    # ---- no-ore false-positive metrics -----------------------------------------
+    no_ore_metrics = validate_no_ore(
+        model, val_loader, device, normalizer,
+        threshold=cfg.false_positive_threshold,
+    )
+    save_no_ore_metrics(no_ore_metrics, checkpoint_dir, verbose=verbose)
+
+    if cfg.use_sequential_dataset:
+        from ..sequential_eval import validate_no_ore_by_step
+        no_ore_step = validate_no_ore_by_step(
+            model, val_ds, normalizer, device,
+            threshold=cfg.false_positive_threshold,
+        )
+        if no_ore_step:
+            if verbose:
+                print("\nNo-ore metrics by step (best model):")
+                for step, m in sorted(no_ore_step.items()):
+                    print(
+                        f"  step {step:3d}  n={m['no_ore_n']:5d}"
+                        f"  pred_total={m['no_ore_pred_total']:.4f}"
+                        f"  pred_max={m['no_ore_pred_max']:.4f}"
+                        f"  fp_area={m['no_ore_fp_area']:.4f}"
+                    )
+            no_ore_step_path = checkpoint_dir / "val_metrics_no_ore_by_step.json"
+            with open(no_ore_step_path, "w") as f:
+                json.dump({str(k): v for k, v in no_ore_step.items()}, f, indent=2)
+            if verbose:
+                print(f"  no-ore by-step metrics -> {no_ore_step_path}")
 
     if verbose:
         print(f"\nTraining complete.  Best val MSE: {best_val_mse:.4f}")

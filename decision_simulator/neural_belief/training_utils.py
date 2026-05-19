@@ -9,6 +9,8 @@ returns ``(B, 1, n_x, n_y)``.
 
 from __future__ import annotations
 
+import csv
+import json
 from pathlib import Path
 
 import numpy as np
@@ -132,6 +134,118 @@ def validate_by_drill_bins(
         result[f"corr_{key}"] = pearson_correlation(p, t)
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# No-ore false-positive metrics
+# ---------------------------------------------------------------------------
+
+def validate_no_ore(
+    model: nn.Module,
+    loader: DataLoader,
+    device: str,
+    normalizer: TargetNormalizer,
+    threshold: float = 0.05,
+) -> dict[str, float | int]:
+    """Compute false-positive metrics on val samples where the true ore map is empty.
+
+    Returns
+    -------
+    Dict with keys:
+      ``no_ore_n``          – number of no-ore samples evaluated
+      ``no_ore_pred_total`` – mean of pred.sum() across no-ore samples (ore-value space)
+      ``no_ore_pred_max``   – mean of pred.max() across no-ore samples (ore-value space)
+      ``no_ore_fp_area``    – mean fraction of cells where pred > threshold
+    All float metrics are NaN when no no-ore samples are present.
+    """
+    model.eval()
+    pred_totals: list[torch.Tensor] = []
+    pred_maxes:  list[torch.Tensor] = []
+    fp_areas:    list[torch.Tensor] = []
+    n_no_ore = 0
+
+    with torch.no_grad():
+        for x, y in loader:
+            x, y = x.to(device), y.to(device)
+            pred = normalizer.inverse_tensor(model(x))  # (B, 1, H, W)
+            tgt  = normalizer.inverse_tensor(y)         # (B, 1, H, W)
+
+            B = pred.shape[0]
+            no_ore = tgt.view(B, -1).sum(dim=1) == 0   # (B,) bool
+            if not no_ore.any():
+                continue
+
+            p = pred[no_ore].cpu()  # (k, 1, H, W)
+            n = p.shape[0]
+            n_no_ore += n
+
+            pv = p.view(n, -1)
+            pred_totals.append(pv.sum(dim=1))
+            pred_maxes.append(pv.max(dim=1).values)
+            fp_areas.append((pv > threshold).float().mean(dim=1))
+
+    if n_no_ore == 0:
+        return {
+            "no_ore_n":          0,
+            "no_ore_pred_total": float("nan"),
+            "no_ore_pred_max":   float("nan"),
+            "no_ore_fp_area":    float("nan"),
+        }
+
+    return {
+        "no_ore_n":          n_no_ore,
+        "no_ore_pred_total": torch.cat(pred_totals).mean().item(),
+        "no_ore_pred_max":   torch.cat(pred_maxes).mean().item(),
+        "no_ore_fp_area":    torch.cat(fp_areas).mean().item(),
+    }
+
+
+def false_positive_loss(
+    pred_norm: torch.Tensor,
+    tgt_norm: torch.Tensor,
+    normalizer: TargetNormalizer,
+) -> torch.Tensor:
+    """FP penalty: mean of clamp(pred, min=0) restricted to no-ore samples in the batch.
+
+    Returns a zero scalar when no no-ore samples are present (so the caller
+    can always add it to the MSE loss unconditionally).
+    """
+    tgt_ore = normalizer.inverse_tensor(tgt_norm)
+    B = tgt_ore.shape[0]
+    no_ore = tgt_ore.view(B, -1).sum(dim=1) == 0  # (B,)
+    if not no_ore.any():
+        return pred_norm.new_zeros(())
+    return pred_norm[no_ore].clamp(min=0).mean()
+
+
+def save_no_ore_metrics(
+    metrics: dict[str, float | int],
+    checkpoint_dir: Path,
+    verbose: bool = True,
+) -> None:
+    """Save no-ore validation metrics to JSON + CSV and optionally print a summary."""
+    n = int(metrics.get("no_ore_n", 0))
+    if verbose:
+        print(f"\nNo-ore validation (n={n} samples):")
+        if n > 0:
+            print(f"  pred_total_ore : {metrics['no_ore_pred_total']:.4f}")
+            print(f"  pred_max_ore   : {metrics['no_ore_pred_max']:.4f}")
+            print(f"  fp_area        : {metrics['no_ore_fp_area']:.4f}")
+        else:
+            print("  (no no-ore samples found in validation set)")
+
+    json_path = Path(checkpoint_dir) / "val_metrics_no_ore.json"
+    with open(json_path, "w") as f:
+        json.dump(metrics, f, indent=2)
+
+    csv_path = Path(checkpoint_dir) / "val_metrics_no_ore.csv"
+    with open(csv_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(metrics.keys()))
+        writer.writeheader()
+        writer.writerow(metrics)
+
+    if verbose:
+        print(f"  no-ore metrics -> {json_path}")
 
 
 # ---------------------------------------------------------------------------

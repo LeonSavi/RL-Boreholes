@@ -18,7 +18,7 @@ from torch.utils.data import DataLoader
 
 from .datasets import GeologicalBeliefDataset
 from .utils import TargetNormalizer
-from .training_utils import pearson_correlation, save_val_plots
+from .training_utils import pearson_correlation, save_val_plots, validate_no_ore
 
 
 def validate_by_step(
@@ -75,6 +75,66 @@ def validate_by_step(
             "mae": (p - t).abs().mean().item(),
             "corr": pearson_correlation(p, t),
             "n": n,
+        }
+
+    return result
+
+
+def validate_no_ore_by_step(
+    model: nn.Module,
+    val_ds: GeologicalBeliefDataset,
+    normalizer: TargetNormalizer,
+    device: str,
+    threshold: float = 0.05,
+    batch_size: int = 64,
+) -> dict[int, dict[str, float | int]]:
+    """No-ore FP metrics grouped by sequential drill step.
+
+    Returns a dict mapping each step to
+    ``{"no_ore_n", "no_ore_pred_total", "no_ore_pred_max", "no_ore_fp_area"}``.
+    Returns an empty dict when ``val_ds.metadata`` is not set.
+    """
+    if val_ds.metadata is None:
+        return {}
+
+    model.eval()
+    loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
+
+    all_pred: list[torch.Tensor] = []
+    all_tgt:  list[torch.Tensor] = []
+    with torch.no_grad():
+        for x, y in loader:
+            x, y = x.to(device), y.to(device)
+            all_pred.append(normalizer.inverse_tensor(model(x)).cpu())
+            all_tgt.append(normalizer.inverse_tensor(y).cpu())
+
+    preds = torch.cat(all_pred, dim=0)  # (N, 1, H, W)
+    tgts  = torch.cat(all_tgt,  dim=0)
+
+    steps_tensor = torch.tensor([m["step"] for m in val_ds.metadata], dtype=torch.long)
+    no_ore_global = tgts.view(tgts.shape[0], -1).sum(dim=1) == 0  # (N,)
+    unique_steps = sorted(set(steps_tensor.tolist()))
+
+    result: dict[int, dict[str, float | int]] = {}
+    for step in unique_steps:
+        step_sel = steps_tensor == step
+        sel = step_sel & no_ore_global
+        n = int(sel.sum().item())
+        if n == 0:
+            result[step] = {
+                "no_ore_n": 0,
+                "no_ore_pred_total": float("nan"),
+                "no_ore_pred_max":   float("nan"),
+                "no_ore_fp_area":    float("nan"),
+            }
+            continue
+
+        p = preds[sel].view(n, -1)
+        result[step] = {
+            "no_ore_n":          n,
+            "no_ore_pred_total": p.sum(dim=1).mean().item(),
+            "no_ore_pred_max":   p.max(dim=1).values.mean().item(),
+            "no_ore_fp_area":    (p > threshold).float().mean(dim=1).mean().item(),
         }
 
     return result
