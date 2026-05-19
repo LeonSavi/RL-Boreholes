@@ -12,6 +12,7 @@ def plot_belief_sample(
     predicted_ore_map: np.ndarray,
     save_path: Path | None = None,
     title: str = "",
+    timestamp: str = "",
 ) -> None:
     """Four-panel validation plot: observations / truth / prediction / error.
 
@@ -23,6 +24,7 @@ def plot_belief_sample(
     predicted_ore_map : (n_x, n_y) model output in ore-value space
     save_path         : if given, save to this path (PNG); directory is created
     title             : optional figure super-title
+    timestamp         : if given, printed at the bottom of the figure
     """
     import matplotlib.pyplot as plt
 
@@ -59,6 +61,10 @@ def plot_belief_sample(
     fig.colorbar(im, ax=ax, fraction=0.046)
 
     fig.tight_layout()
+
+    if timestamp:
+        fig.text(0.5, 0.01, timestamp, ha="center", va="bottom",
+                 fontsize=8, color="gray")
 
     if save_path is not None:
         Path(save_path).parent.mkdir(parents=True, exist_ok=True)

@@ -146,10 +146,12 @@ def save_val_plots(
     device: str,
     n_plots: int = 4,
 ) -> None:
-    """Save ``n_plots`` side-by-side validation figures to ``plot_dir``."""
+    """Save ``n_plots`` side-by-side validation figures to a timestamped subdirectory of ``plot_dir``."""
+    import datetime
     from .visualize import plot_belief_sample
 
-    plot_dir = Path(plot_dir)
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    plot_dir = Path(plot_dir) / timestamp
     plot_dir.mkdir(parents=True, exist_ok=True)
 
     model.eval()
@@ -167,6 +169,7 @@ def save_val_plots(
             predicted_ore_map=normalizer.inverse(pred_norm),
             save_path=plot_dir / f"val_sample_{k:02d}.png",
             title=f"Val sample {k}",
+            timestamp=timestamp,
         )
 
     print(f"  plots saved -> {plot_dir}")
