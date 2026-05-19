@@ -45,6 +45,8 @@ from ..training_utils import (
     validate,
     save_val_plots,
 )
+from ..sequential_eval import validate_by_step, save_sequential_val_plots
+from ..datasets import build_sequential_dataset_from_cache
 
 __all__ = [
     # UNet pipeline
@@ -66,4 +68,8 @@ __all__ = [
     "validate_by_drill_bins",
     "validate",
     "save_val_plots",
+    # Sequential evaluation
+    "validate_by_step",
+    "save_sequential_val_plots",
+    "build_sequential_dataset_from_cache",
 ]

@@ -4,10 +4,11 @@ from .models.map_belief_transformer import (
     MapBeliefTransformer,
     MapBeliefModel,  # backward-compat alias
 )
-from .dataset import (
+from .datasets import (
     BeliefDatasetConfig,
     GeologicalBeliefDataset,
     build_dataset_from_cache,
+    build_sequential_dataset_from_cache,
 )
 from .map_cache import NpzMapCache, NpzMapCacheStore
 from .utils import TargetNormalizer
@@ -30,6 +31,7 @@ from .visualize import plot_belief_sample
 from .colab import (
     train_belief_from_colab,
     compare_belief_encoders_from_colab,
+    train_sequential_belief_from_colab,
 )
 
 __all__ = [
@@ -44,6 +46,7 @@ __all__ = [
     "NpzMapCache",
     "NpzMapCacheStore",
     "build_dataset_from_cache",
+    "build_sequential_dataset_from_cache",
     # Utils
     "TargetNormalizer",
     # UNet training
@@ -64,4 +67,5 @@ __all__ = [
     "plot_belief_sample",
     "train_belief_from_colab",
     "compare_belief_encoders_from_colab",
+    "train_sequential_belief_from_colab",
 ]

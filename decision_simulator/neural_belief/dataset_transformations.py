@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from .dataset import GeologicalBeliefDataset
+from .datasets import GeologicalBeliefDataset
 from .utils import LatentPCAReducer
 
 

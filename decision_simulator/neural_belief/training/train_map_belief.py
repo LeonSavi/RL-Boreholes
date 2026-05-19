@@ -22,7 +22,7 @@ from __future__ import annotations
 import csv
 import dataclasses
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -32,7 +32,7 @@ from torch.utils.data import DataLoader
 
 from simulator.map_generator import SimConfig
 from decision_simulator.resources import DecisionSimulationResources
-from ..dataset import BeliefDatasetConfig, GeologicalBeliefDataset
+from ..datasets import BeliefDatasetConfig, GeologicalBeliefDataset
 from ..utils import TargetNormalizer
 from ..baselines import evaluate_baselines
 from ..training_utils import (
@@ -90,6 +90,12 @@ class MapBeliefTrainingConfig:
     # --- Gradient clipping (important for transformer stability) ---
     grad_clip_norm: float = 1.0     # 0.0 = disabled
 
+    # --- Sequential dataset ---
+    use_sequential_dataset: bool = False
+    n_sequences_per_map: int = 3
+    prefix_steps: list[int] = field(default_factory=lambda: [1, 2, 3, 5, 8, 10, 15])
+    sequential_seed: int = 42
+
     # --- Misc ---
     seed: int = 42
     borehole_encoder: str = "unknown"
@@ -135,6 +141,8 @@ def train_map_belief(
     verbose: bool = True,
     train_ds: GeologicalBeliefDataset | None = None,
     val_ds: GeologicalBeliefDataset | None = None,
+    train_cache=None,
+    val_cache=None,
 ) -> tuple[MapBeliefTransformer, TargetNormalizer]:
     """Train the MapBeliefTransformer end-to-end.
 
@@ -171,44 +179,80 @@ def train_map_belief(
 
     # ---- datasets ----------------------------------------------------------------
     if train_ds is None or val_ds is None:
-        if verbose:
-            print("Generating training dataset ...")
-        train_ds = GeologicalBeliefDataset.generate(
-            resources,
-            BeliefDatasetConfig(
-                n_maps=cfg.n_train_maps,
-                samples_per_map=cfg.samples_per_map,
-                min_drills=cfg.min_drills,
+        if cfg.use_sequential_dataset:
+            from ..datasets import build_sequential_dataset_from_cache
+            if train_cache is None or val_cache is None:
+                raise ValueError(
+                    "train_cache and val_cache must be provided when "
+                    "use_sequential_dataset=True"
+                )
+            if verbose:
+                print("Building sequential training dataset ...")
+            train_ds = build_sequential_dataset_from_cache(
+                train_cache,
+                resources,
+                device,
+                n_sequences_per_map=cfg.n_sequences_per_map,
                 max_drills=cfg.max_drills,
-                seed=cfg.seed,
-            ),
-            device=device,
-            sim_cfg=sim_cfg,
-            verbose=verbose,
-        )
+                prefix_steps=cfg.prefix_steps,
+                seed=cfg.sequential_seed,
+                verbose=verbose,
+            )
+            if verbose:
+                print("Building sequential validation dataset ...")
+            val_ds = build_sequential_dataset_from_cache(
+                val_cache,
+                resources,
+                device,
+                n_sequences_per_map=cfg.n_sequences_per_map,
+                max_drills=cfg.max_drills,
+                prefix_steps=cfg.prefix_steps,
+                seed=cfg.sequential_seed + 1,
+                verbose=verbose,
+            )
+        else:
+            if verbose:
+                print("Generating training dataset ...")
+            train_ds = GeologicalBeliefDataset.generate(
+                resources,
+                BeliefDatasetConfig(
+                    n_maps=cfg.n_train_maps,
+                    samples_per_map=cfg.samples_per_map,
+                    min_drills=cfg.min_drills,
+                    max_drills=cfg.max_drills,
+                    seed=cfg.seed,
+                ),
+                device=device,
+                sim_cfg=sim_cfg,
+                verbose=verbose,
+            )
 
-        if verbose:
-            print("Generating validation dataset ...")
-        val_ds = GeologicalBeliefDataset.generate(
-            resources,
-            BeliefDatasetConfig(
-                n_maps=cfg.n_val_maps,
-                samples_per_map=cfg.val_samples_per_map,
-                min_drills=cfg.min_drills,
-                max_drills=cfg.max_drills,
-                seed=cfg.seed + 1,
-            ),
-            device=device,
-            sim_cfg=sim_cfg,
-            verbose=verbose,
-        )
+            if verbose:
+                print("Generating validation dataset ...")
+            val_ds = GeologicalBeliefDataset.generate(
+                resources,
+                BeliefDatasetConfig(
+                    n_maps=cfg.n_val_maps,
+                    samples_per_map=cfg.val_samples_per_map,
+                    min_drills=cfg.min_drills,
+                    max_drills=cfg.max_drills,
+                    seed=cfg.seed + 1,
+                ),
+                device=device,
+                sim_cfg=sim_cfg,
+                verbose=verbose,
+            )
     else:
         if verbose:
             print("Using pre-built datasets.")
         # Wrap in new objects so attribute reassignments (normalisation) do not
         # mutate the caller's datasets.
-        train_ds = GeologicalBeliefDataset(train_ds.inputs, train_ds.targets, train_ds.drill_counts)
-        val_ds   = GeologicalBeliefDataset(val_ds.inputs,   val_ds.targets,   val_ds.drill_counts)
+        train_ds = GeologicalBeliefDataset(
+            train_ds.inputs, train_ds.targets, train_ds.drill_counts, train_ds.metadata
+        )
+        val_ds = GeologicalBeliefDataset(
+            val_ds.inputs, val_ds.targets, val_ds.drill_counts, val_ds.metadata
+        )
 
     # ---- target normalisation ---------------------------------------------------
     normalizer = TargetNormalizer(mode=cfg.norm_mode)
@@ -331,7 +375,14 @@ def train_map_belief(
 
     # ---- optional validation plots ----------------------------------------------
     if plot_dir is not None:
-        save_val_plots(model, val_ds, normalizer, plot_dir, device, n_plots=cfg.n_val_plots)
+        if cfg.use_sequential_dataset:
+            from ..sequential_eval import save_sequential_val_plots
+            save_sequential_val_plots(
+                model, val_ds, normalizer, plot_dir, device,
+                n_sequences=cfg.n_val_plots,
+            )
+        else:
+            save_val_plots(model, val_ds, normalizer, plot_dir, device, n_plots=cfg.n_val_plots)
 
     # ---- per-bin validation (best model) ----------------------------------------
     # Reload best weights first
@@ -365,6 +416,25 @@ def train_map_belief(
             json.dump(bin_metrics, f, indent=2)
         if verbose:
             print(f"  drill-bin metrics -> {bin_path}")
+
+    # ---- sequential step metrics -----------------------------------------------
+    if cfg.use_sequential_dataset:
+        from ..sequential_eval import validate_by_step
+        step_metrics = validate_by_step(model, val_ds, normalizer, device)
+        if step_metrics:
+            if verbose:
+                print("\nValidation metrics by step (best model, ore-value space):")
+                for step, m in sorted(step_metrics.items()):
+                    print(
+                        f"  step {step:3d}  n={m['n']:5d}"
+                        f"  mse={m['mse']:.4f}  mae={m['mae']:.4f}"
+                        f"  corr={m['corr']:.4f}"
+                    )
+            step_path = checkpoint_dir / "val_metrics_by_step.json"
+            with open(step_path, "w") as f:
+                json.dump({str(k): v for k, v in step_metrics.items()}, f, indent=2)
+            if verbose:
+                print(f"  step metrics -> {step_path}")
 
     if verbose:
         print(f"\nTraining complete.  Best val MSE: {best_val_mse:.4f}")
@@ -447,6 +517,8 @@ def build_map_belief_training_config(
             n_encoder_layers=1,
             d_ff=128,
             head_hidden_dim=32,
+            n_sequences_per_map=2,
+            prefix_steps=[1, 3, 5],
         )
     else:
         cfg = MapBeliefTrainingConfig()

@@ -14,11 +14,12 @@ from decision_simulator.resources import (
     resolve_resource_paths,
 )
 
-from .dataset import build_dataset_from_cache
+from .datasets import build_dataset_from_cache
 from .map_cache import NpzMapCacheStore
 from .models.unet_belief import UNetBelief
 
 
+from .map_cache import NpzMapCacheStore
 from .training import (
     build_training_config,
     build_map_belief_training_config,
@@ -191,6 +192,10 @@ def compare_belief_encoders_from_colab(
     map_pool_path: str | Path = "data/train_maps",
     n_orebodies: int | None = None,
     run_shuffled: bool = False,
+    use_sequential_dataset: bool = False,
+    n_sequences_per_map: int = 3,
+    prefix_steps: list[int] | None = None,
+    sequential_seed: int = 42,
     **overrides,
 ) -> pd.DataFrame:
     """Train and compare all combinations of borehole and map encoder variants.
@@ -284,6 +289,20 @@ def compare_belief_encoders_from_colab(
         {k: v for k, v in overrides.items() if k not in ("in_channels", "latent_dim")},
     )
 
+    resolved_steps = prefix_steps or [1, 2, 3, 5, 8, 10, 15]
+
+    # Overrides injected into every per-run config when sequential mode is on.
+    seq_cfg_overrides: dict = (
+        {
+            "use_sequential_dataset": True,
+            "n_sequences_per_map": n_sequences_per_map,
+            "prefix_steps": resolved_steps,
+            "sequential_seed": sequential_seed,
+        }
+        if use_sequential_dataset
+        else {}
+    )
+
     store = NpzMapCacheStore(resolved_pool_path)
     if n_orebodies is not None:
         train_cache, val_cache = store.load_stratified_split(
@@ -318,27 +337,56 @@ def compare_belief_encoders_from_colab(
         resources_by_encoder[borehole_encoder] = (resources, latent_dim)
 
         for is_shuffled in ([False, True] if run_shuffled else [False]):
+            shuffle_tag = "shuffled " if is_shuffled else ""
+            mode_tag = "sequential " if use_sequential_dataset else ""
             print(
-                f"\nBuilding {'shuffled ' if is_shuffled else ''}datasets  borehole_encoder={borehole_encoder} ..."
+                f"\nBuilding {mode_tag}{shuffle_tag}datasets  borehole_encoder={borehole_encoder} ..."
             )
-            train_ds = build_dataset_from_cache(
-                train_cache,
-                resources,
-                device,
-                verbose=True,
-                samples_per_map=base_cfg.samples_per_map,
-                shuffle_latents=is_shuffled,
-                shuffle_seed=base_cfg.seed,
-            )
-            val_ds = build_dataset_from_cache(
-                val_cache,
-                resources,
-                device,
-                verbose=True,
-                samples_per_map=base_cfg.val_samples_per_map,
-                shuffle_latents=is_shuffled,
-                shuffle_seed=base_cfg.seed + 10000,
-            )
+            if use_sequential_dataset:
+                from .datasets import build_sequential_dataset_from_cache
+                train_ds = build_sequential_dataset_from_cache(
+                    train_cache,
+                    resources,
+                    device,
+                    n_sequences_per_map=n_sequences_per_map,
+                    max_drills=base_cfg.max_drills,
+                    prefix_steps=resolved_steps,
+                    seed=sequential_seed,
+                    verbose=True,
+                    shuffle_latents=is_shuffled,
+                    shuffle_seed=base_cfg.seed,
+                )
+                val_ds = build_sequential_dataset_from_cache(
+                    val_cache,
+                    resources,
+                    device,
+                    n_sequences_per_map=n_sequences_per_map,
+                    max_drills=base_cfg.max_drills,
+                    prefix_steps=resolved_steps,
+                    seed=sequential_seed + 1,
+                    verbose=True,
+                    shuffle_latents=is_shuffled,
+                    shuffle_seed=base_cfg.seed + 10000,
+                )
+            else:
+                train_ds = build_dataset_from_cache(
+                    train_cache,
+                    resources,
+                    device,
+                    verbose=True,
+                    samples_per_map=base_cfg.samples_per_map,
+                    shuffle_latents=is_shuffled,
+                    shuffle_seed=base_cfg.seed,
+                )
+                val_ds = build_dataset_from_cache(
+                    val_cache,
+                    resources,
+                    device,
+                    verbose=True,
+                    samples_per_map=base_cfg.val_samples_per_map,
+                    shuffle_latents=is_shuffled,
+                    shuffle_seed=base_cfg.seed + 10000,
+                )
             print(f"  train={len(train_ds)}  val={len(val_ds)}")
             datasets_by_key[(borehole_encoder, is_shuffled)] = (train_ds, val_ds)
 
@@ -374,6 +422,7 @@ def compare_belief_encoders_from_colab(
                                 for k, v in overrides.items()
                                 if k not in _UNET_ONLY_OVERRIDE_FIELDS
                             },
+                            **seq_cfg_overrides,
                         },
                     )
                 else:
@@ -383,6 +432,7 @@ def compare_belief_encoders_from_colab(
                             "in_channels": 2 + latent_dim,
                             "latent_dim": latent_dim,
                             **overrides,
+                            **seq_cfg_overrides,
                         },
                     )
                 cfg.borehole_encoder = f"{shuffle_label}{borehole_encoder}"
@@ -433,6 +483,12 @@ def compare_belief_encoders_from_colab(
                 best = min(history, key=lambda r: r["val_mse"])
                 bin_path = ckpt_dir / "val_metrics_by_drills.json"
                 bin_metrics = json.loads(bin_path.read_text()) if bin_path.exists() else {}
+                step_path = ckpt_dir / "val_metrics_by_step.json"
+                step_metrics_flat: dict = {}
+                if step_path.exists():
+                    for step_str, m in json.loads(step_path.read_text()).items():
+                        for metric, val in m.items():
+                            step_metrics_flat[f"step{step_str}_{metric}"] = val
                 rows.append(
                     {
                         "map_encoder": map_encoder,
@@ -443,6 +499,7 @@ def compare_belief_encoders_from_colab(
                         "best_val_mae": best["val_mae"],
                         "best_val_corr": best["val_corr"],
                         **bin_metrics,
+                        **step_metrics_flat,
                     }
                 )
 
@@ -458,3 +515,229 @@ def compare_belief_encoders_from_colab(
     print(f"\nSummary -> {csv_path}")
 
     return df
+
+
+def train_sequential_belief_from_colab(
+    storage_root: str | Path,
+    checkpoint_dir: str | Path,
+    map_pool_path: str | Path = "data/train_maps",
+    device: str = "cuda",
+    debug: bool = False,
+    borehole_encoder: Literal["jepa", "autoencoder", "none"] = "jepa",
+    map_encoder: Literal["unet", "transformer"] = "unet",
+    n_train_maps: int = 50,
+    n_val_maps: int = 10,
+    n_sequences_per_map: int = 3,
+    prefix_steps: list[int] | None = None,
+    sequential_seed: int = 42,
+    plot_dir: str | Path | None = None,
+    n_orebodies: int | None = None,
+    **overrides,
+) -> tuple[object, list[dict]]:
+    """Train a neural geological belief updater with sequential drill observations.
+
+    For each geological map, generates ``n_sequences_per_map`` ordered drill
+    sequences and creates prefix samples at each checkpoint in ``prefix_steps``.
+    This teaches the model to refine its belief as more drilling evidence
+    accumulates, rather than treating each sample as an independent observation.
+
+    Example
+    -------
+    >>> from decision_simulator.neural_belief.colab import train_sequential_belief_from_colab
+
+    >>> model, history = train_sequential_belief_from_colab(
+    ...     storage_root="/content/drive/MyDrive/thesis",
+    ...     checkpoint_dir="checkpoints/belief_sequential",
+    ...     map_pool_path="data/train_maps",
+    ...     device="cuda",
+    ...     borehole_encoder="jepa",
+    ...     n_sequences_per_map=3,
+    ...     prefix_steps=[1, 2, 3, 5, 8, 10, 15],
+    ...     debug=False,
+    ... )
+
+    Parameters
+    ----------
+    storage_root
+        Absolute root for all data and checkpoint paths.
+    checkpoint_dir
+        Where checkpoints and metric files are saved.  Relative paths are
+        resolved against ``storage_root``.
+    map_pool_path
+        Path to the pre-generated npz map pool directory.  Relative paths are
+        resolved against ``storage_root``.
+    device
+        ``"cuda"`` or ``"cpu"``.
+    debug
+        If True, use a minimal config (2 maps, 2 epochs) to verify the full
+        pipeline end-to-end without a full training run.
+    borehole_encoder
+        Which encoder provides latent embeddings per borehole:
+        ``"jepa"``, ``"autoencoder"``, or ``"none"``.
+    map_encoder
+        Which map encoder model to train: ``"unet"`` or ``"transformer"``.
+    n_train_maps
+        Number of maps to use for training.
+    n_val_maps
+        Number of maps to use for validation.
+    n_sequences_per_map
+        Number of independent drill orderings per map.
+    prefix_steps
+        Drill-count checkpoints at which to create samples.
+        Defaults to ``[1, 2, 3, 5, 8, 10, 15]``.
+    sequential_seed
+        RNG seed for drill sequence generation.
+    plot_dir
+        If given, save validation plots here after training.
+    n_orebodies
+        Stratify the map sample by ore body count (requires
+        ``n_bodies_index.npy`` in the pool).  ``None`` uses a contiguous slice.
+    **overrides
+        Any field of the training config by name.
+
+    Returns
+    -------
+    tuple[model, history]
+        The trained model loaded with its best weights and the per-epoch history.
+    """
+    check_device(device)
+
+    root = Path(storage_root).expanduser().resolve()
+
+    jepa_path, ae_path, distributions, formation_geo, discovery = (
+        resolve_resource_paths(root)
+    )
+    check_encoder_path(borehole_encoder, jepa_path, ae_path)
+    check_sim_paths(distributions, formation_geo)
+
+    ckpt_dir = Path(checkpoint_dir)
+    if not ckpt_dir.is_absolute():
+        ckpt_dir = root / ckpt_dir
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+    resolved_pool = Path(map_pool_path)
+    if not resolved_pool.is_absolute():
+        resolved_pool = root / resolved_pool
+
+    plot_dir_resolved: Path | None = None
+    if plot_dir is not None:
+        plot_dir_resolved = Path(plot_dir)
+        if not plot_dir_resolved.is_absolute():
+            plot_dir_resolved = root / plot_dir_resolved
+
+    resources, latent_dim = load_decision_resources(
+        borehole_encoder=borehole_encoder,
+        jepa_path=jepa_path,
+        ae_path=ae_path,
+        distributions_path=distributions,
+        formation_geometry_path=formation_geo,
+        discovery_prior_path=discovery,
+        device=device,
+    )
+
+    # In debug mode use a small map count for both cache loading and config.
+    effective_n_train = 2 if debug else n_train_maps
+    effective_n_val = 1 if debug else n_val_maps
+
+    store = NpzMapCacheStore(resolved_pool)
+    if n_orebodies is not None:
+        train_cache, val_cache = store.load_stratified_split(
+            n_train_maps=effective_n_train,
+            n_val_maps=effective_n_val,
+            n_orebodies=n_orebodies,
+            seed=overrides.get("seed", 42),
+        )
+    else:
+        train_cache, val_cache = store.load_train_val_split(
+            n_train_maps=effective_n_train,
+            n_val_maps=effective_n_val,
+        )
+
+    resolved_steps = prefix_steps or [1, 2, 3, 5, 8, 10, 15]
+
+    is_transformer = map_encoder == "transformer"
+
+    # n_train_maps / n_val_maps are intentionally excluded: the sequential path
+    # builds the dataset directly from the cache, so those config fields are unused.
+    sequential_overrides = {
+        "use_sequential_dataset": True,
+        "n_sequences_per_map": n_sequences_per_map,
+        "prefix_steps": resolved_steps,
+        "sequential_seed": sequential_seed,
+    }
+
+    if is_transformer:
+        cfg = build_map_belief_training_config(
+            debug,
+            {
+                "latent_dim": latent_dim,
+                **{k: v for k, v in overrides.items() if k not in _UNET_ONLY_OVERRIDE_FIELDS},
+                **sequential_overrides,
+            },
+        )
+        cfg.borehole_encoder = borehole_encoder
+
+        print(f"\nborehole_encoder : {borehole_encoder}")
+        print(f"map_encoder      : transformer")
+        print(f"latent_dim       : {latent_dim}")
+        print(f"n_sequences      : {cfg.n_sequences_per_map}")
+        print(f"prefix_steps     : {cfg.prefix_steps}")
+        print(f"Training config  :\n{cfg}\n")
+
+        model, _ = train_map_belief(
+            resources=resources,
+            cfg=cfg,
+            device=device,
+            checkpoint_dir=ckpt_dir,
+            plot_dir=plot_dir_resolved,
+            verbose=True,
+            train_cache=train_cache,
+            val_cache=val_cache,
+        )
+
+        _, _, _, history = load_map_belief_checkpoint(
+            ckpt_dir / "map_belief_best.pt", device=device
+        )
+        print(
+            f"\nSmoke test passed: checkpoint loaded with {len(history)} epoch(s) of history."
+        )
+        export_history(history, ckpt_dir)
+        save_experiment_config(ckpt_dir, cfg, cache_path=resolved_pool, sim_cfg=None)
+
+    else:
+        encoder_defaults = {"in_channels": 2 + latent_dim, "latent_dim": latent_dim}
+        cfg = build_training_config(
+            debug,
+            {**encoder_defaults, **overrides, **sequential_overrides},
+        )
+        cfg.borehole_encoder = borehole_encoder
+
+        print(f"\nborehole_encoder : {borehole_encoder}")
+        print(f"map_encoder      : unet")
+        print(f"latent_dim       : {latent_dim}")
+        print(f"in_channels      : {cfg.in_channels}")
+        print(f"n_sequences      : {cfg.n_sequences_per_map}")
+        print(f"prefix_steps     : {cfg.prefix_steps}")
+        print(f"Training config  :\n{cfg}\n")
+
+        model, _ = train_neural_belief(
+            resources=resources,
+            cfg=cfg,
+            device=device,
+            checkpoint_dir=ckpt_dir,
+            plot_dir=plot_dir_resolved,
+            verbose=True,
+            train_cache=train_cache,
+            val_cache=val_cache,
+        )
+
+        _, _, _, history = load_belief_checkpoint(
+            ckpt_dir / "belief_best.pt", device=device
+        )
+        print(
+            f"\nSmoke test passed: checkpoint loaded with {len(history)} epoch(s) of history."
+        )
+        export_history(history, ckpt_dir)
+        save_experiment_config(ckpt_dir, cfg, cache_path=resolved_pool, sim_cfg=None)
+
+    return model, history

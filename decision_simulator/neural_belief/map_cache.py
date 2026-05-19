@@ -29,7 +29,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .dataset import BeliefDatasetConfig
+from .datasets import BeliefDatasetConfig
 
 
 # ---------------------------------------------------------------------------

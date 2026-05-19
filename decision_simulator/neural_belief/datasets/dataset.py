@@ -10,10 +10,10 @@ from torch.utils.data import Dataset
 from simulator.map_generator import MapGenerator, SimConfig
 from encoder.autoencoder import standardise
 from decision_simulator.resources import DecisionSimulationResources
-from .utils import LatentPCAReducer, TargetNormalizer, build_ore_target, encode_full_latent_map, build_sample_input, make_coordinate_grid
+from ..utils import LatentPCAReducer, TargetNormalizer, build_ore_target, encode_full_latent_map, build_sample_input, make_coordinate_grid
 
 if TYPE_CHECKING:
-    from .map_cache import NpzMapCache
+    from ..map_cache import NpzMapCache
 
 
 @dataclass
@@ -95,6 +95,7 @@ class GeologicalBeliefDataset(Dataset):
                ch 0   : true max-pooled ore map (yield_field.max(depth))
                NOTE   : may be in normalized space after apply_target_normalizer()
     drill_counts : (N,) int64 tensor, number of drills per sample (optional)
+    metadata : list of per-sample dicts (optional); used by sequential evaluation
     """
 
     def __init__(
@@ -102,10 +103,12 @@ class GeologicalBeliefDataset(Dataset):
         inputs: torch.Tensor,
         targets: torch.Tensor,
         drill_counts: torch.Tensor | None = None,
+        metadata: list[dict] | None = None,
     ) -> None:
         self.inputs = inputs
         self.targets = targets
         self.drill_counts = drill_counts
+        self.metadata = metadata
 
     def __len__(self) -> int:
         return len(self.inputs)
