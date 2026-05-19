@@ -196,6 +196,7 @@ def compare_belief_encoders_from_colab(
     n_sequences_per_map: int = 3,
     prefix_steps: list[int] | None = None,
     sequential_seed: int = 42,
+    training_variants: list[dict] | None = None,
     **overrides,
 ) -> pd.DataFrame:
     """Train and compare all combinations of borehole and map encoder variants.
@@ -254,6 +255,23 @@ def compare_belief_encoders_from_colab(
         in equal proportions across body counts 0…n_orebodies.  Requires
         ``n_bodies_index.npy`` to be present in the pool (written by
         ``generate_training_maps.py``).
+    training_variants
+        Optional list of per-variant override dicts.  Each dict is merged
+        on top of ``overrides`` for that variant's training run, producing
+        one additional dimension in the comparison grid.  A ``"_label"`` key
+        in the dict names the variant (used in directory names and the
+        ``variant`` column); if absent the variant is labelled ``v0``,
+        ``v1``, …  When ``None`` (default), a single run is executed per
+        combination (backward-compatible).
+
+        Example — compare FP-penalty on vs off::
+
+            training_variants=[
+                {"_label": "fp_off"},
+                {"_label": "fp_on",
+                 "use_false_positive_penalty": True,
+                 "false_positive_weight": 0.05},
+            ]
     **overrides
         Forwarded to every training run.  ``in_channels`` and ``latent_dim``
         are always derived from the encoder and cannot be overridden here.
@@ -262,8 +280,9 @@ def compare_belief_encoders_from_colab(
     -------
     pd.DataFrame
         One row per run with columns ``map_encoder``, ``borehole_encoder``,
-        ``shuffled``, ``best_epoch``, ``best_val_mse``, ``best_val_mae``,
-        ``best_val_corr``, plus per-drill-bin metrics.
+        ``shuffled``, ``variant`` (when ``training_variants`` is set),
+        ``best_epoch``, ``best_val_mse``, ``best_val_mae``, ``best_val_corr``,
+        plus per-drill-bin metrics and no-ore FP metrics.
         Also written to ``<output_root>/comparison_summary.csv``.
     """
     check_device(device)
@@ -391,106 +410,127 @@ def compare_belief_encoders_from_colab(
             datasets_by_key[(borehole_encoder, is_shuffled)] = (train_ds, val_ds)
 
     # ---- training loop ----------------------------------------------------------
+    _variant_list = training_variants if training_variants is not None else [{}]
+    _multi_variant = training_variants is not None
+
     rows: list[dict] = []
 
-    for map_encoder in map_encoder_variants:
-        for borehole_encoder in borehole_encoder_variants:
-            resources, latent_dim = resources_by_encoder[borehole_encoder]
+    for vi, variant_overrides in enumerate(_variant_list):
+        variant_label = str(variant_overrides.get("_label", f"v{vi}"))
+        # Pure training overrides — strip the internal _label key
+        variant_train = {k: v for k, v in variant_overrides.items() if k != "_label"}
 
-            for is_shuffled in ([False, True] if run_shuffled else [False]):
-                shuffle_label = "shuffled_" if is_shuffled else ""
-                run_label = f"{map_encoder}_{shuffle_label}{borehole_encoder}"
-                train_ds, val_ds = datasets_by_key[(borehole_encoder, is_shuffled)]
+        for map_encoder in map_encoder_variants:
+            for borehole_encoder in borehole_encoder_variants:
+                resources, latent_dim = resources_by_encoder[borehole_encoder]
 
-                print(f"\n{'=' * 60}")
-                print(
-                    f"  map_encoder={map_encoder}  borehole_encoder={borehole_encoder}  shuffled={is_shuffled}"
-                )
-                print(f"{'=' * 60}")
-
-                ckpt_dir = out_root / run_label
-                ckpt_dir.mkdir(parents=True, exist_ok=True)
-
-                is_transformer = map_encoder == "transformer"
-                if is_transformer:
-                    cfg = build_map_belief_training_config(
-                        debug,
-                        {
-                            "latent_dim": latent_dim,
-                            **{
-                                k: v
-                                for k, v in overrides.items()
-                                if k not in _UNET_ONLY_OVERRIDE_FIELDS
-                            },
-                            **seq_cfg_overrides,
-                        },
+                for is_shuffled in ([False, True] if run_shuffled else [False]):
+                    shuffle_label = "shuffled_" if is_shuffled else ""
+                    base_run_label = f"{map_encoder}_{shuffle_label}{borehole_encoder}"
+                    run_label = (
+                        f"{base_run_label}_{variant_label}"
+                        if _multi_variant
+                        else base_run_label
                     )
-                else:
-                    cfg = build_training_config(
-                        debug,
-                        {
-                            "in_channels": 2 + latent_dim,
-                            "latent_dim": latent_dim,
-                            **overrides,
-                            **seq_cfg_overrides,
-                        },
-                    )
-                cfg.borehole_encoder = f"{shuffle_label}{borehole_encoder}"
+                    train_ds, val_ds = datasets_by_key[(borehole_encoder, is_shuffled)]
 
-                print(
-                    f"  latent_dim    : {latent_dim}  in_channels : {cfg.in_channels}"
-                )
-                if is_shuffled:
+                    print(f"\n{'=' * 60}")
                     print(
-                        "  (shuffled-latent control: spatial latent positions are permuted)"
+                        f"  map_encoder={map_encoder}  borehole_encoder={borehole_encoder}"
+                        f"  shuffled={is_shuffled}"
+                        + (f"  variant={variant_label}" if _multi_variant else "")
+                    )
+                    print(f"{'=' * 60}")
+
+                    ckpt_dir = out_root / run_label
+                    ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+                    # Effective overrides = shared overrides merged with variant-specific ones
+                    effective_overrides = {**overrides, **variant_train}
+
+                    is_transformer = map_encoder == "transformer"
+                    if is_transformer:
+                        cfg = build_map_belief_training_config(
+                            debug,
+                            {
+                                "latent_dim": latent_dim,
+                                **{
+                                    k: v
+                                    for k, v in effective_overrides.items()
+                                    if k not in _UNET_ONLY_OVERRIDE_FIELDS
+                                },
+                                **seq_cfg_overrides,
+                            },
+                        )
+                    else:
+                        cfg = build_training_config(
+                            debug,
+                            {
+                                "in_channels": 2 + latent_dim,
+                                "latent_dim": latent_dim,
+                                **effective_overrides,
+                                **seq_cfg_overrides,
+                            },
+                        )
+                    cfg.borehole_encoder = f"{shuffle_label}{borehole_encoder}"
+
+                    print(
+                        f"  latent_dim    : {latent_dim}  in_channels : {cfg.in_channels}"
+                    )
+                    if is_shuffled:
+                        print(
+                            "  (shuffled-latent control: spatial latent positions are permuted)"
+                        )
+
+                    if is_transformer:
+                        train_map_belief(
+                            resources=resources,
+                            cfg=cfg,
+                            device=device,
+                            checkpoint_dir=ckpt_dir,
+                            plot_dir=ckpt_dir / "plots",
+                            verbose=True,
+                            train_ds=train_ds,
+                            val_ds=val_ds,
+                        )
+                        _, _, _, history = load_map_belief_checkpoint(
+                            ckpt_dir / "map_belief_best.pt", device=device
+                        )
+                    else:
+                        train_neural_belief(
+                            resources=resources,
+                            cfg=cfg,
+                            device=device,
+                            checkpoint_dir=ckpt_dir,
+                            plot_dir=ckpt_dir / "plots",
+                            verbose=True,
+                            train_ds=train_ds,
+                            val_ds=val_ds,
+                        )
+                        _, _, _, history = load_belief_checkpoint(
+                            ckpt_dir / "belief_best.pt", device=device
+                        )
+
+                    print(f"\nSmoke test passed: {len(history)} epoch(s) in history.")
+                    export_history(history, ckpt_dir)
+                    save_experiment_config(
+                        ckpt_dir, cfg, cache_path=resolved_pool_path, sim_cfg=None
                     )
 
-                if is_transformer:
-                    train_map_belief(
-                        resources=resources,
-                        cfg=cfg,
-                        device=device,
-                        checkpoint_dir=ckpt_dir,
-                        plot_dir=ckpt_dir / "plots",
-                        verbose=True,
-                        train_ds=train_ds,
-                        val_ds=val_ds,
+                    best = min(history, key=lambda r: r["val_mse"])
+                    bin_path = ckpt_dir / "val_metrics_by_drills.json"
+                    bin_metrics = json.loads(bin_path.read_text()) if bin_path.exists() else {}
+                    step_path = ckpt_dir / "val_metrics_by_step.json"
+                    step_metrics_flat: dict = {}
+                    if step_path.exists():
+                        for step_str, m in json.loads(step_path.read_text()).items():
+                            for metric, val in m.items():
+                                step_metrics_flat[f"step{step_str}_{metric}"] = val
+                    no_ore_path = ckpt_dir / "val_metrics_no_ore.json"
+                    no_ore_flat = (
+                        json.loads(no_ore_path.read_text()) if no_ore_path.exists() else {}
                     )
-                    _, _, _, history = load_map_belief_checkpoint(
-                        ckpt_dir / "map_belief_best.pt", device=device
-                    )
-                else:
-                    train_neural_belief(
-                        resources=resources,
-                        cfg=cfg,
-                        device=device,
-                        checkpoint_dir=ckpt_dir,
-                        plot_dir=ckpt_dir / "plots",
-                        verbose=True,
-                        train_ds=train_ds,
-                        val_ds=val_ds,
-                    )
-                    _, _, _, history = load_belief_checkpoint(
-                        ckpt_dir / "belief_best.pt", device=device
-                    )
-
-                print(f"\nSmoke test passed: {len(history)} epoch(s) in history.")
-                export_history(history, ckpt_dir)
-                save_experiment_config(
-                    ckpt_dir, cfg, cache_path=resolved_pool_path, sim_cfg=None
-                )
-
-                best = min(history, key=lambda r: r["val_mse"])
-                bin_path = ckpt_dir / "val_metrics_by_drills.json"
-                bin_metrics = json.loads(bin_path.read_text()) if bin_path.exists() else {}
-                step_path = ckpt_dir / "val_metrics_by_step.json"
-                step_metrics_flat: dict = {}
-                if step_path.exists():
-                    for step_str, m in json.loads(step_path.read_text()).items():
-                        for metric, val in m.items():
-                            step_metrics_flat[f"step{step_str}_{metric}"] = val
-                rows.append(
-                    {
+                    row: dict = {
                         "map_encoder": map_encoder,
                         "borehole_encoder": borehole_encoder,
                         "shuffled": is_shuffled,
@@ -500,8 +540,11 @@ def compare_belief_encoders_from_colab(
                         "best_val_corr": best["val_corr"],
                         **bin_metrics,
                         **step_metrics_flat,
+                        **no_ore_flat,
                     }
-                )
+                    if _multi_variant:
+                        row["variant"] = variant_label
+                    rows.append(row)
 
     df = pd.DataFrame(rows)
 
