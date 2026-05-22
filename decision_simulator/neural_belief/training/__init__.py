@@ -36,6 +36,14 @@ from .train_map_belief import (
     build_map_belief_training_config,
 )
 from .train_raw_borehole_belief import train_raw_borehole_belief
+from .train_end_to_end import (
+    E2ETrainingConfig,
+    E2EDataset,
+    collate_e2e,
+    train_end_to_end,
+    load_e2e_checkpoint,
+    build_e2e_training_config,
+)
 
 # Shared validation utilities re-exported here for callers that previously
 # imported validate_by_drill_bins from decision_simulator.neural_belief.training
@@ -63,6 +71,13 @@ __all__ = [
     "build_map_belief_training_config",
     # Placeholder
     "train_raw_borehole_belief",
+    # End-to-end candidate scoring
+    "E2ETrainingConfig",
+    "E2EDataset",
+    "collate_e2e",
+    "train_end_to_end",
+    "load_e2e_checkpoint",
+    "build_e2e_training_config",
     # Shared utilities (backward-compat re-exports)
     "DRILL_BINS",
     "validate_by_drill_bins",

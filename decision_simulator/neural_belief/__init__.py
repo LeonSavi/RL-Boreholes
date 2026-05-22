@@ -32,6 +32,7 @@ from .colab import (
     train_belief_from_colab,
     compare_belief_encoders_from_colab,
     train_sequential_belief_from_colab,
+    train_end_to_end_from_colab,
 )
 
 __all__ = [
@@ -68,4 +69,5 @@ __all__ = [
     "train_belief_from_colab",
     "compare_belief_encoders_from_colab",
     "train_sequential_belief_from_colab",
+    "train_end_to_end_from_colab",
 ]

@@ -58,7 +58,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from ..utils import make_coordinate_grid
+from ...utils import make_coordinate_grid
 
 
 # ---------------------------------------------------------------------------

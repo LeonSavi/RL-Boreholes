@@ -29,6 +29,9 @@ from .training import (
     save_experiment_config,
     train_neural_belief,
     train_map_belief,
+    build_e2e_training_config,
+    train_end_to_end,
+    load_e2e_checkpoint,
 )
 
 # Fields present in NeuralBeliefTrainingConfig but not in MapBeliefTrainingConfig.
@@ -782,5 +785,192 @@ def train_sequential_belief_from_colab(
         )
         export_history(history, ckpt_dir)
         save_experiment_config(ckpt_dir, cfg, cache_path=resolved_pool, sim_cfg=None)
+
+    return model, history
+
+
+def train_end_to_end_from_colab(
+    storage_root: str | Path,
+    checkpoint_dir: str | Path,
+    device: str = "cuda",
+    debug: bool = False,
+    norm_stats_from: Literal["jepa", "autoencoder", "none"] = "jepa",
+    map_pool_path: str | Path = "data/dataset_complete",
+    n_orebodies: int | None = None,
+    use_sequential_dataset: bool = False,
+    n_sequences_per_map: int = 3,
+    prefix_steps: list[int] | None = None,
+    **overrides,
+) -> tuple[object, list[dict]]:
+    """Train the end-to-end candidate scoring transformer from a Colab notebook.
+
+    Unlike the other belief models, this model trains its own borehole encoder
+    jointly with the candidate scoring transformer.  No pre-trained JEPA or
+    autoencoder weights are required.  The ``norm_stats_from`` parameter
+    controls which checkpoint's per-variable normalization statistics are used
+    to standardise raw borehole inputs before they reach the end-to-end encoder.
+
+    Example
+    -------
+    >>> from decision_simulator.neural_belief.colab import train_end_to_end_from_colab
+
+    # Default: use JEPA norm stats, train encoder from scratch
+    >>> model, history = train_end_to_end_from_colab(
+    ...     storage_root="/content/drive/MyDrive/thesis",
+    ...     checkpoint_dir="checkpoints/e2e",
+    ...     device="cuda",
+    ...     debug=True,
+    ... )
+
+    # Variant A: no borehole encoder (position + ore only)
+    >>> model, history = train_end_to_end_from_colab(
+    ...     storage_root="/content/drive/MyDrive/thesis",
+    ...     checkpoint_dir="checkpoints/e2e_no_encoder",
+    ...     device="cuda",
+    ...     latent_dim=0,
+    ...     bh_n_layers=0,
+    ... )
+
+    # Variant C: shuffled boreholes sanity check
+    >>> model, history = train_end_to_end_from_colab(
+    ...     storage_root="/content/drive/MyDrive/thesis",
+    ...     checkpoint_dir="checkpoints/e2e_shuffled",
+    ...     device="cuda",
+    ...     shuffle_boreholes=True,
+    ... )
+
+    # Variant D: initialise borehole encoder from JEPA weights
+    >>> model, history = train_end_to_end_from_colab(
+    ...     storage_root="/content/drive/MyDrive/thesis",
+    ...     checkpoint_dir="checkpoints/e2e_jepa_init",
+    ...     device="cuda",
+    ...     pretrained_bh_encoder_path="/content/drive/MyDrive/thesis/checkpoints/jepa.pt",
+    ... )
+
+    Parameters
+    ----------
+    storage_root
+        Absolute root for all data and checkpoint paths, e.g.
+        ``"/content/drive/MyDrive/thesis"``.  All relative paths are resolved
+        against this directory.
+    checkpoint_dir
+        Where ``e2e_best.pt``, ``e2e_last.pt``, and
+        ``training_history.{json,csv}`` are saved.  Relative paths are
+        resolved against ``storage_root``.
+    device
+        ``"cuda"`` or ``"cpu"``.  Raises a clear error when CUDA is requested
+        but unavailable.
+    debug
+        If True, use a minimal config (2 maps, 2 epochs, tiny model) to
+        verify the full pipeline end-to-end without a full training run.
+    norm_stats_from
+        Which encoder checkpoint to load per-variable normalization statistics
+        from.  The encoder itself is NOT used — the end-to-end model always
+        trains its own borehole encoder from scratch.
+
+        ``"jepa"``        — JEPA checkpoint norm stats (recommended)
+        ``"autoencoder"`` — Autoencoder checkpoint norm stats
+        ``"none"``        — skip normalization (raw geological values)
+    **overrides
+        Any field of :class:`E2ETrainingConfig` by name.  Common overrides:
+
+        * ``n_epochs=100`` — train longer
+        * ``latent_dim=0, bh_n_layers=0`` — variant A: no encoder
+        * ``shuffle_boreholes=True`` — variant C: sanity check
+        * ``pretrained_bh_encoder_path="..."`` — variant D: JEPA init
+        * ``use_false_positive_penalty=True`` — penalise false positives
+
+    Returns
+    -------
+    tuple[CandidateScoringTransformer, list[dict]]
+        ``(model, history)`` — the trained model loaded with its best weights,
+        and the per-epoch training history.
+    """
+    check_device(device)
+
+    root = Path(storage_root).expanduser().resolve()
+
+    jepa_path, ae_path, distributions, formation_geo, discovery = (
+        resolve_resource_paths(root)
+    )
+    check_encoder_path(norm_stats_from, jepa_path, ae_path)
+    check_sim_paths(distributions, formation_geo)
+
+    ckpt_dir = Path(checkpoint_dir)
+    if not ckpt_dir.is_absolute():
+        ckpt_dir = root / ckpt_dir
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+    resolved_pool = Path(map_pool_path)
+    if not resolved_pool.is_absolute():
+        resolved_pool = root / resolved_pool
+
+    # Load resources for norm stats only — the borehole encoder inside resources
+    # is not used; the e2e model trains its own encoder from scratch.
+    resources, _ = load_decision_resources(
+        borehole_encoder=norm_stats_from,
+        jepa_path=jepa_path,
+        ae_path=ae_path,
+        distributions_path=distributions,
+        formation_geometry_path=formation_geo,
+        discovery_prior_path=discovery,
+        device=device,
+    )
+
+    seq_overrides: dict = {}
+    if use_sequential_dataset:
+        seq_overrides = {
+            "use_sequential_dataset": True,
+            "n_sequences_per_map": n_sequences_per_map,
+            "prefix_steps": prefix_steps or [1, 2, 3, 5, 8, 10, 15],
+        }
+
+    cfg = build_e2e_training_config(debug=debug, overrides={**overrides, **seq_overrides})
+
+    # ---- load map cache -------------------------------------------------------
+    store = NpzMapCacheStore(resolved_pool)
+    seed = overrides.get("seed", cfg.seed)
+    if n_orebodies is not None:
+        train_cache, val_cache = store.load_stratified_split(
+            n_train_maps=cfg.n_train_maps,
+            n_val_maps=cfg.n_val_maps,
+            n_orebodies=n_orebodies,
+            seed=seed,
+        )
+    else:
+        train_cache, val_cache = store.load_train_val_split(
+            n_train_maps=cfg.n_train_maps,
+            n_val_maps=cfg.n_val_maps,
+        )
+
+    print(f"\nnorm_stats_from  : {norm_stats_from}")
+    print(f"map_pool_path    : {resolved_pool}")
+    print(f"n_orebodies      : {n_orebodies}")
+    print(f"n_train_maps     : {cfg.n_train_maps}  n_val_maps: {cfg.n_val_maps}")
+    print(f"latent_dim       : {cfg.latent_dim}  (0 = no encoder, variant A)")
+    print(f"sequential       : {cfg.use_sequential_dataset}")
+    if cfg.use_sequential_dataset:
+        print(f"n_sequences      : {cfg.n_sequences_per_map}")
+        print(f"prefix_steps     : {cfg.prefix_steps}")
+    print(f"shuffle_boreholes: {cfg.shuffle_boreholes}")
+    if cfg.pretrained_bh_encoder_path:
+        print(f"JEPA init        : {cfg.pretrained_bh_encoder_path}")
+    print(f"Training config  :\n{cfg}\n")
+
+    model, _ = train_end_to_end(
+        resources=resources,
+        cfg=cfg,
+        device=device,
+        checkpoint_dir=ckpt_dir,
+        verbose=True,
+        train_cache=train_cache,
+        val_cache=val_cache,
+    )
+
+    # Smoke test: verify the saved checkpoint loads cleanly.
+    _, _, _, history = load_e2e_checkpoint(ckpt_dir / "e2e_best.pt", device=device)
+    print(
+        f"\nSmoke test passed: checkpoint loaded with {len(history)} epoch(s) of history."
+    )
 
     return model, history
