@@ -907,6 +907,7 @@ def train_end_to_end_from_colab(
 
     # Load resources for norm stats only — the borehole encoder inside resources
     # is not used; the e2e model trains its own encoder from scratch.
+    print(f"\nLoading norm stats from '{norm_stats_from}' checkpoint (encoder is not used by e2e model) …")
     resources, _ = load_decision_resources(
         borehole_encoder=norm_stats_from,
         jepa_path=jepa_path,
@@ -962,6 +963,7 @@ def train_end_to_end_from_colab(
         cfg=cfg,
         device=device,
         checkpoint_dir=ckpt_dir,
+        plot_dir=ckpt_dir / "plots",
         verbose=True,
         train_cache=train_cache,
         val_cache=val_cache,

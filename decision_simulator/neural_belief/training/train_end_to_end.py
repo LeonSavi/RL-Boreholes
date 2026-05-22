@@ -140,6 +140,7 @@ class E2ETrainingConfig:
     # Misc
     seed: int = 42
     borehole_encoder: str = "end_to_end"  # informational; stored in checkpoint
+    n_val_plots: int = 20
 
     def __post_init__(self) -> None:
         if self.d_model % self.n_heads != 0:
@@ -552,6 +553,7 @@ def train_end_to_end(
     cfg: E2ETrainingConfig,
     device: str,
     checkpoint_dir: Path,
+    plot_dir: Path | None = None,
     verbose: bool = True,
     train_ds: E2EDataset | None = None,
     val_ds: E2EDataset | None = None,
@@ -754,6 +756,31 @@ def train_end_to_end(
     model.load_state_dict(best_ckpt["state_dict"])
     model.eval()
 
+    # ---- per-step / per-drill-count metrics (best model) ---------------------
+    step_metrics = _validate_e2e_by_step(model, val_loader, device, normalizer)
+    if step_metrics:
+        if verbose:
+            label = "step" if cfg.use_sequential_dataset else "drill count"
+            print(f"\nValidation metrics by {label} (best model, ore-value space):")
+            for k, m in sorted(step_metrics.items()):
+                print(
+                    f"  K={k:3d}  n={m['n']:5d}"
+                    f"  mse={m['mse']:.4f}"
+                    f"  mae={m['mae']:.4f}"
+                    f"  corr={m['corr']:.4f}"
+                )
+        step_path = checkpoint_dir / "val_metrics_by_step.json"
+        with open(step_path, "w") as f:
+            json.dump({str(k): v for k, v in step_metrics.items()}, f, indent=2)
+        if verbose:
+            print(f"  step metrics -> {step_path}")
+
+    # ---- optional validation plots -------------------------------------------
+    if plot_dir is not None:
+        plot_dir = Path(plot_dir)
+        plot_dir.mkdir(parents=True, exist_ok=True)
+        _save_e2e_val_plots(model, val_loader, normalizer, plot_dir, device, cfg)
+
     if verbose:
         best_row = min(history, key=lambda r: r["val_mse"])
         print(
@@ -851,6 +878,154 @@ def build_e2e_training_config(
         setattr(cfg, key, value)
 
     return cfg
+
+
+# ---------------------------------------------------------------------------
+# Validation metrics helpers (by drill count / step)
+# ---------------------------------------------------------------------------
+
+def _validate_e2e_by_step(
+    model: CandidateScoringTransformer,
+    val_loader: DataLoader,
+    device: str,
+    normalizer: TargetNormalizer,
+) -> dict[int, dict[str, float]]:
+    """Compute MSE/MAE/Pearson grouped by exact K (number of observed boreholes).
+
+    In sequential mode K equals the prefix step, so this gives per-step metrics.
+    In random mode K is sampled from [min_drills, max_drills].
+
+    Returns
+    -------
+    dict mapping K → {"n": int, "mse": float, "mae": float, "corr": float}
+    """
+    from collections import defaultdict
+
+    model.eval()
+    groups: dict[int, tuple[list[float], list[float]]] = defaultdict(lambda: ([], []))
+
+    with torch.no_grad():
+        for batch in val_loader:
+            bh  = batch["boreholes"].to(device)
+            ov  = batch["ore_vals"].to(device)
+            pos = batch["positions"].to(device)
+            cp  = batch["candidate_pos"].to(device)
+            tgt = batch["target_ore"].to(device)
+            pm  = batch["padding_mask"].to(device)
+
+            pred_norm = model(bh, ov, pos, cp, pm)
+            preds = normalizer.inverse_tensor(pred_norm).cpu().view(-1).tolist()
+            tgts  = normalizer.inverse_tensor(tgt).cpu().view(-1).tolist()
+            ks    = (~pm).sum(dim=1).cpu().tolist()
+
+            for k, p, t in zip(ks, preds, tgts):
+                groups[int(k)][0].append(p)
+                groups[int(k)][1].append(t)
+
+    metrics: dict[int, dict[str, float]] = {}
+    for k in sorted(groups):
+        ps = torch.tensor(groups[k][0])
+        ts = torch.tensor(groups[k][1])
+        mse  = nn.functional.mse_loss(ps, ts).item()
+        mae  = (ps - ts).abs().mean().item()
+        pc   = ps - ps.mean()
+        tc   = ts - ts.mean()
+        corr = ((pc * tc).sum() / (pc.norm() * tc.norm()).clamp(min=1e-8)).item()
+        metrics[k] = {"n": len(ps), "mse": mse, "mae": mae, "corr": corr}
+
+    return metrics
+
+
+def _save_e2e_val_plots(
+    model: CandidateScoringTransformer,
+    val_loader: DataLoader,
+    normalizer: TargetNormalizer,
+    plot_dir: Path,
+    device: str,
+    cfg: E2ETrainingConfig,
+) -> None:
+    """Save validation scatter plots (predicted vs true ore) to a timestamped subdir.
+
+    Produces:
+      scatter_overall.png   — all validation samples
+      scatter_by_step.png   — one panel per unique K (drill count / prefix step)
+    """
+    import datetime
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    out_dir = Path(plot_dir) / timestamp
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    model.eval()
+    all_ks:    list[int]   = []
+    all_preds: list[float] = []
+    all_tgts:  list[float] = []
+
+    with torch.no_grad():
+        for batch in val_loader:
+            bh  = batch["boreholes"].to(device)
+            ov  = batch["ore_vals"].to(device)
+            pos = batch["positions"].to(device)
+            cp  = batch["candidate_pos"].to(device)
+            tgt = batch["target_ore"].to(device)
+            pm  = batch["padding_mask"].to(device)
+
+            pred_norm = model(bh, ov, pos, cp, pm)
+            preds = normalizer.inverse_tensor(pred_norm).cpu().view(-1).tolist()
+            tgts  = normalizer.inverse_tensor(tgt).cpu().view(-1).tolist()
+            ks    = (~pm).sum(dim=1).cpu().tolist()
+
+            all_ks.extend(int(k) for k in ks)
+            all_preds.extend(preds)
+            all_tgts.extend(tgts)
+
+    ks_arr    = np.array(all_ks)
+    preds_arr = np.array(all_preds)
+    tgts_arr  = np.array(all_tgts)
+
+    def _scatter_ax(ax: "plt.Axes", p: np.ndarray, t: np.ndarray, title: str) -> None:
+        ax.scatter(t, p, alpha=0.3, s=8, color="steelblue", rasterized=True)
+        vmax = float(max(t.max(), p.max(), 1e-6))
+        ax.plot([0, vmax], [0, vmax], "r--", lw=1)
+        ax.set_xlabel("True ore")
+        ax.set_ylabel("Predicted ore")
+        ax.set_title(title)
+
+    # Overall scatter
+    fig, ax = plt.subplots(figsize=(6, 6))
+    _scatter_ax(ax, preds_arr, tgts_arr, f"E2E: pred vs true ore (n={len(preds_arr)})")
+    fig.tight_layout()
+    fig.savefig(out_dir / "scatter_overall.png", dpi=120)
+    plt.close(fig)
+
+    # Per-step scatter grid
+    unique_ks = sorted(set(all_ks))
+    if len(unique_ks) > 1:
+        ncols = min(4, len(unique_ks))
+        nrows = (len(unique_ks) + ncols - 1) // ncols
+        fig, axes = plt.subplots(nrows, ncols, figsize=(4 * ncols, 4 * nrows), squeeze=False)
+        for i, k in enumerate(unique_ks):
+            row, col = divmod(i, ncols)
+            mask = ks_arr == k
+            _scatter_ax(
+                axes[row][col],
+                preds_arr[mask],
+                tgts_arr[mask],
+                f"K={k} drills (n={mask.sum()})",
+            )
+        for i in range(len(unique_ks), nrows * ncols):
+            row, col = divmod(i, ncols)
+            axes[row][col].set_visible(False)
+        label = "step" if cfg.use_sequential_dataset else "drill count"
+        fig.suptitle(f"E2E: pred vs true ore by {label}", y=1.01)
+        fig.tight_layout()
+        fig.savefig(out_dir / "scatter_by_step.png", dpi=120, bbox_inches="tight")
+        plt.close(fig)
+
+    print(f"  plots saved -> {out_dir}")
 
 
 # ---------------------------------------------------------------------------
