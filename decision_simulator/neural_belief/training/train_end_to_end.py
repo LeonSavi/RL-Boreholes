@@ -137,6 +137,10 @@ class E2ETrainingConfig:
     shuffle_boreholes: bool = False        # variant C sanity check
     pretrained_bh_encoder_path: str | None = None  # variant D: JEPA init
 
+    # Grid dimensions — set automatically from cache in train_end_to_end()
+    n_x: int = 32
+    n_y: int = 32
+
     # Misc
     seed: int = 42
     borehole_encoder: str = "end_to_end"  # informational; stored in checkpoint
@@ -295,6 +299,7 @@ class E2EDataset(Dataset):
                     "positions":     positions_k,
                     "candidate_pos": grid_pos[ci, cj],
                     "target_ore":    float(target_ore[ci, cj]),
+                    "map_idx":       map_idx,
                 })
 
             if cfg.use_sequential_dataset:
@@ -614,7 +619,10 @@ def train_end_to_end(
             print("Building validation dataset from cache …")
         val_ds = E2EDataset.from_cache(val_cache, resources, cfg, verbose=verbose, is_val=True)
 
-    # Resolve n_depth from dataset if not known yet
+    # Resolve grid dimensions and depth from cache / dataset
+    if train_cache is not None:
+        cfg.n_x = train_cache.n_x
+        cfg.n_y = train_cache.n_y
     if cfg.n_depth == 440 and len(train_ds) > 0:
         cfg.n_depth = train_ds.samples[0]["boreholes"].shape[2]
 
@@ -779,7 +787,7 @@ def train_end_to_end(
     if plot_dir is not None:
         plot_dir = Path(plot_dir)
         plot_dir.mkdir(parents=True, exist_ok=True)
-        _save_e2e_val_plots(model, val_loader, normalizer, plot_dir, device, cfg)
+        _save_e2e_val_plots(model, val_ds, val_loader, normalizer, plot_dir, device, cfg, val_cache=val_cache)
 
     if verbose:
         best_row = min(history, key=lambda r: r["val_mse"])
@@ -938,28 +946,94 @@ def _validate_e2e_by_step(
 
 def _save_e2e_val_plots(
     model: CandidateScoringTransformer,
+    val_ds: "E2EDataset",
     val_loader: DataLoader,
     normalizer: TargetNormalizer,
     plot_dir: Path,
     device: str,
     cfg: E2ETrainingConfig,
+    val_cache: NpzMapCache | None = None,
 ) -> None:
-    """Save validation scatter plots (predicted vs true ore) to a timestamped subdir.
+    """Save validation plots to a timestamped subdir under plot_dir.
 
-    Produces:
-      scatter_overall.png   — all validation samples
-      scatter_by_step.png   — one panel per unique K (drill count / prefix step)
+    Produces (when val_cache is available):
+      val_sample_XX.png  — 4-panel belief map per sample (observations / true /
+                           predicted / error), matching the other training scripts.
+
+    Always produces:
+      scatter_overall.png  — predicted vs true ore across all validation samples
+      scatter_by_step.png  — one panel per unique drill count / prefix step
     """
     import datetime
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from ..visualize import plot_belief_sample
 
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     out_dir = Path(plot_dir) / timestamp
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    n_x, n_y = cfg.n_x, cfg.n_y
+
+    # Pre-compute the full normalised grid — (n_x*n_y, 2) — used as candidates
+    xs = np.linspace(0.0, 1.0, n_x, dtype=np.float32)
+    ys = np.linspace(0.0, 1.0, n_y, dtype=np.float32)
+    xg, yg = np.meshgrid(xs, ys, indexing="ij")
+    all_positions = np.stack([xg.ravel(), yg.ravel()], axis=-1)  # (n_x*n_y, 2)
+    all_positions_t = torch.from_numpy(all_positions).to(device)
+
     model.eval()
+
+    # ---- 4-panel belief maps (matches plot_belief_sample output) ----------------
+    if val_cache is not None:
+        indices = np.linspace(0, len(val_ds) - 1, cfg.n_val_plots, dtype=int)
+        for plot_k, idx in enumerate(indices):
+            sample = val_ds.samples[int(idx)]
+            map_idx = sample.get("map_idx")
+            if map_idx is None:
+                continue
+
+            bh  = torch.from_numpy(sample["boreholes"]).to(device)   # (K, V, D)
+            ov  = torch.from_numpy(sample["ore_vals"]).to(device)    # (K,)
+            pos = torch.from_numpy(sample["positions"]).to(device)   # (K, 2)
+
+            with torch.no_grad():
+                scores_norm = model.score_candidates(
+                    bh, ov, pos, all_positions_t
+                )  # (n_x*n_y,) normalised
+
+            predicted_ore_map = (
+                normalizer.inverse(scores_norm.cpu().numpy())
+                .reshape(n_x, n_y)
+                .astype(np.float32)
+            )
+
+            # Sparse ore map and observation mask from drilled positions
+            sparse_ore_map  = np.zeros((n_x, n_y), dtype=np.float32)
+            observation_mask = np.zeros((n_x, n_y), dtype=np.float32)
+            pos_np = sample["positions"]  # (K, 2) normalised
+            ore_np = sample["ore_vals"]   # (K,)
+            for (px, py), ov_val in zip(pos_np, ore_np):
+                i = int(round(float(px) * (n_x - 1)))
+                j = int(round(float(py) * (n_y - 1)))
+                sparse_ore_map[i, j]   = float(ov_val)
+                observation_mask[i, j] = 1.0
+
+            true_ore_map = val_cache.targets[map_idx].astype(np.float32)
+            n_drills = int(observation_mask.sum())
+
+            plot_belief_sample(
+                sparse_ore_map=sparse_ore_map,
+                observation_mask=observation_mask,
+                true_ore_map=true_ore_map,
+                predicted_ore_map=predicted_ore_map,
+                save_path=out_dir / f"val_sample_{plot_k:02d}.png",
+                title=f"Val sample {plot_k}  ({n_drills} drills)",
+                timestamp=timestamp,
+            )
+
+    # ---- scatter plots (predicted vs true) -------------------------------------
     all_ks:    list[int]   = []
     all_preds: list[float] = []
     all_tgts:  list[float] = []
@@ -982,9 +1056,9 @@ def _save_e2e_val_plots(
             all_preds.extend(preds)
             all_tgts.extend(tgts)
 
-    ks_arr    = np.array(all_ks)
     preds_arr = np.array(all_preds)
     tgts_arr  = np.array(all_tgts)
+    ks_arr    = np.array(all_ks)
 
     def _scatter_ax(ax: "plt.Axes", p: np.ndarray, t: np.ndarray, title: str) -> None:
         ax.scatter(t, p, alpha=0.3, s=8, color="steelblue", rasterized=True)
@@ -994,14 +1068,12 @@ def _save_e2e_val_plots(
         ax.set_ylabel("Predicted ore")
         ax.set_title(title)
 
-    # Overall scatter
     fig, ax = plt.subplots(figsize=(6, 6))
     _scatter_ax(ax, preds_arr, tgts_arr, f"E2E: pred vs true ore (n={len(preds_arr)})")
     fig.tight_layout()
     fig.savefig(out_dir / "scatter_overall.png", dpi=120)
     plt.close(fig)
 
-    # Per-step scatter grid
     unique_ks = sorted(set(all_ks))
     if len(unique_ks) > 1:
         ncols = min(4, len(unique_ks))
@@ -1010,12 +1082,8 @@ def _save_e2e_val_plots(
         for i, k in enumerate(unique_ks):
             row, col = divmod(i, ncols)
             mask = ks_arr == k
-            _scatter_ax(
-                axes[row][col],
-                preds_arr[mask],
-                tgts_arr[mask],
-                f"K={k} drills (n={mask.sum()})",
-            )
+            _scatter_ax(axes[row][col], preds_arr[mask], tgts_arr[mask],
+                        f"K={k} drills (n={mask.sum()})")
         for i in range(len(unique_ks), nrows * ncols):
             row, col = divmod(i, ncols)
             axes[row][col].set_visible(False)
