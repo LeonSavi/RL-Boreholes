@@ -8,7 +8,7 @@ import torch
 from torch.utils.data import Dataset
 
 from simulator.map_generator import MapGenerator, SimConfig
-from encoder.autoencoder import standardise
+from ..models.borehole_encoders.autoencoder import standardise
 from decision_simulator.resources import DecisionSimulationResources
 from ..utils import LatentPCAReducer, TargetNormalizer, build_ore_target, encode_full_latent_map, build_sample_input, make_coordinate_grid
 

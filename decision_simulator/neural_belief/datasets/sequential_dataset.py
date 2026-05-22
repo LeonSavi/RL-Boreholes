@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import torch
 
-from encoder.autoencoder import standardise
+from ..models.borehole_encoders.autoencoder import standardise
 from decision_simulator.resources import DecisionSimulationResources
 from ..utils import encode_full_latent_map, build_sample_input
 from .dataset import GeologicalBeliefDataset

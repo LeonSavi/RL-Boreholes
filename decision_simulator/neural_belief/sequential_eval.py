@@ -225,13 +225,21 @@ def save_sequential_val_plots(
 
             panel_rows.append((sparse_ore, obs_mask, true_ore, pred_ore))
 
+        # Single scale across all steps so rows are directly comparable
+        global_vmax = max(
+            float(max(t.max(), p.max())) for _, _, t, p in panel_rows
+        )
+        global_vmax = max(global_vmax, 1e-3)
+
         # Build combined evolution figure: rows=steps, cols=[obs|true|pred|error]
-        fig, axes = plt.subplots(n_steps, 4, figsize=(16, 4 * n_steps))
+        fig, axes = plt.subplots(n_steps, 4, figsize=(18, 4 * n_steps))
         if n_steps == 1:
             axes = axes[np.newaxis, :]
 
         fig.suptitle(
-            f"Belief evolution — Map {map_id} / Seq {seq_id}", fontsize=12
+            f"Belief evolution — Map {map_id} / Seq {seq_id}"
+            f"  (colour scale max = {global_vmax:.3f})",
+            fontsize=12,
         )
 
         col_titles = ["Observations", "True ore map", "Predicted ore map", "Abs error"]
@@ -241,32 +249,40 @@ def save_sequential_val_plots(
         for row_idx, ((step, _), (sparse_ore, obs_mask, true_ore, pred_ore)) in enumerate(
             zip(step_pairs, panel_rows)
         ):
-            vmax = float(max(true_ore.max(), pred_ore.max(), 1e-3))
-            kw = dict(origin="lower", cmap="viridis")
+            kw = dict(origin="lower", cmap="viridis", vmin=0, vmax=global_vmax)
             drill_rows, drill_cols = np.where(obs_mask > 0)
 
             ax = axes[row_idx, 0]
-            ax.imshow(sparse_ore.T, vmin=0, vmax=vmax, **kw)
+            ax.imshow(sparse_ore.T, **kw)
             ax.scatter(drill_rows, drill_cols, c="red", s=8, marker="x", linewidths=0.6)
             ax.set_ylabel(f"step {step}", fontsize=9)
             ax.set_xticks([])
             ax.set_yticks([])
 
             ax = axes[row_idx, 1]
-            ax.imshow(true_ore.T, vmin=0, vmax=vmax, **kw)
+            ax.imshow(true_ore.T, **kw)
             ax.set_xticks([])
             ax.set_yticks([])
 
             ax = axes[row_idx, 2]
-            ax.imshow(pred_ore.T, vmin=0, vmax=vmax, **kw)
+            im_pred = ax.imshow(pred_ore.T, **kw)
             ax.set_xticks([])
             ax.set_yticks([])
 
             ax = axes[row_idx, 3]
             abs_err = np.abs(pred_ore - true_ore)
-            ax.imshow(abs_err.T, origin="lower", vmin=0, cmap="Reds")
+            # vmax matches prediction scale so "light pink" and "dark purple"
+            # represent the same numerical value across panels
+            im_err = ax.imshow(abs_err.T, origin="lower", vmin=0, vmax=global_vmax, cmap="Reds")
+            # Annotate max error so the reader can see the absolute magnitude
+            ax.set_xlabel(f"max err = {abs_err.max():.3f}", fontsize=7)
             ax.set_xticks([])
             ax.set_yticks([])
+
+        # Shared colourbars — one for prediction (viridis) and one for error (Reds)
+        # placed to the right of the last row's panels
+        fig.colorbar(im_pred, ax=axes[:, 2], shrink=0.6, label="ore value")
+        fig.colorbar(im_err,  ax=axes[:, 3], shrink=0.6, label="abs error")
 
         fig.tight_layout()
         evo_path = seq_dir / "evolution.png"

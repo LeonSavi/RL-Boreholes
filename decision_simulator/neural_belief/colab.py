@@ -16,7 +16,7 @@ from decision_simulator.resources import (
 
 from .datasets import build_dataset_from_cache
 from .map_cache import NpzMapCacheStore
-from .models.unet_belief import UNetBelief
+from .models.map_encoders.unet_belief import UNetBelief
 
 
 from .map_cache import NpzMapCacheStore

@@ -57,7 +57,9 @@ def plot_belief_sample(
     ax = axes[3]
     ax.set_title("Absolute error")
     abs_err = np.abs(predicted_ore_map - true_ore_map)
-    im = ax.imshow(abs_err.T, origin="lower", vmin=0, cmap="Reds")
+    # vmax matches prediction scale: "light red" and "dark purple" represent the
+    # same numerical value, so the error panel is directly comparable to the others
+    im = ax.imshow(abs_err.T, origin="lower", vmin=0, vmax=vmax, cmap="Reds")
     fig.colorbar(im, ax=ax, fraction=0.046)
 
     fig.tight_layout()

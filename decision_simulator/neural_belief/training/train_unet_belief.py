@@ -23,7 +23,7 @@ from torch.utils.data import DataLoader
 from simulator.map_generator import SimConfig
 from decision_simulator.resources import DecisionSimulationResources
 from ..datasets import BeliefDatasetConfig, GeologicalBeliefDataset
-from ..models.unet_belief import UNetBelief
+from ..models.map_encoders.unet_belief import UNetBelief
 from ..utils import TargetNormalizer
 from ..baselines import evaluate_baselines
 from ..training_utils import (

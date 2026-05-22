@@ -44,7 +44,7 @@ from ..training_utils import (
     save_no_ore_metrics,
     save_val_plots,
 )
-from ..models.map_belief_transformer import MapBeliefConfig, MapBeliefTransformer
+from ..models.map_encoders.map_belief_transformer import MapBeliefConfig, MapBeliefTransformer
 
 
 # ---------------------------------------------------------------------------

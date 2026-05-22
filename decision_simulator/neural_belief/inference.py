@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-from .models.unet_belief import UNetBelief
+from .models.map_encoders.unet_belief import UNetBelief
 from .utils import TargetNormalizer
 
 
