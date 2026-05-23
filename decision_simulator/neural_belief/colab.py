@@ -14,7 +14,7 @@ from decision_simulator.resources import (
     resolve_resource_paths,
 )
 
-from .datasets import build_dataset_from_cache, GeologicalBeliefDataset
+from .datasets import GeologicalBeliefDataset
 from .map_cache import NpzMapCacheStore
 from .models.map_encoders.unet_belief import UNetBelief
 
@@ -34,7 +34,6 @@ from .training import (
     train_map_belief,
     train_end_to_end,
     load_e2e_checkpoint,
-    build_sequential_dataset_from_cache,
 )
 
 _DEBUG_UNET: dict = {
@@ -203,7 +202,7 @@ def train_belief_from_colab(
     # in_channels and latent_dim are derived from the encoder;
     # explicit user overrides take precedence.
     encoder_defaults = {"in_channels": 2 + latent_dim, "latent_dim": latent_dim}
-    cfg = build_training_config(
+    cfg: NeuralBeliefTrainingConfig = build_training_config(
         NeuralBeliefTrainingConfig,
         {**(_DEBUG_UNET if debug else {}), **encoder_defaults, **overrides},
     )
@@ -219,27 +218,14 @@ def train_belief_from_colab(
         resolved_pool_path = root / resolved_pool_path
     store = NpzMapCacheStore(resolved_pool_path)
 
-    train_cache, val_cache = store.load_npz_data(
+    train_cache, val_cache = store.load_map_data(
         n_train_maps=cfg.n_train_maps,
         n_val_maps=cfg.n_val_maps,
         n_orebodies=n_orebodies,
         seed=overrides.get("seed", cfg.seed),
     )
-
-    train_ds = build_dataset_from_cache(
-        train_cache,
-        resources,
-        device,
-        verbose=True,
-        samples_per_map=cfg.samples_per_map,
-    )
-    val_ds = build_dataset_from_cache(
-        val_cache,
-        resources,
-        device,
-        verbose=True,
-        samples_per_map=cfg.val_samples_per_map,
-    )
+    train_ds = train_cache.build_geo_train_maps(resources, device, verbose=True)
+    val_ds = val_cache.build_geo_train_maps(resources, device, verbose=True)
 
     model, _ = train_neural_belief(
         cfg=cfg,
@@ -414,7 +400,7 @@ def compare_belief_encoders_from_colab(
 
     store = NpzMapCacheStore(resolved_pool_path)
 
-    train_cache, val_cache = store.load_npz_data(
+    train_cache, val_cache = store.load_map_data(
         n_train_maps=base_cfg.n_train_maps,
         n_val_maps=base_cfg.n_val_maps,
         n_orebodies=n_orebodies,
@@ -447,10 +433,7 @@ def compare_belief_encoders_from_colab(
                 f"\nBuilding {mode_tag}{shuffle_tag}datasets  borehole_encoder={borehole_encoder} ..."
             )
             if use_sequential_dataset:
-                from .datasets import build_sequential_dataset_from_cache
-
-                train_ds = build_sequential_dataset_from_cache(
-                    train_cache,
+                train_ds = train_cache.build_geo_train_maps(
                     resources,
                     device,
                     n_sequences_per_map=n_sequences_per_map,
@@ -461,8 +444,7 @@ def compare_belief_encoders_from_colab(
                     shuffle_latents=is_shuffled,
                     shuffle_seed=base_cfg.seed,
                 )
-                val_ds = build_sequential_dataset_from_cache(
-                    val_cache,
+                val_ds = val_cache.build_geo_train_maps(
                     resources,
                     device,
                     n_sequences_per_map=n_sequences_per_map,
@@ -474,21 +456,17 @@ def compare_belief_encoders_from_colab(
                     shuffle_seed=base_cfg.seed + 10000,
                 )
             else:
-                train_ds = build_dataset_from_cache(
-                    train_cache,
+                train_ds = train_cache.build_geo_train_maps(
                     resources,
                     device,
                     verbose=True,
-                    samples_per_map=base_cfg.samples_per_map,
                     shuffle_latents=is_shuffled,
                     shuffle_seed=base_cfg.seed,
                 )
-                val_ds = build_dataset_from_cache(
-                    val_cache,
+                val_ds = val_cache.build_geo_train_maps(
                     resources,
                     device,
                     verbose=True,
-                    samples_per_map=base_cfg.val_samples_per_map,
                     shuffle_latents=is_shuffled,
                     shuffle_seed=base_cfg.seed + 10000,
                 )
@@ -787,7 +765,7 @@ def train_sequential_belief_from_colab(
 
     store = NpzMapCacheStore(resolved_pool)
 
-    train_cache, val_cache = store.load_npz_data(
+    train_cache, val_cache = store.load_map_data(
         n_train_maps=effective_n_train,
         n_val_maps=effective_n_val,
         n_orebodies=n_orebodies,
@@ -849,8 +827,7 @@ def train_sequential_belief_from_colab(
         print(f"Training config  :\n{cfg}\n")
 
     print("Building sequential training dataset ...")
-    train_ds = build_sequential_dataset_from_cache(
-        train_cache,
+    train_ds = train_cache.build_geo_train_maps(
         resources,
         device,
         n_sequences_per_map=n_sequences_per_map,
@@ -860,8 +837,7 @@ def train_sequential_belief_from_colab(
         verbose=True,
     )
     print("Building sequential validation dataset ...")
-    val_ds = build_sequential_dataset_from_cache(
-        val_cache,
+    val_ds = val_cache.build_geo_train_maps(
         resources,
         device,
         n_sequences_per_map=n_sequences_per_map,
@@ -1056,7 +1032,7 @@ def train_end_to_end_from_colab(
     store = NpzMapCacheStore(resolved_pool)
     seed = overrides.get("seed", cfg.seed)
 
-    train_cache, val_cache = store.load_npz_data(
+    train_cache, val_cache = store.load_map_data(
         n_train_maps=cfg.n_train_maps,
         n_val_maps=cfg.n_val_maps,
         n_orebodies=n_orebodies,

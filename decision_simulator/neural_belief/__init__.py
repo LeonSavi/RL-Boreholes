@@ -7,10 +7,8 @@ from .models.map_encoders.map_belief_transformer import (
 from .datasets import (
     BeliefDatasetConfig,
     GeologicalBeliefDataset,
-    build_dataset_from_cache,
-    build_sequential_dataset_from_cache,
 )
-from .map_cache import NpzMapCache, NpzMapCacheStore
+from .map_cache import NpzMap, NpzMapCacheStore
 from .utils import TargetNormalizer
 from .training import (
     NeuralBeliefTrainingConfig,
@@ -44,10 +42,8 @@ __all__ = [
     # Dataset
     "BeliefDatasetConfig",
     "GeologicalBeliefDataset",
-    "NpzMapCache",
+    "NpzMap",
     "NpzMapCacheStore",
-    "build_dataset_from_cache",
-    "build_sequential_dataset_from_cache",
     # Utils
     "TargetNormalizer",
     # UNet training

@@ -22,7 +22,7 @@ from torch.utils.data import DataLoader
 
 from .datasets import GeologicalBeliefDataset
 from .utils import TargetNormalizer
-from models.end_to_end.candidate_scoring_transformer import CandidateScoringTransformer
+from .models.end_to_end.candidate_scoring_transformer import CandidateScoringTransformer
 
 # ---------------------------------------------------------------------------
 # Constants

@@ -48,7 +48,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 
 from decision_simulator.resources import DecisionSimulationResources
-from ..map_cache import NpzMapCache
+from ..map_cache import NpzMap
 from ..models.borehole_encoders.autoencoder import standardise
 from ..utils import TargetNormalizer
 from ..models.end_to_end.candidate_scoring_transformer import (
@@ -128,13 +128,13 @@ class E2EDataset(Dataset):
     @classmethod
     def from_cache(
         cls,
-        cache: NpzMapCache,
+        cache: NpzMap,
         resources: DecisionSimulationResources,
         cfg: E2ETrainingConfig,
         verbose: bool = True,
         is_val: bool = False,
     ) -> "E2EDataset":
-        """Build the dataset from a pre-loaded NpzMapCache.
+        """Build the dataset from a pre-loaded NpzMap.
 
         Reads boreholes and ore targets directly from the cache rather than
         generating maps on-the-fly, which avoids the simulator overhead on
@@ -751,7 +751,7 @@ def _save_e2e_val_plots(
     plot_dir: Path,
     device: str,
     cfg: E2ETrainingConfig,
-    val_cache: NpzMapCache | None = None,
+    val_cache: NpzMap | None = None,
 ) -> None:
     """Save validation plots to a timestamped subdir under plot_dir.
 

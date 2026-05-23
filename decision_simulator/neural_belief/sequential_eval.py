@@ -1,7 +1,7 @@
 """Sequential evaluation utilities for belief models trained with ordered drill prefixes.
 
 Functions in this module require ``GeologicalBeliefDataset.metadata`` to be set,
-which is the case for datasets built by ``build_sequential_dataset_from_cache``.
+which is the case for datasets built by ``NpzMap.build_geo_train_maps``.
 They fall back gracefully (empty dict / delegate to ``save_val_plots``) when
 metadata is absent, so they are safe to call on non-sequential datasets.
 """

@@ -56,7 +56,6 @@ from ..training_utils import (
     save_checkpoint_model,
 )
 from ..sequential_eval import validate_by_step, save_sequential_val_plots
-from ..datasets import build_sequential_dataset_from_cache
 
 __all__ = [
     # UNet pipeline
@@ -89,5 +88,4 @@ __all__ = [
     # Sequential evaluation
     "validate_by_step",
     "save_sequential_val_plots",
-    "build_sequential_dataset_from_cache",
 ]
