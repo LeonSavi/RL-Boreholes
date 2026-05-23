@@ -22,7 +22,6 @@ from torch.utils.data import DataLoader
 
 from .datasets import GeologicalBeliefDataset
 from .utils import TargetNormalizer
-from .models.end_to_end.candidate_scoring_transformer import CandidateScoringTransformer
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -399,43 +398,3 @@ def save_val_plots(
     print(f"  plots saved -> {plot_dir}")
 
 
-def load_jepa_backbone_weights(
-    model: CandidateScoringTransformer,
-    jepa_path: str,
-    device: str,
-    verbose: bool,
-) -> CandidateScoringTransformer:
-    """Copy CNN backbone weights from a JEPA checkpoint into the borehole encoder.
-
-    Only the convolutional layers are transferred; the transformer and
-    projection layers of the new encoder are left randomly initialised since
-    the JEPA predictor architecture differs.
-    """
-
-    try:
-        ckpt = torch.load(jepa_path, map_location=device, weights_only=False)
-        jepa_state = ckpt.get("context_encoder", ckpt.get("state_dict", ckpt))
-
-        target_state = model.bh_encoder.state_dict()
-        transferred = 0
-        for name, param in jepa_state.items():
-            # JEPA stores backbone weights under "backbone.conv.*"
-            if name.startswith("backbone.conv."):
-                new_name = "conv." + name[len("backbone.conv.") :]
-                if (
-                    new_name in target_state
-                    and target_state[new_name].shape == param.shape
-                ):
-                    target_state[new_name].copy_(param)
-                    transferred += 1
-
-        model.bh_encoder.load_state_dict(target_state)
-        if verbose:
-            print(
-                f"  JEPA init     : transferred {transferred} conv layer weight tensors"
-            )
-    except Exception as exc:
-        if verbose:
-            print(f"  JEPA init     : FAILED ({exc}) — continuing with random init")
-
-    return model

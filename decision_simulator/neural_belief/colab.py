@@ -23,8 +23,8 @@ from .map_cache import NpzMapCacheStore
 from .training import (
     NeuralBeliefTrainingConfig,
     MapBeliefTrainingConfig,
-    E2ETrainingConfig,
-    E2EDataset,
+    E2EMapBeliefTrainingConfig,
+    E2EMapDataset,
     build_training_config,
     export_history,
     save_experiment_config,
@@ -32,8 +32,8 @@ from .training import (
     load_map_belief_checkpoint,
     train_neural_belief,
     train_map_belief,
-    train_end_to_end,
-    load_e2e_checkpoint,
+    train_end_to_end_map_belief,
+    load_e2e_map_belief_checkpoint,
 )
 
 _DEBUG_UNET: dict = {
@@ -65,14 +65,13 @@ _DEBUG_MAP: dict = {
 _DEBUG_E2E: dict = {
     "n_train_maps": 2,
     "samples_per_map": 4,
-    "candidates_per_sample": 1,
     "n_val_maps": 1,
     "val_samples_per_map": 4,
     "n_epochs": 2,
-    "batch_size": 4,
+    "batch_size": 2,
     "d_model": 64,
     "n_heads": 4,
-    "n_layers": 1,
+    "n_encoder_layers": 1,
     "d_ff": 128,
     "head_hidden_dim": 32,
     "bh_d_model": 32,
@@ -897,59 +896,34 @@ def train_end_to_end_from_colab(
     prefix_steps: list[int] | None = None,
     **overrides,
 ) -> tuple[object, list[dict]]:
-    """Train the end-to-end candidate scoring transformer from a Colab notebook.
+    """Train the end-to-end map belief transformer from a Colab notebook.
 
-    Unlike the other belief models, this model trains its own borehole encoder
-    jointly with the candidate scoring transformer.  No pre-trained JEPA or
-    autoencoder weights are required.  The ``norm_stats_from`` parameter
-    controls which checkpoint's per-variable normalization statistics are used
-    to standardise raw borehole inputs before they reach the end-to-end encoder.
+    Trains EndToEndMapBeliefTransformer with a full-map MSE reconstruction
+    objective.  The borehole encoder and map belief transformer are trained
+    jointly from scratch — no pre-trained JEPA or autoencoder weights are
+    required.  The ``norm_stats_from`` parameter controls which checkpoint's
+    per-variable normalization statistics are used to standardise raw borehole
+    inputs.
 
     Example
     -------
     >>> from decision_simulator.neural_belief.colab import train_end_to_end_from_colab
 
-    # Default: use JEPA norm stats, train encoder from scratch
+    # Default: use JEPA norm stats, train from scratch
     >>> model, history = train_end_to_end_from_colab(
     ...     storage_root="/content/drive/MyDrive/thesis",
-    ...     checkpoint_dir="checkpoints/e2e",
+    ...     checkpoint_dir="checkpoints/e2e_map",
     ...     device="cuda",
     ...     debug=True,
-    ... )
-
-    # Variant A: no borehole encoder (position + ore only)
-    >>> model, history = train_end_to_end_from_colab(
-    ...     storage_root="/content/drive/MyDrive/thesis",
-    ...     checkpoint_dir="checkpoints/e2e_no_encoder",
-    ...     device="cuda",
-    ...     latent_dim=0,
-    ...     bh_n_layers=0,
-    ... )
-
-    # Variant C: shuffled boreholes sanity check
-    >>> model, history = train_end_to_end_from_colab(
-    ...     storage_root="/content/drive/MyDrive/thesis",
-    ...     checkpoint_dir="checkpoints/e2e_shuffled",
-    ...     device="cuda",
-    ...     shuffle_boreholes=True,
-    ... )
-
-    # Variant D: initialise borehole encoder from JEPA weights
-    >>> model, history = train_end_to_end_from_colab(
-    ...     storage_root="/content/drive/MyDrive/thesis",
-    ...     checkpoint_dir="checkpoints/e2e_jepa_init",
-    ...     device="cuda",
-    ...     pretrained_bh_encoder_path="/content/drive/MyDrive/thesis/checkpoints/jepa.pt",
     ... )
 
     Parameters
     ----------
     storage_root
-        Absolute root for all data and checkpoint paths, e.g.
-        ``"/content/drive/MyDrive/thesis"``.  All relative paths are resolved
-        against this directory.
+        Absolute root for all data and checkpoint paths.  Relative paths are
+        resolved against this directory.
     checkpoint_dir
-        Where ``e2e_best.pt``, ``e2e_last.pt``, and
+        Where ``e2e_map_belief_best.pt``, ``e2e_map_belief_last.pt``, and
         ``training_history.{json,csv}`` are saved.  Relative paths are
         resolved against ``storage_root``.
     device
@@ -960,24 +934,22 @@ def train_end_to_end_from_colab(
         verify the full pipeline end-to-end without a full training run.
     norm_stats_from
         Which encoder checkpoint to load per-variable normalization statistics
-        from.  The encoder itself is NOT used — the end-to-end model always
-        trains its own borehole encoder from scratch.
+        from.  The encoder itself is NOT used.
 
         ``"jepa"``        — JEPA checkpoint norm stats (recommended)
         ``"autoencoder"`` — Autoencoder checkpoint norm stats
         ``"none"``        — skip normalization (raw geological values)
     **overrides
-        Any field of :class:`E2ETrainingConfig` by name.  Common overrides:
+        Any field of :class:`E2EMapBeliefTrainingConfig` by name.  Common
+        overrides:
 
         * ``n_epochs=100`` — train longer
-        * ``latent_dim=0, bh_n_layers=0`` — variant A: no encoder
-        * ``shuffle_boreholes=True`` — variant C: sanity check
-        * ``pretrained_bh_encoder_path="..."`` — variant D: JEPA init
         * ``use_false_positive_penalty=True`` — penalise false positives
+        * ``batch_size=4`` — reduce if GPU memory is tight
 
     Returns
     -------
-    tuple[CandidateScoringTransformer, list[dict]]
+    tuple[EndToEndMapBeliefTransformer, list[dict]]
         ``(model, history)`` — the trained model loaded with its best weights,
         and the per-epoch training history.
     """
@@ -1000,10 +972,9 @@ def train_end_to_end_from_colab(
     if not resolved_pool.is_absolute():
         resolved_pool = root / resolved_pool
 
-    # Load resources for norm stats only — the borehole encoder inside resources
-    # is not used; the e2e model trains its own encoder from scratch.
     print(
-        f"\nLoading norm stats from '{norm_stats_from}' checkpoint (encoder is not used by e2e model) …"
+        f"\nLoading norm stats from '{norm_stats_from}' checkpoint "
+        "(encoder is not used — model trains its own borehole encoder) …"
     )
     resources, _ = load_decision_resources(
         borehole_encoder=norm_stats_from,
@@ -1024,7 +995,7 @@ def train_end_to_end_from_colab(
         }
 
     cfg = build_training_config(
-        E2ETrainingConfig,
+        E2EMapBeliefTrainingConfig,
         {**(_DEBUG_E2E if debug else {}), **overrides, **seq_overrides},
     )
 
@@ -1039,30 +1010,31 @@ def train_end_to_end_from_colab(
         seed=seed,
     )
 
+    cfg.n_x = train_cache.n_x
+    cfg.n_y = train_cache.n_y
+
     print(f"\nnorm_stats_from  : {norm_stats_from}")
     print(f"map_pool_path    : {resolved_pool}")
     print(f"n_orebodies      : {n_orebodies}")
     print(f"n_train_maps     : {cfg.n_train_maps}  n_val_maps: {cfg.n_val_maps}")
-    print(f"latent_dim       : {cfg.latent_dim}  (0 = no encoder, variant A)")
+    print(f"latent_dim       : {cfg.latent_dim}")
+    print(f"grid             : {cfg.n_x} × {cfg.n_y}")
     print(f"sequential       : {cfg.use_sequential_dataset}")
     if cfg.use_sequential_dataset:
         print(f"n_sequences      : {cfg.n_sequences_per_map}")
         print(f"prefix_steps     : {cfg.prefix_steps}")
-    print(f"shuffle_boreholes: {cfg.shuffle_boreholes}")
-    if cfg.pretrained_bh_encoder_path:
-        print(f"JEPA init        : {cfg.pretrained_bh_encoder_path}")
     print(f"Training config  :\n{cfg}\n")
 
     print("Building training dataset ...")
-    train_ds = E2EDataset.from_cache(
+    train_ds = E2EMapDataset.from_cache(
         train_cache, resources, cfg, verbose=True, is_val=False
     )
     print("Building validation dataset ...")
-    val_ds = E2EDataset.from_cache(val_cache, resources, cfg, verbose=True, is_val=True)
-    cfg.n_x = train_cache.n_x
-    cfg.n_y = train_cache.n_y
+    val_ds = E2EMapDataset.from_cache(
+        val_cache, resources, cfg, verbose=True, is_val=True
+    )
 
-    model, _ = train_end_to_end(
+    model, _ = train_end_to_end_map_belief(
         resources=resources,
         cfg=cfg,
         device=device,
@@ -1074,7 +1046,9 @@ def train_end_to_end_from_colab(
     )
 
     # Smoke test: verify the saved checkpoint loads cleanly.
-    _, _, _, history = load_e2e_checkpoint(ckpt_dir / "e2e_best.pt", device=device)
+    _, _, _, history = load_e2e_map_belief_checkpoint(
+        ckpt_dir / "e2e_map_belief_best.pt", device=device
+    )
     print(
         f"\nSmoke test passed: checkpoint loaded with {len(history)} epoch(s) of history."
     )

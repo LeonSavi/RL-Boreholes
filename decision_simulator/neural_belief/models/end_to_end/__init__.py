@@ -1,13 +1,15 @@
-"""End-to-end candidate scoring model — public API."""
+"""End-to-end map belief model — public API."""
 
-from .candidate_scoring_transformer import (
+from .end_to_end_map_belief_transformer import (
     E2EConfig,
     BoreholeTransformerEncoder,
-    CandidateScoringTransformer,
+    EndToEndMapBeliefConfig,
+    EndToEndMapBeliefTransformer,
 )
 
 __all__ = [
     "E2EConfig",
     "BoreholeTransformerEncoder",
-    "CandidateScoringTransformer",
+    "EndToEndMapBeliefConfig",
+    "EndToEndMapBeliefTransformer",
 ]

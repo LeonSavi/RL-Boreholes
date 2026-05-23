@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from ..models.map_encoders.map_belief_transformer import MapBeliefConfig
-from ..models.end_to_end.candidate_scoring_transformer import E2EConfig
+from ..models.end_to_end.end_to_end_map_belief_transformer import EndToEndMapBeliefConfig
 
 
 @dataclass
@@ -154,23 +154,24 @@ class MapBeliefTrainingConfig:
 
 
 @dataclass
-class E2ETrainingConfig:
-    """Hyperparameters for training the end-to-end candidate scoring model."""
+class E2EMapBeliefTrainingConfig:
+    """Hyperparameters for training EndToEndMapBeliefTransformer.
+
+    Combines the raw-borehole dataset fields from E2ETrainingConfig with the
+    map-reconstruction objective and transformer architecture from
+    MapBeliefTrainingConfig.  The model is trained end-to-end to reconstruct
+    the full ore map, not a single candidate value.
+    """
 
     # Dataset
     n_train_maps: int = 50
     samples_per_map: int = 20
-    candidates_per_sample: int = (
-        1  # candidates sampled per (map, drilling-history) pair
-    )
-    n_val_maps: int = 30
+    n_val_maps: int = 10
     val_samples_per_map: int = 10
     min_drills: int = 1
     max_drills: int = 15
 
-    # Sequential dataset mode: ordered drill sequences at fixed prefix lengths.
-    # Mirrors the real exploration setting where each drill informs the next.
-    # When False (default), K drills are sampled randomly from [min_drills, max_drills].
+    # Sequential dataset mode: ordered drill sequences at fixed prefix lengths
     use_sequential_dataset: bool = False
     n_sequences_per_map: int = 3
     prefix_steps: list[int] = field(default_factory=lambda: [1, 2, 3, 5, 8, 10, 15])
@@ -179,48 +180,44 @@ class E2ETrainingConfig:
     n_variables: int = 5
     n_depth: int = 440
 
-    # Borehole encoder architecture
+    # Borehole encoder architecture (mirrors E2EConfig)
     bh_channels: tuple[int, ...] = field(default_factory=lambda: (32, 64, 128, 256))
     bh_d_model: int = 128
     bh_n_heads: int = 4
     bh_n_layers: int = 2
     latent_dim: int = 128
 
-    # Candidate scoring transformer architecture
-    d_model: int = 256
-    n_heads: int = 8
-    n_layers: int = 4
-    d_ff: int = 1024
-    dropout: float = 0.1
-    head_hidden_dim: int = 128
-
-    # Positional encoding
-    pe_max_freq: float = 10000.0
-
-    # Optimisation
-    batch_size: int = 32
-    lr: float = 1e-4
-    weight_decay: float = 1e-4
-    n_epochs: int = 50
-    norm_mode: str = "log1p"  # "log1p" | "zscore" | "none"
-    grad_clip_norm: float = 1.0  # 0.0 = disabled
-
-    # False-positive penalty: penalise high predictions where true ore = 0
-    use_false_positive_penalty: bool = False
-    false_positive_weight: float = 0.1
-    fp_threshold: float = 1e-3  # ore values below this are treated as "no ore"
-
-    # Experiment controls
-    shuffle_boreholes: bool = False  # variant C sanity check
-    pretrained_bh_encoder_path: str | None = None  # variant D: JEPA init
-
-    # Grid dimensions — set automatically from cache in train_end_to_end()
+    # Spatial grid — set automatically from cache in train_end_to_end_map_belief()
     n_x: int = 32
     n_y: int = 32
 
+    # Map belief transformer architecture (mirrors MapBeliefConfig)
+    d_model: int = 256
+    n_heads: int = 8
+    n_encoder_layers: int = 4
+    d_ff: int = 1024
+    dropout: float = 0.1
+    head_hidden_dim: int = 128
+    pe_max_freq: float = 10000.0
+
+    # Target normalisation
+    norm_mode: str = "log1p"  # "log1p" | "zscore" | "none"
+
+    # Optimisation — smaller batch than E2E because the map transformer is memory-heavy
+    batch_size: int = 8
+    lr: float = 1e-4
+    weight_decay: float = 1e-4
+    n_epochs: int = 50
+    grad_clip_norm: float = 1.0  # 0.0 = disabled
+
+    # False-positive penalty
+    use_false_positive_penalty: bool = False
+    false_positive_weight: float = 0.1
+    false_positive_threshold: float = 0.05
+
     # Misc
     seed: int = 42
-    borehole_encoder: str = "end_to_end"  # informational; stored in checkpoint
+    borehole_encoder: str = "end_to_end"
     n_val_plots: int = 20
 
     def __post_init__(self) -> None:
@@ -229,9 +226,9 @@ class E2ETrainingConfig:
                 f"d_model={self.d_model} must be divisible by n_heads={self.n_heads}"
             )
 
-    def to_model_config(self) -> E2EConfig:
-        """Build an E2EConfig from the architectural fields of this dataclass."""
-        return E2EConfig(
+    def to_model_config(self) -> EndToEndMapBeliefConfig:
+        """Build an EndToEndMapBeliefConfig from the architectural fields."""
+        return EndToEndMapBeliefConfig(
             n_variables=self.n_variables,
             n_depth=self.n_depth,
             bh_channels=self.bh_channels,
@@ -239,9 +236,11 @@ class E2ETrainingConfig:
             bh_n_heads=self.bh_n_heads,
             bh_n_layers=self.bh_n_layers,
             latent_dim=self.latent_dim,
+            n_x=self.n_x,
+            n_y=self.n_y,
             d_model=self.d_model,
             n_heads=self.n_heads,
-            n_layers=self.n_layers,
+            n_encoder_layers=self.n_encoder_layers,
             d_ff=self.d_ff,
             dropout=self.dropout,
             head_hidden_dim=self.head_hidden_dim,
