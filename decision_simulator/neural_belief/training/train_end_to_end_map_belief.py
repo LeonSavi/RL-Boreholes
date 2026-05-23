@@ -162,7 +162,7 @@ class E2EMapDataset(Dataset):
 
             target_ore = cache.targets[map_idx]  # (n_x, n_y) float32
 
-            def _append(chosen_idx: np.ndarray) -> None:
+            def _append(chosen_idx: np.ndarray, sequence_id: int = 0) -> None:
                 drill_locs = [all_locations[k] for k in chosen_idx]
                 K = len(drill_locs)
                 drill_bhs = np.stack(
@@ -182,16 +182,17 @@ class E2EMapDataset(Dataset):
                         "target_map": target_ore.copy(),
                         "drill_count": K,
                         "map_idx": map_idx,
+                        "sequence_id": sequence_id,
                     }
                 )
 
             if cfg.use_sequential_dataset:
-                for _ in range(cfg.n_sequences_per_map):
+                for seq_id in range(cfg.n_sequences_per_map):
                     sequence = rng.permutation(all_idx)
                     for step in cfg.prefix_steps:
                         if step >= len(all_locations):
                             continue
-                        _append(sequence[:step])
+                        _append(sequence[:step], sequence_id=seq_id)
             else:
                 for _ in range(spm):
                     n_drills = int(rng.integers(cfg.min_drills, cfg.max_drills + 1))
@@ -508,6 +509,158 @@ def _save_e2e_map_val_plots(
     print(f"  plots saved -> {out_dir}")
 
 
+def _save_e2e_map_sequential_val_plots(
+    model: EndToEndMapBeliefTransformer,
+    val_ds: E2EMapDataset,
+    normalizer: TargetNormalizer,
+    plot_dir: Path,
+    device: str,
+    n_sequences: int = 3,
+) -> None:
+    """Save per-step belief-evolution plots for sequential validation sequences.
+
+    For each selected (map, sequence) pair, saves:
+    * individual PNGs per step: ``step_001.png``, ``step_003.png``, …
+    * a combined ``evolution.png`` grid (rows=steps, cols=4 panels)
+
+    Falls back to ``_save_e2e_map_val_plots`` when ``sequence_id`` is not
+    present in the dataset samples (i.e. non-sequential datasets).
+    """
+    if not val_ds.samples or "sequence_id" not in val_ds.samples[0]:
+        _save_e2e_map_val_plots(model, val_ds, normalizer, plot_dir, device, n_plots=n_sequences)
+        return
+
+    import datetime
+    from collections import defaultdict
+
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from ..visualize import plot_belief_sample
+
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    base_dir = Path(plot_dir) / timestamp
+    base_dir.mkdir(parents=True, exist_ok=True)
+
+    # Group sample indices by (map_idx, sequence_id)
+    groups: dict[tuple[int, int], list[tuple[int, int]]] = defaultdict(list)
+    for idx, s in enumerate(val_ds.samples):
+        key = (int(s["map_idx"]), int(s["sequence_id"]))
+        groups[key].append((int(s["drill_count"]), idx))
+
+    for key in groups:
+        groups[key].sort(key=lambda x: x[0])
+
+    all_keys = list(groups.keys())
+    n_select = min(n_sequences, len(all_keys))
+    sel_indices = np.linspace(0, len(all_keys) - 1, n_select, dtype=int)
+    selected_keys = [all_keys[i] for i in sel_indices]
+
+    model.eval()
+
+    for map_idx, seq_id in selected_keys:
+        seq_dir = base_dir / f"seq_{map_idx:04d}_{seq_id:02d}"
+        seq_dir.mkdir(parents=True, exist_ok=True)
+
+        step_pairs = groups[(map_idx, seq_id)]  # [(step, sample_idx), ...]
+        n_steps = len(step_pairs)
+
+        panel_rows: list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = []
+
+        for step, sample_idx in step_pairs:
+            sample = val_ds.samples[sample_idx]
+
+            bh = torch.from_numpy(sample["boreholes"]).unsqueeze(0).to(device)
+            ov = torch.from_numpy(sample["ore_vals"]).unsqueeze(0).to(device)
+            pos = torch.from_numpy(sample["positions"]).unsqueeze(0).to(device)
+
+            with torch.no_grad():
+                pred_norm = model(bh, ov, pos)
+            pred_ore = normalizer.inverse(pred_norm.squeeze().cpu().numpy())
+
+            n_x, n_y = sample["target_map"].shape
+            sparse_ore = np.zeros((n_x, n_y), dtype=np.float32)
+            obs_mask = np.zeros((n_x, n_y), dtype=np.float32)
+            for (px, py), ov_val in zip(sample["positions"], sample["ore_vals"]):
+                i = int(round(float(px) * (n_x - 1)))
+                j = int(round(float(py) * (n_y - 1)))
+                sparse_ore[i, j] = float(ov_val)
+                obs_mask[i, j] = 1.0
+
+            true_ore = normalizer.inverse(sample["target_map"])
+
+            plot_belief_sample(
+                sparse_ore_map=sparse_ore,
+                observation_mask=obs_mask,
+                true_ore_map=true_ore,
+                predicted_ore_map=pred_ore,
+                save_path=seq_dir / f"step_{step:03d}.png",
+                title=f"Map {map_idx} / Seq {seq_id} / Step {step} ({step} drills)",
+                timestamp=timestamp,
+            )
+
+            panel_rows.append((sparse_ore, obs_mask, true_ore, pred_ore))
+
+        # Single colour scale across all steps for direct comparability
+        global_vmax = max(float(max(t.max(), p.max())) for _, _, t, p in panel_rows)
+        global_vmax = max(global_vmax, 1e-3)
+
+        fig, axes = plt.subplots(n_steps, 4, figsize=(18, 4 * n_steps))
+        if n_steps == 1:
+            axes = axes[np.newaxis, :]
+
+        fig.suptitle(
+            f"Belief evolution — Map {map_idx} / Seq {seq_id}"
+            f"  (colour scale max = {global_vmax:.3f})",
+            fontsize=12,
+        )
+
+        col_titles = ["Observations", "True ore map", "Predicted ore map", "Abs error"]
+        for col, title in enumerate(col_titles):
+            axes[0, col].set_title(title, fontsize=10)
+
+        for row_idx, ((step, _), (sparse_ore, obs_mask, true_ore, pred_ore)) in enumerate(
+            zip(step_pairs, panel_rows)
+        ):
+            kw = dict(origin="lower", cmap="viridis", vmin=0, vmax=global_vmax)
+            drill_rows, drill_cols = np.where(obs_mask > 0)
+
+            ax = axes[row_idx, 0]
+            ax.imshow(sparse_ore.T, **kw)
+            ax.scatter(drill_rows, drill_cols, c="red", s=8, marker="x", linewidths=0.6)
+            ax.set_ylabel(f"step {step}", fontsize=9)
+            ax.set_xticks([])
+            ax.set_yticks([])
+
+            ax = axes[row_idx, 1]
+            ax.imshow(true_ore.T, **kw)
+            ax.set_xticks([])
+            ax.set_yticks([])
+
+            ax = axes[row_idx, 2]
+            im_pred = ax.imshow(pred_ore.T, **kw)
+            ax.set_xticks([])
+            ax.set_yticks([])
+
+            ax = axes[row_idx, 3]
+            abs_err = np.abs(pred_ore - true_ore)
+            im_err = ax.imshow(abs_err.T, origin="lower", vmin=0, vmax=global_vmax, cmap="Reds")
+            ax.set_xlabel(f"max err = {abs_err.max():.3f}", fontsize=7)
+            ax.set_xticks([])
+            ax.set_yticks([])
+
+        fig.colorbar(im_pred, ax=axes[:, 2], shrink=0.6, label="ore value")
+        fig.colorbar(im_err, ax=axes[:, 3], shrink=0.6, label="abs error")
+        fig.tight_layout()
+
+        evo_path = seq_dir / "evolution.png"
+        fig.savefig(evo_path, dpi=100, bbox_inches="tight")
+        plt.close(fig)
+
+    print(f"  sequential plots -> {base_dir}")
+
+
 # ---------------------------------------------------------------------------
 # Main training function
 # ---------------------------------------------------------------------------
@@ -613,6 +766,9 @@ def train_end_to_end_map_belief(
     # ---- training loop -------------------------------------------------------
     history: list[dict] = []
     best_val_mse = float("inf")
+    best_epoch = 0
+    patience_counter = 0
+    epoch = 0  # defined here so it is accessible after a potential early-stop break
 
     for epoch in range(1, cfg.n_epochs + 1):
         model.train()
@@ -659,8 +815,10 @@ def train_end_to_end_map_belief(
                 f"  val_corr={val_metrics['val_corr']:.4f}"
             )
 
-        if val_metrics["val_mse"] < best_val_mse:
+        if val_metrics["val_mse"] < best_val_mse - cfg.min_delta:
             best_val_mse = val_metrics["val_mse"]
+            best_epoch = epoch
+            patience_counter = 0
             save_checkpoint_model(
                 checkpoint_dir / "e2e_map_belief_best.pt",
                 model,
@@ -673,12 +831,22 @@ def train_end_to_end_map_belief(
                 n_y=cfg.n_y,
                 latent_dim=cfg.latent_dim,
             )
+        else:
+            patience_counter += 1
+
+        if cfg.early_stopping and patience_counter >= cfg.patience:
+            if verbose:
+                print(
+                    f"\nEarly stopping triggered at epoch {epoch}. "
+                    f"Best val MSE: {best_val_mse:.4f} at epoch {best_epoch}."
+                )
+            break
 
     save_checkpoint_model(
         checkpoint_dir / "e2e_map_belief_last.pt",
         model,
         cfg,
-        cfg.n_epochs,
+        epoch,
         history,
         normalizer,
         model_cfg=model_cfg,
@@ -753,15 +921,19 @@ def train_end_to_end_map_belief(
     # ---- optional validation plots ------------------------------------------
     if plot_dir is not None:
         Path(plot_dir).mkdir(parents=True, exist_ok=True)
-        _save_e2e_map_val_plots(
-            model, val_ds, normalizer, plot_dir, device, n_plots=cfg.n_val_plots
-        )
+        if cfg.use_sequential_dataset:
+            _save_e2e_map_sequential_val_plots(
+                model, val_ds, normalizer, plot_dir, device, n_sequences=cfg.n_val_plots
+            )
+        else:
+            _save_e2e_map_val_plots(
+                model, val_ds, normalizer, plot_dir, device, n_plots=cfg.n_val_plots
+            )
 
     if verbose:
-        best_row = min(history, key=lambda r: r["val_mse"])
         print(
             f"\nTraining complete.  Best val MSE: {best_val_mse:.4f}"
-            f"  (epoch {best_row['epoch']})"
+            f"  (epoch {best_epoch}/{cfg.n_epochs})"
         )
         print(f"  checkpoints -> {checkpoint_dir}")
 

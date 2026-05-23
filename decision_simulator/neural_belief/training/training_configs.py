@@ -196,7 +196,7 @@ class E2EMapBeliefTrainingConfig:
     n_heads: int = 8
     n_encoder_layers: int = 4
     d_ff: int = 1024
-    dropout: float = 0.1
+    dropout: float = 0.20
     head_hidden_dim: int = 128
     pe_max_freq: float = 10000.0
 
@@ -209,6 +209,11 @@ class E2EMapBeliefTrainingConfig:
     weight_decay: float = 1e-4
     n_epochs: int = 50
     grad_clip_norm: float = 1.0  # 0.0 = disabled
+
+    # Early stopping
+    early_stopping: bool = True
+    patience: int = 10
+    min_delta: float = 0.0
 
     # False-positive penalty
     use_false_positive_penalty: bool = False
