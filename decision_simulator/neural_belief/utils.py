@@ -45,7 +45,9 @@ class LatentPCAReducer:
 
     @property
     def n_output_components(self) -> int:
-        return int(self._pca.n_components_) if self._pca is not None else self.n_components
+        return (
+            int(self._pca.n_components_) if self._pca is not None else self.n_components
+        )
 
     @property
     def explained_variance_ratio(self) -> np.ndarray | None:
@@ -74,7 +76,7 @@ class TargetNormalizer:
 
     mode: str = "log1p"
     mean: float = 0.0  # fitted; used by zscore only
-    std: float = 1.0   # fitted; used by zscore only
+    std: float = 1.0  # fitted; used by zscore only
 
     def fit(self, values: np.ndarray) -> "TargetNormalizer":
         """Fit statistics from any array of raw ore values."""
@@ -215,9 +217,9 @@ def build_sample_input(
 
     return np.concatenate(
         [
-            sparse_ore[np.newaxis],        # (1, n_x, n_y)
-            mask[np.newaxis],              # (1, n_x, n_y)
-            jepa_map.transpose(2, 0, 1),   # (latent_dim, n_x, n_y)
+            sparse_ore[np.newaxis],  # (1, n_x, n_y)
+            mask[np.newaxis],  # (1, n_x, n_y)
+            jepa_map.transpose(2, 0, 1),  # (latent_dim, n_x, n_y)
         ],
         axis=0,
     )  # (2 + latent_dim, n_x, n_y)

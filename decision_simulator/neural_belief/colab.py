@@ -14,7 +14,7 @@ from decision_simulator.resources import (
     resolve_resource_paths,
 )
 
-from .datasets import build_dataset_from_cache
+from .datasets import build_dataset_from_cache, GeologicalBeliefDataset
 from .map_cache import NpzMapCacheStore
 from .models.map_encoders.unet_belief import UNetBelief
 
@@ -24,33 +24,61 @@ from .training import (
     NeuralBeliefTrainingConfig,
     MapBeliefTrainingConfig,
     E2ETrainingConfig,
+    E2EDataset,
     build_training_config,
     export_history,
+    save_experiment_config,
     load_belief_checkpoint,
     load_map_belief_checkpoint,
-    save_experiment_config,
     train_neural_belief,
     train_map_belief,
     train_end_to_end,
     load_e2e_checkpoint,
+    build_sequential_dataset_from_cache,
 )
 
 _DEBUG_UNET: dict = {
-    "n_train_maps": 2, "samples_per_map": 2, "n_val_maps": 1,
-    "val_samples_per_map": 2, "n_epochs": 2, "batch_size": 2,
-    "base_channels": 16, "n_sequences_per_map": 2, "prefix_steps": [1, 3, 5],
+    "n_train_maps": 2,
+    "samples_per_map": 2,
+    "n_val_maps": 1,
+    "val_samples_per_map": 2,
+    "n_epochs": 2,
+    "batch_size": 2,
+    "base_channels": 16,
+    "n_sequences_per_map": 2,
+    "prefix_steps": [1, 3, 5],
 }
 _DEBUG_MAP: dict = {
-    "n_train_maps": 2, "samples_per_map": 2, "n_val_maps": 1,
-    "val_samples_per_map": 2, "n_epochs": 2, "batch_size": 2,
-    "d_model": 64, "n_heads": 4, "n_encoder_layers": 1, "d_ff": 128,
-    "head_hidden_dim": 32, "n_sequences_per_map": 2, "prefix_steps": [1, 3, 5],
+    "n_train_maps": 2,
+    "samples_per_map": 2,
+    "n_val_maps": 1,
+    "val_samples_per_map": 2,
+    "n_epochs": 2,
+    "batch_size": 2,
+    "d_model": 64,
+    "n_heads": 4,
+    "n_encoder_layers": 1,
+    "d_ff": 128,
+    "head_hidden_dim": 32,
+    "n_sequences_per_map": 2,
+    "prefix_steps": [1, 3, 5],
 }
 _DEBUG_E2E: dict = {
-    "n_train_maps": 2, "samples_per_map": 4, "candidates_per_sample": 1,
-    "n_val_maps": 1, "val_samples_per_map": 4, "n_epochs": 2, "batch_size": 4,
-    "d_model": 64, "n_heads": 4, "n_layers": 1, "d_ff": 128,
-    "head_hidden_dim": 32, "bh_d_model": 32, "bh_n_heads": 4, "bh_n_layers": 1,
+    "n_train_maps": 2,
+    "samples_per_map": 4,
+    "candidates_per_sample": 1,
+    "n_val_maps": 1,
+    "val_samples_per_map": 4,
+    "n_epochs": 2,
+    "batch_size": 4,
+    "d_model": 64,
+    "n_heads": 4,
+    "n_layers": 1,
+    "d_ff": 128,
+    "head_hidden_dim": 32,
+    "bh_d_model": 32,
+    "bh_n_heads": 4,
+    "bh_n_layers": 1,
     "latent_dim": 32,
 }
 
@@ -61,7 +89,6 @@ _UNET_ONLY_OVERRIDE_FIELDS = frozenset(
         "in_channels",
         "base_channels",
         "use_latent_pca",
-        "latent_pca_components",
         "use_coordinate_channels",
     }
 )
@@ -70,10 +97,12 @@ _UNET_ONLY_OVERRIDE_FIELDS = frozenset(
 def train_belief_from_colab(
     storage_root: str | Path,
     checkpoint_dir: str | Path,
+    map_pool_path: str | Path = "data/train_maps",
     device: str = "cuda",
     debug: bool = False,
     borehole_encoder: Literal["jepa", "autoencoder", "none"] = "jepa",
     plot_dir: str | Path | None = None,
+    n_orebodies: int | None = None,
     **overrides,
 ) -> tuple[UNetBelief, list[dict]]:
     """Train the neural geological belief updater from a Colab notebook.
@@ -174,7 +203,10 @@ def train_belief_from_colab(
     # in_channels and latent_dim are derived from the encoder;
     # explicit user overrides take precedence.
     encoder_defaults = {"in_channels": 2 + latent_dim, "latent_dim": latent_dim}
-    cfg = build_training_config(NeuralBeliefTrainingConfig, {**(_DEBUG_UNET if debug else {}), **encoder_defaults, **overrides})
+    cfg = build_training_config(
+        NeuralBeliefTrainingConfig,
+        {**(_DEBUG_UNET if debug else {}), **encoder_defaults, **overrides},
+    )
     cfg.borehole_encoder = borehole_encoder
 
     print(f"\nborehole_encoder : {borehole_encoder}")
@@ -182,13 +214,41 @@ def train_belief_from_colab(
     print(f"in_channels      : {cfg.in_channels}")
     print(f"Training config  :\n{cfg}\n")
 
+    resolved_pool_path = Path(map_pool_path)
+    if not resolved_pool_path.is_absolute():
+        resolved_pool_path = root / resolved_pool_path
+    store = NpzMapCacheStore(resolved_pool_path)
+
+    train_cache, val_cache = store.load_npz_data(
+        n_train_maps=cfg.n_train_maps,
+        n_val_maps=cfg.n_val_maps,
+        n_orebodies=n_orebodies,
+        seed=overrides.get("seed", cfg.seed),
+    )
+
+    train_ds = build_dataset_from_cache(
+        train_cache,
+        resources,
+        device,
+        verbose=True,
+        samples_per_map=cfg.samples_per_map,
+    )
+    val_ds = build_dataset_from_cache(
+        val_cache,
+        resources,
+        device,
+        verbose=True,
+        samples_per_map=cfg.val_samples_per_map,
+    )
+
     model, _ = train_neural_belief(
-        resources=resources,
         cfg=cfg,
         device=device,
         checkpoint_dir=ckpt_dir,
         plot_dir=plot_dir_resolved,
         verbose=True,
+        train_ds=train_ds,
+        val_ds=val_ds,
     )
 
     # Smoke test: verify the saved checkpoint loads cleanly.
@@ -200,7 +260,7 @@ def train_belief_from_colab(
     )
 
     export_history(history, ckpt_dir)
-    save_experiment_config(ckpt_dir, cfg, cache_path=None, sim_cfg=None)
+    save_experiment_config(ckpt_dir, cfg, cache_path=None)
 
     return model, history
 
@@ -328,7 +388,14 @@ def compare_belief_encoders_from_colab(
     # Both config types share the same dataset fields, so UNet config suffices here.
     base_cfg = build_training_config(
         NeuralBeliefTrainingConfig,
-        {**(_DEBUG_UNET if debug else {}), **{k: v for k, v in overrides.items() if k not in ("in_channels", "latent_dim")}},
+        {
+            **(_DEBUG_UNET if debug else {}),
+            **{
+                k: v
+                for k, v in overrides.items()
+                if k not in ("in_channels", "latent_dim")
+            },
+        },
     )
 
     resolved_steps = prefix_steps or [1, 2, 3, 5, 8, 10, 15]
@@ -346,18 +413,13 @@ def compare_belief_encoders_from_colab(
     )
 
     store = NpzMapCacheStore(resolved_pool_path)
-    if n_orebodies is not None:
-        train_cache, val_cache = store.load_stratified_split(
-            n_train_maps=base_cfg.n_train_maps,
-            n_val_maps=base_cfg.n_val_maps,
-            n_orebodies=n_orebodies,
-            seed=overrides.get("seed", 42),
-        )
-    else:
-        train_cache, val_cache = store.load_train_val_split(
-            n_train_maps=base_cfg.n_train_maps,
-            n_val_maps=base_cfg.n_val_maps,
-        )
+
+    train_cache, val_cache = store.load_npz_data(
+        n_train_maps=base_cfg.n_train_maps,
+        n_val_maps=base_cfg.n_val_maps,
+        n_orebodies=n_orebodies,
+        seed=overrides.get("seed", 42),
+    )
 
     # ---- pre-build all datasets -------------------------------------------------
     # Resources and datasets depend only on (borehole_encoder, is_shuffled), not
@@ -386,6 +448,7 @@ def compare_belief_encoders_from_colab(
             )
             if use_sequential_dataset:
                 from .datasets import build_sequential_dataset_from_cache
+
                 train_ds = build_sequential_dataset_from_cache(
                     train_cache,
                     resources,
@@ -475,15 +538,27 @@ def compare_belief_encoders_from_colab(
                     if is_transformer:
                         cfg = build_training_config(
                             MapBeliefTrainingConfig,
-                            {**(_DEBUG_MAP if debug else {}), "latent_dim": latent_dim,
-                             **{k: v for k, v in effective_overrides.items() if k not in _UNET_ONLY_OVERRIDE_FIELDS},
-                             **seq_cfg_overrides},
+                            {
+                                **(_DEBUG_MAP if debug else {}),
+                                "latent_dim": latent_dim,
+                                **{
+                                    k: v
+                                    for k, v in effective_overrides.items()
+                                    if k not in _UNET_ONLY_OVERRIDE_FIELDS
+                                },
+                                **seq_cfg_overrides,
+                            },
                         )
                     else:
                         cfg = build_training_config(
                             NeuralBeliefTrainingConfig,
-                            {**(_DEBUG_UNET if debug else {}), "in_channels": 2 + latent_dim,
-                             "latent_dim": latent_dim, **effective_overrides, **seq_cfg_overrides},
+                            {
+                                **(_DEBUG_UNET if debug else {}),
+                                "in_channels": 2 + latent_dim,
+                                "latent_dim": latent_dim,
+                                **effective_overrides,
+                                **seq_cfg_overrides,
+                            },
                         )
                     cfg.borehole_encoder = f"{shuffle_label}{borehole_encoder}"
 
@@ -495,30 +570,43 @@ def compare_belief_encoders_from_colab(
                             "  (shuffled-latent control: spatial latent positions are permuted)"
                         )
 
+                    # Wrap in new objects so normalisation applied during training
+                    # does not mutate the cached datasets for subsequent runs.
+                    train_ds_run = GeologicalBeliefDataset(
+                        train_ds.inputs,
+                        train_ds.targets,
+                        train_ds.drill_counts,
+                        train_ds.metadata,
+                    )
+                    val_ds_run = GeologicalBeliefDataset(
+                        val_ds.inputs,
+                        val_ds.targets,
+                        val_ds.drill_counts,
+                        val_ds.metadata,
+                    )
+
                     if is_transformer:
                         train_map_belief(
-                            resources=resources,
                             cfg=cfg,
                             device=device,
                             checkpoint_dir=ckpt_dir,
                             plot_dir=ckpt_dir / "plots",
                             verbose=True,
-                            train_ds=train_ds,
-                            val_ds=val_ds,
+                            train_ds=train_ds_run,
+                            val_ds=val_ds_run,
                         )
                         _, _, _, history = load_map_belief_checkpoint(
                             ckpt_dir / "map_belief_best.pt", device=device
                         )
                     else:
                         train_neural_belief(
-                            resources=resources,
                             cfg=cfg,
                             device=device,
                             checkpoint_dir=ckpt_dir,
                             plot_dir=ckpt_dir / "plots",
                             verbose=True,
-                            train_ds=train_ds,
-                            val_ds=val_ds,
+                            train_ds=train_ds_run,
+                            val_ds=val_ds_run,
                         )
                         _, _, _, history = load_belief_checkpoint(
                             ckpt_dir / "belief_best.pt", device=device
@@ -526,13 +614,13 @@ def compare_belief_encoders_from_colab(
 
                     print(f"\nSmoke test passed: {len(history)} epoch(s) in history.")
                     export_history(history, ckpt_dir)
-                    save_experiment_config(
-                        ckpt_dir, cfg, cache_path=resolved_pool_path, sim_cfg=None
-                    )
+                    save_experiment_config(ckpt_dir, cfg, cache_path=resolved_pool_path)
 
                     best = min(history, key=lambda r: r["val_mse"])
                     bin_path = ckpt_dir / "val_metrics_by_drills.json"
-                    bin_metrics = json.loads(bin_path.read_text()) if bin_path.exists() else {}
+                    bin_metrics = (
+                        json.loads(bin_path.read_text()) if bin_path.exists() else {}
+                    )
                     step_path = ckpt_dir / "val_metrics_by_step.json"
                     step_metrics_flat: dict = {}
                     if step_path.exists():
@@ -541,7 +629,9 @@ def compare_belief_encoders_from_colab(
                                 step_metrics_flat[f"step{step_str}_{metric}"] = val
                     no_ore_path = ckpt_dir / "val_metrics_no_ore.json"
                     no_ore_flat = (
-                        json.loads(no_ore_path.read_text()) if no_ore_path.exists() else {}
+                        json.loads(no_ore_path.read_text())
+                        if no_ore_path.exists()
+                        else {}
                     )
                     row: dict = {
                         "map_encoder": map_encoder,
@@ -696,18 +786,13 @@ def train_sequential_belief_from_colab(
     effective_n_val = 1 if debug else n_val_maps
 
     store = NpzMapCacheStore(resolved_pool)
-    if n_orebodies is not None:
-        train_cache, val_cache = store.load_stratified_split(
-            n_train_maps=effective_n_train,
-            n_val_maps=effective_n_val,
-            n_orebodies=n_orebodies,
-            seed=overrides.get("seed", 42),
-        )
-    else:
-        train_cache, val_cache = store.load_train_val_split(
-            n_train_maps=effective_n_train,
-            n_val_maps=effective_n_val,
-        )
+
+    train_cache, val_cache = store.load_npz_data(
+        n_train_maps=effective_n_train,
+        n_val_maps=effective_n_val,
+        n_orebodies=n_orebodies,
+        seed=overrides.get("seed", 42),
+    )
 
     resolved_steps = prefix_steps or [1, 2, 3, 5, 8, 10, 15]
 
@@ -725,74 +810,100 @@ def train_sequential_belief_from_colab(
     if is_transformer:
         cfg = build_training_config(
             MapBeliefTrainingConfig,
-            {**(_DEBUG_MAP if debug else {}), "latent_dim": latent_dim,
-             **{k: v for k, v in overrides.items() if k not in _UNET_ONLY_OVERRIDE_FIELDS},
-             **sequential_overrides},
+            {
+                **(_DEBUG_MAP if debug else {}),
+                "latent_dim": latent_dim,
+                **{
+                    k: v
+                    for k, v in overrides.items()
+                    if k not in _UNET_ONLY_OVERRIDE_FIELDS
+                },
+                **sequential_overrides,
+            },
         )
         cfg.borehole_encoder = borehole_encoder
-
         print(f"\nborehole_encoder : {borehole_encoder}")
-        print(f"map_encoder      : transformer")
+        print("map_encoder      : transformer")
         print(f"latent_dim       : {latent_dim}")
         print(f"n_sequences      : {cfg.n_sequences_per_map}")
         print(f"prefix_steps     : {cfg.prefix_steps}")
         print(f"Training config  :\n{cfg}\n")
-
-        model, _ = train_map_belief(
-            resources=resources,
-            cfg=cfg,
-            device=device,
-            checkpoint_dir=ckpt_dir,
-            plot_dir=plot_dir_resolved,
-            verbose=True,
-            train_cache=train_cache,
-            val_cache=val_cache,
-        )
-
-        _, _, _, history = load_map_belief_checkpoint(
-            ckpt_dir / "map_belief_best.pt", device=device
-        )
-        print(
-            f"\nSmoke test passed: checkpoint loaded with {len(history)} epoch(s) of history."
-        )
-        export_history(history, ckpt_dir)
-        save_experiment_config(ckpt_dir, cfg, cache_path=resolved_pool, sim_cfg=None)
-
     else:
         encoder_defaults = {"in_channels": 2 + latent_dim, "latent_dim": latent_dim}
         cfg = build_training_config(
             NeuralBeliefTrainingConfig,
-            {**(_DEBUG_UNET if debug else {}), **encoder_defaults, **overrides, **sequential_overrides},
+            {
+                **(_DEBUG_UNET if debug else {}),
+                **encoder_defaults,
+                **overrides,
+                **sequential_overrides,
+            },
         )
         cfg.borehole_encoder = borehole_encoder
-
         print(f"\nborehole_encoder : {borehole_encoder}")
-        print(f"map_encoder      : unet")
+        print("map_encoder      : unet")
         print(f"latent_dim       : {latent_dim}")
         print(f"in_channels      : {cfg.in_channels}")
         print(f"n_sequences      : {cfg.n_sequences_per_map}")
         print(f"prefix_steps     : {cfg.prefix_steps}")
         print(f"Training config  :\n{cfg}\n")
 
-        model, _ = train_neural_belief(
-            resources=resources,
+    print("Building sequential training dataset ...")
+    train_ds = build_sequential_dataset_from_cache(
+        train_cache,
+        resources,
+        device,
+        n_sequences_per_map=n_sequences_per_map,
+        max_drills=cfg.max_drills,
+        prefix_steps=resolved_steps,
+        seed=sequential_seed,
+        verbose=True,
+    )
+    print("Building sequential validation dataset ...")
+    val_ds = build_sequential_dataset_from_cache(
+        val_cache,
+        resources,
+        device,
+        n_sequences_per_map=n_sequences_per_map,
+        max_drills=cfg.max_drills,
+        prefix_steps=resolved_steps,
+        seed=sequential_seed + 1,
+        verbose=True,
+    )
+
+    if is_transformer:
+
+        model, _ = train_map_belief(
             cfg=cfg,
             device=device,
             checkpoint_dir=ckpt_dir,
             plot_dir=plot_dir_resolved,
             verbose=True,
-            train_cache=train_cache,
-            val_cache=val_cache,
+            train_ds=train_ds,
+            val_ds=val_ds,
         )
-
+        _, _, _, history = load_map_belief_checkpoint(
+            ckpt_dir / "map_belief_best.pt", device=device
+        )
+    else:
+        model, _ = train_neural_belief(
+            cfg=cfg,
+            device=device,
+            checkpoint_dir=ckpt_dir,
+            plot_dir=plot_dir_resolved,
+            verbose=True,
+            train_ds=train_ds,
+            val_ds=val_ds,
+        )
         _, _, _, history = load_belief_checkpoint(
             ckpt_dir / "belief_best.pt", device=device
         )
-        print(
-            f"\nSmoke test passed: checkpoint loaded with {len(history)} epoch(s) of history."
-        )
-        export_history(history, ckpt_dir)
-        save_experiment_config(ckpt_dir, cfg, cache_path=resolved_pool, sim_cfg=None)
+
+    print(
+        f"\nSmoke test passed: checkpoint loaded with {len(history)} epoch(s) of history."
+    )
+    export_history(history, ckpt_dir)
+    save_experiment_config(ckpt_dir, cfg, cache_path=resolved_pool)
 
     return model, history
 
@@ -915,7 +1026,9 @@ def train_end_to_end_from_colab(
 
     # Load resources for norm stats only — the borehole encoder inside resources
     # is not used; the e2e model trains its own encoder from scratch.
-    print(f"\nLoading norm stats from '{norm_stats_from}' checkpoint (encoder is not used by e2e model) …")
+    print(
+        f"\nLoading norm stats from '{norm_stats_from}' checkpoint (encoder is not used by e2e model) …"
+    )
     resources, _ = load_decision_resources(
         borehole_encoder=norm_stats_from,
         jepa_path=jepa_path,
@@ -934,23 +1047,21 @@ def train_end_to_end_from_colab(
             "prefix_steps": prefix_steps or [1, 2, 3, 5, 8, 10, 15],
         }
 
-    cfg = build_training_config(E2ETrainingConfig, {**(_DEBUG_E2E if debug else {}), **overrides, **seq_overrides})
+    cfg = build_training_config(
+        E2ETrainingConfig,
+        {**(_DEBUG_E2E if debug else {}), **overrides, **seq_overrides},
+    )
 
     # ---- load map cache -------------------------------------------------------
     store = NpzMapCacheStore(resolved_pool)
     seed = overrides.get("seed", cfg.seed)
-    if n_orebodies is not None:
-        train_cache, val_cache = store.load_stratified_split(
-            n_train_maps=cfg.n_train_maps,
-            n_val_maps=cfg.n_val_maps,
-            n_orebodies=n_orebodies,
-            seed=seed,
-        )
-    else:
-        train_cache, val_cache = store.load_train_val_split(
-            n_train_maps=cfg.n_train_maps,
-            n_val_maps=cfg.n_val_maps,
-        )
+
+    train_cache, val_cache = store.load_npz_data(
+        n_train_maps=cfg.n_train_maps,
+        n_val_maps=cfg.n_val_maps,
+        n_orebodies=n_orebodies,
+        seed=seed,
+    )
 
     print(f"\nnorm_stats_from  : {norm_stats_from}")
     print(f"map_pool_path    : {resolved_pool}")
@@ -966,6 +1077,15 @@ def train_end_to_end_from_colab(
         print(f"JEPA init        : {cfg.pretrained_bh_encoder_path}")
     print(f"Training config  :\n{cfg}\n")
 
+    print("Building training dataset ...")
+    train_ds = E2EDataset.from_cache(
+        train_cache, resources, cfg, verbose=True, is_val=False
+    )
+    print("Building validation dataset ...")
+    val_ds = E2EDataset.from_cache(val_cache, resources, cfg, verbose=True, is_val=True)
+    cfg.n_x = train_cache.n_x
+    cfg.n_y = train_cache.n_y
+
     model, _ = train_end_to_end(
         resources=resources,
         cfg=cfg,
@@ -973,8 +1093,8 @@ def train_end_to_end_from_colab(
         checkpoint_dir=ckpt_dir,
         plot_dir=ckpt_dir / "plots",
         verbose=True,
-        train_cache=train_cache,
-        val_cache=val_cache,
+        train_ds=train_ds,
+        val_ds=val_ds,
     )
 
     # Smoke test: verify the saved checkpoint loads cleanly.

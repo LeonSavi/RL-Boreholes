@@ -29,7 +29,6 @@ from .training_configs import (
 from .train_unet_belief import (
     train_neural_belief,
     load_belief_checkpoint,
-    save_experiment_config,
 )
 from .train_map_belief import (
     train_map_belief,
@@ -51,8 +50,10 @@ from ..training_utils import (
     validate,
     save_val_plots,
     export_history,
+    save_experiment_config,
     build_training_config,
     load_model_encoder_checkpoint,
+    save_checkpoint_model,
 )
 from ..sequential_eval import validate_by_step, save_sequential_val_plots
 from ..datasets import build_sequential_dataset_from_cache
@@ -78,6 +79,7 @@ __all__ = [
     # Shared utilities
     "build_training_config",
     "load_model_encoder_checkpoint",
+    "save_checkpoint_model",
     "export_history",
     # Shared utilities (backward-compat re-exports)
     "DRILL_BINS",

@@ -20,6 +20,7 @@ Per-map npz keys
     drill_counts  : (S,)               int16   — valid drills per sample
     where S = samples_per_map
 """
+
 from __future__ import annotations
 
 import dataclasses
@@ -31,10 +32,10 @@ import numpy as np
 
 from .datasets import BeliefDatasetConfig
 
-
 # ---------------------------------------------------------------------------
 # Drill pattern helper
 # ---------------------------------------------------------------------------
+
 
 def _unpack_drill_patterns(
     locs: np.ndarray,
@@ -53,6 +54,7 @@ def _unpack_drill_patterns(
 # Layer 1: In-memory container
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class NpzMapCache:
     """In-memory container for map pool data loaded from an npz cache.
@@ -61,8 +63,8 @@ class NpzMapCache:
     ``build_dataset_from_cache``.
     """
 
-    borehole_arrays: list[np.ndarray]   # each (n_boreholes, V, D) float32, raw
-    targets: list[np.ndarray]           # each (n_x, n_y) float32
+    borehole_arrays: list[np.ndarray]  # each (n_boreholes, V, D) float32, raw
+    targets: list[np.ndarray]  # each (n_x, n_y) float32
     drill_patterns: list[list[tuple[list[tuple[int, int]], list[float]]]]
     cfg: BeliefDatasetConfig
     n_x: int
@@ -76,6 +78,7 @@ class NpzMapCache:
 # ---------------------------------------------------------------------------
 # Layer 2: NPZ persistence
 # ---------------------------------------------------------------------------
+
 
 class NpzMapCacheStore:
     """NPZ directory persistence for raw belief map pools.
@@ -140,32 +143,7 @@ class NpzMapCacheStore:
             n_y=n_y,
         )
 
-    def load_train_val_split(
-        self,
-        n_train_maps: int,
-        n_val_maps: int,
-    ) -> tuple[NpzMapCache, NpzMapCache]:
-        """Load contiguous train and validation subsets from the pool.
-
-        Raises
-        ------
-        ValueError
-            If fewer maps are available than the combined total requested.
-        """
-        n_needed = n_train_maps + n_val_maps
-        available = self.count_maps()
-        if available < n_needed:
-            raise ValueError(
-                f"Not enough maps in pool at '{self.path}': "
-                f"need {n_needed} ({n_train_maps} train + {n_val_maps} val), "
-                f"but only {available} are available.\n"
-                f"Run: python generate_training_maps.py --n-maps {n_needed} --out-dir \"{self.path}\""
-            )
-        train_cache = self.load_subset(list(range(n_train_maps)))
-        val_cache = self.load_subset(list(range(n_train_maps, n_train_maps + n_val_maps)))
-        return train_cache, val_cache
-
-    def load_stratified_split(
+    def load_npz_data(
         self,
         n_train_maps: int,
         n_val_maps: int,
@@ -199,8 +177,8 @@ class NpzMapCacheStore:
                 "Regenerate the map pool with generate_training_maps.py."
             )
 
-        body_index = np.load(index_path)          # shape (n_maps,) int8
-        classes = list(range(n_orebodies + 1))    # [0] or [0,1] or [0,1,2] or [0,1,2,3]
+        body_index = np.load(index_path)  # shape (n_maps,) int8
+        classes = list(range(n_orebodies + 1))  # [0] or [0,1] or [0,1,2] or [0,1,2,3]
         n_classes = len(classes)
         n_needed = n_train_maps + n_val_maps
 
@@ -221,8 +199,8 @@ class NpzMapCacheStore:
             selected.extend(chosen)
 
         rng.shuffle(selected)
-        selected = selected[:n_needed]            # trim any rounding excess
+        selected = selected[:n_needed]  # trim any rounding excess
 
         train_indices = selected[:n_train_maps]
-        val_indices   = selected[n_train_maps:]
+        val_indices = selected[n_train_maps:]
         return self.load_subset(train_indices), self.load_subset(val_indices)

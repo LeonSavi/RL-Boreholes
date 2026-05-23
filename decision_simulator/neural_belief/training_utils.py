@@ -22,7 +22,7 @@ from torch.utils.data import DataLoader
 
 from .datasets import GeologicalBeliefDataset
 from .utils import TargetNormalizer
-
+from models.end_to_end.candidate_scoring_transformer import CandidateScoringTransformer
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -34,6 +34,7 @@ DRILL_BINS: list[tuple[int, int]] = [(1, 3), (4, 8), (9, 15)]
 # ---------------------------------------------------------------------------
 # Metrics
 # ---------------------------------------------------------------------------
+
 
 def pearson_correlation(pred: torch.Tensor, target: torch.Tensor) -> float:
     """Mean per-sample Pearson correlation over a batch."""
@@ -50,6 +51,7 @@ def pearson_correlation(pred: torch.Tensor, target: torch.Tensor) -> float:
 # ---------------------------------------------------------------------------
 # Validation helpers
 # ---------------------------------------------------------------------------
+
 
 def validate(
     model: nn.Module,
@@ -68,16 +70,16 @@ def validate(
             pred_norm = model(x)
 
             pred = normalizer.inverse_tensor(pred_norm)
-            tgt  = normalizer.inverse_tensor(y)
+            tgt = normalizer.inverse_tensor(y)
 
-            mse_total  += nn.functional.mse_loss(pred, tgt).item()
-            mae_total  += (pred - tgt).abs().mean().item()
+            mse_total += nn.functional.mse_loss(pred, tgt).item()
+            mae_total += (pred - tgt).abs().mean().item()
             corr_total += pearson_correlation(pred, tgt)
-            n_batches  += 1
+            n_batches += 1
 
     return {
-        "val_mse":  mse_total  / n_batches,
-        "val_mae":  mae_total  / n_batches,
+        "val_mse": mse_total / n_batches,
+        "val_mae": mae_total / n_batches,
         "val_corr": corr_total / n_batches,
     }
 
@@ -108,7 +110,7 @@ def validate_by_drill_bins(
 
     loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
     all_pred: list[torch.Tensor] = []
-    all_tgt:  list[torch.Tensor] = []
+    all_tgt: list[torch.Tensor] = []
     with torch.no_grad():
         for x, y in loader:
             x, y = x.to(device), y.to(device)
@@ -116,7 +118,7 @@ def validate_by_drill_bins(
             all_tgt.append(normalizer.inverse_tensor(y).cpu())
 
     preds = torch.cat(all_pred, dim=0)  # (N, 1, n_x, n_y)
-    tgts  = torch.cat(all_tgt,  dim=0)  # (N, 1, n_x, n_y)
+    tgts = torch.cat(all_tgt, dim=0)  # (N, 1, n_x, n_y)
 
     result: dict[str, float | int] = {}
     for lo, hi in bins:
@@ -125,14 +127,14 @@ def validate_by_drill_bins(
         n = int(sel.sum().item())
         result[f"n_{key}"] = n
         if n == 0:
-            result[f"mse_{key}"]  = float("nan")
-            result[f"mae_{key}"]  = float("nan")
+            result[f"mse_{key}"] = float("nan")
+            result[f"mae_{key}"] = float("nan")
             result[f"corr_{key}"] = float("nan")
             continue
         p = preds[sel]
         t = tgts[sel]
-        result[f"mse_{key}"]  = nn.functional.mse_loss(p, t).item()
-        result[f"mae_{key}"]  = (p - t).abs().mean().item()
+        result[f"mse_{key}"] = nn.functional.mse_loss(p, t).item()
+        result[f"mae_{key}"] = (p - t).abs().mean().item()
         result[f"corr_{key}"] = pearson_correlation(p, t)
 
     return result
@@ -141,6 +143,7 @@ def validate_by_drill_bins(
 # ---------------------------------------------------------------------------
 # No-ore false-positive metrics
 # ---------------------------------------------------------------------------
+
 
 def validate_no_ore(
     model: nn.Module,
@@ -162,18 +165,18 @@ def validate_no_ore(
     """
     model.eval()
     pred_totals: list[torch.Tensor] = []
-    pred_maxes:  list[torch.Tensor] = []
-    fp_areas:    list[torch.Tensor] = []
+    pred_maxes: list[torch.Tensor] = []
+    fp_areas: list[torch.Tensor] = []
     n_no_ore = 0
 
     with torch.no_grad():
         for x, y in loader:
             x, y = x.to(device), y.to(device)
             pred = normalizer.inverse_tensor(model(x))  # (B, 1, H, W)
-            tgt  = normalizer.inverse_tensor(y)         # (B, 1, H, W)
+            tgt = normalizer.inverse_tensor(y)  # (B, 1, H, W)
 
             B = pred.shape[0]
-            no_ore = tgt.view(B, -1).sum(dim=1) == 0   # (B,) bool
+            no_ore = tgt.view(B, -1).sum(dim=1) == 0  # (B,) bool
             if not no_ore.any():
                 continue
 
@@ -188,17 +191,17 @@ def validate_no_ore(
 
     if n_no_ore == 0:
         return {
-            "no_ore_n":          0,
+            "no_ore_n": 0,
             "no_ore_pred_total": float("nan"),
-            "no_ore_pred_max":   float("nan"),
-            "no_ore_fp_area":    float("nan"),
+            "no_ore_pred_max": float("nan"),
+            "no_ore_fp_area": float("nan"),
         }
 
     return {
-        "no_ore_n":          n_no_ore,
+        "no_ore_n": n_no_ore,
         "no_ore_pred_total": torch.cat(pred_totals).mean().item(),
-        "no_ore_pred_max":   torch.cat(pred_maxes).mean().item(),
-        "no_ore_fp_area":    torch.cat(fp_areas).mean().item(),
+        "no_ore_pred_max": torch.cat(pred_maxes).mean().item(),
+        "no_ore_fp_area": torch.cat(fp_areas).mean().item(),
     }
 
 
@@ -254,6 +257,34 @@ def save_no_ore_metrics(
         print(f"  no-ore metrics -> {json_path}")
 
 
+def save_checkpoint_model(
+    path: Path,
+    model: nn.Module,
+    cfg: Any,
+    epoch: int,
+    history: list[dict],
+    normalizer: TargetNormalizer,
+    **extra: Any,
+) -> None:
+    """Save a model checkpoint to *path*.
+
+    Common fields (state_dict, cfg, epoch, history, normalizer) are always
+    written. Pass any model-specific extras as keyword arguments (e.g.
+    ``model_cfg=…``, ``pca_reducer=…``, ``n_x=…``).
+    """
+    torch.save(
+        {
+            "state_dict": model.state_dict(),
+            "cfg": cfg,
+            "epoch": epoch,
+            "history": history,
+            "normalizer": normalizer,
+            **extra,
+        },
+        path,
+    )
+
+
 def load_model_encoder_checkpoint(
     path: Path,
     model_fn: Callable[[dict], nn.Module],
@@ -296,12 +327,28 @@ def build_training_config(cfg_class: type, overrides: dict | None = None):
     return cfg
 
 
+def save_experiment_config(
+    checkpoint_dir: Path,
+    cfg: Any,
+    cache_path: Path | None,
+) -> None:
+    """Save a JSON capturing full experiment provenance next to the checkpoints."""
+    record = {
+        **dataclasses.asdict(cfg),
+        "cache_path": str(cache_path) if cache_path is not None else None,
+    }
+    out = Path(checkpoint_dir) / "experiment_config.json"
+    with open(out, "w") as f:
+        json.dump(record, f, indent=2)
+    print(f"  experiment config -> {out}")
+
+
 def export_history(history: list[dict], directory: Path) -> None:
     """Write training history to JSON and CSV."""
     if not history:
         return
     json_path = directory / "training_history.json"
-    csv_path  = directory / "training_history.csv"
+    csv_path = directory / "training_history.csv"
     with open(json_path, "w") as f:
         json.dump(history, f, indent=2)
     with open(csv_path, "w", newline="") as f:
@@ -313,6 +360,7 @@ def export_history(history: list[dict], directory: Path) -> None:
 # ---------------------------------------------------------------------------
 # Plotting helper
 # ---------------------------------------------------------------------------
+
 
 def save_val_plots(
     model: nn.Module,
@@ -349,3 +397,45 @@ def save_val_plots(
         )
 
     print(f"  plots saved -> {plot_dir}")
+
+
+def load_jepa_backbone_weights(
+    model: CandidateScoringTransformer,
+    jepa_path: str,
+    device: str,
+    verbose: bool,
+) -> CandidateScoringTransformer:
+    """Copy CNN backbone weights from a JEPA checkpoint into the borehole encoder.
+
+    Only the convolutional layers are transferred; the transformer and
+    projection layers of the new encoder are left randomly initialised since
+    the JEPA predictor architecture differs.
+    """
+
+    try:
+        ckpt = torch.load(jepa_path, map_location=device, weights_only=False)
+        jepa_state = ckpt.get("context_encoder", ckpt.get("state_dict", ckpt))
+
+        target_state = model.bh_encoder.state_dict()
+        transferred = 0
+        for name, param in jepa_state.items():
+            # JEPA stores backbone weights under "backbone.conv.*"
+            if name.startswith("backbone.conv."):
+                new_name = "conv." + name[len("backbone.conv.") :]
+                if (
+                    new_name in target_state
+                    and target_state[new_name].shape == param.shape
+                ):
+                    target_state[new_name].copy_(param)
+                    transferred += 1
+
+        model.bh_encoder.load_state_dict(target_state)
+        if verbose:
+            print(
+                f"  JEPA init     : transferred {transferred} conv layer weight tensors"
+            )
+    except Exception as exc:
+        if verbose:
+            print(f"  JEPA init     : FAILED ({exc}) — continuing with random init")
+
+    return model

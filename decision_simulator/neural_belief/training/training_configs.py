@@ -37,10 +37,6 @@ class NeuralBeliefTrainingConfig:
     weight_decay: float = 1e-4
     n_epochs: int = 50
 
-    # --- latent PCA ---
-    use_latent_pca: bool = False
-    latent_pca_components: int = 32
-
     # --- coordinate channels ---
     use_coordinate_channels: bool = False
 
@@ -91,7 +87,7 @@ class MapBeliefTrainingConfig:
     max_drills: int = 15
 
     # --- Input / grid ---
-    latent_dim: int = 128           # borehole encoder latent dim (sets in_channels)
+    latent_dim: int = 128  # borehole encoder latent dim (sets in_channels)
     n_x: int = 32
     n_y: int = 32
 
@@ -99,21 +95,21 @@ class MapBeliefTrainingConfig:
     d_model: int = 256
     n_heads: int = 8
     n_encoder_layers: int = 4
-    d_ff: int = 1024                # feedforward dim (4 × d_model)
+    d_ff: int = 1024  # feedforward dim (4 × d_model)
     dropout: float = 0.1
     head_hidden_dim: int = 128
 
     # --- Target normalisation (same as NeuralBeliefTrainingConfig) ---
-    norm_mode: str = "log1p"        # "log1p" | "zscore" | "none"
+    norm_mode: str = "log1p"  # "log1p" | "zscore" | "none"
 
     # --- Optimisation ---
-    batch_size: int = 16            # smaller than UNet due to transformer attention memory
-    lr: float = 1e-4               # lower than UNet; transformers train more stably at low lr
+    batch_size: int = 16  # smaller than UNet due to transformer attention memory
+    lr: float = 1e-4  # lower than UNet; transformers train more stably at low lr
     weight_decay: float = 1e-4
     n_epochs: int = 50
 
     # --- Gradient clipping (important for transformer stability) ---
-    grad_clip_norm: float = 1.0     # 0.0 = disabled
+    grad_clip_norm: float = 1.0  # 0.0 = disabled
 
     # --- Sequential dataset ---
     use_sequential_dataset: bool = False
@@ -164,7 +160,9 @@ class E2ETrainingConfig:
     # Dataset
     n_train_maps: int = 50
     samples_per_map: int = 20
-    candidates_per_sample: int = 1   # candidates sampled per (map, drilling-history) pair
+    candidates_per_sample: int = (
+        1  # candidates sampled per (map, drilling-history) pair
+    )
     n_val_maps: int = 30
     val_samples_per_map: int = 10
     min_drills: int = 1
@@ -204,16 +202,16 @@ class E2ETrainingConfig:
     lr: float = 1e-4
     weight_decay: float = 1e-4
     n_epochs: int = 50
-    norm_mode: str = "log1p"         # "log1p" | "zscore" | "none"
-    grad_clip_norm: float = 1.0      # 0.0 = disabled
+    norm_mode: str = "log1p"  # "log1p" | "zscore" | "none"
+    grad_clip_norm: float = 1.0  # 0.0 = disabled
 
     # False-positive penalty: penalise high predictions where true ore = 0
     use_false_positive_penalty: bool = False
     false_positive_weight: float = 0.1
-    fp_threshold: float = 1e-3       # ore values below this are treated as "no ore"
+    fp_threshold: float = 1e-3  # ore values below this are treated as "no ore"
 
     # Experiment controls
-    shuffle_boreholes: bool = False        # variant C sanity check
+    shuffle_boreholes: bool = False  # variant C sanity check
     pretrained_bh_encoder_path: str | None = None  # variant D: JEPA init
 
     # Grid dimensions — set automatically from cache in train_end_to_end()

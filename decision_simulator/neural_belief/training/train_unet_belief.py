@@ -1,7 +1,7 @@
 """Training pipeline for UNetBelief.
 
 Trains the convolutional U-Net reconstruction model end-to-end using MSE
-loss in normalised target space, with optional latent normalisation, PCA
+loss in normalised target space, with optional latent normalisation
 dimensionality reduction, and spatial coordinate channels.
 
 Checkpoint files: ``belief_best.pt``, ``belief_last.pt``
@@ -9,18 +9,16 @@ Checkpoint files: ``belief_best.pt``, ``belief_last.pt``
 
 from __future__ import annotations
 
-import dataclasses
 import json
 from pathlib import Path
+
 
 import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
-from simulator.map_generator import SimConfig
-from decision_simulator.resources import DecisionSimulationResources
-from ..datasets import BeliefDatasetConfig, GeologicalBeliefDataset
+from ..datasets import GeologicalBeliefDataset
 from ..models.map_encoders.unet_belief import UNetBelief
 from ..utils import TargetNormalizer
 from ..baselines import evaluate_baselines
@@ -32,25 +30,21 @@ from ..training_utils import (
     false_positive_loss,
     save_no_ore_metrics,
     save_val_plots,
-    export_history,
     load_model_encoder_checkpoint,
+    save_checkpoint_model,
 )
-from ..dataset_transformations import fit_and_apply_latent_pca
 from .training_configs import NeuralBeliefTrainingConfig
 
 
 def train_neural_belief(
-    resources: DecisionSimulationResources,
     cfg: NeuralBeliefTrainingConfig,
     device: str,
     checkpoint_dir: Path,
-    sim_cfg: SimConfig | None = None,
     plot_dir: Path | None = None,
     verbose: bool = True,
     train_ds: GeologicalBeliefDataset | None = None,
     val_ds: GeologicalBeliefDataset | None = None,
-    train_cache=None,
-    val_cache=None,
+    normalizer: TargetNormalizer | None = None,
 ) -> tuple[UNetBelief, TargetNormalizer]:
     """Train the neural geological belief updater end-to-end.
 
@@ -64,7 +58,6 @@ def train_neural_belief(
     cfg            : training hyper-parameters
     device         : torch device string
     checkpoint_dir : directory for saved checkpoints
-    sim_cfg        : map dimensions / ore parameters (defaults to SimConfig())
     plot_dir       : if given, save 4 validation plots here after training
     verbose        : print per-epoch metrics
 
@@ -72,9 +65,6 @@ def train_neural_belief(
     -------
     (trained UNetBelief with best weights, fitted TargetNormalizer)
     """
-    if sim_cfg is None:
-        sim_cfg = SimConfig()
-
     checkpoint_dir = Path(checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
@@ -83,116 +73,13 @@ def train_neural_belief(
 
     # ---- datasets -------------------------------------------------------------
     if train_ds is None or val_ds is None:
-        if cfg.use_sequential_dataset:
-            from ..datasets import build_sequential_dataset_from_cache
-            if train_cache is None or val_cache is None:
-                raise ValueError(
-                    "train_cache and val_cache must be provided when "
-                    "use_sequential_dataset=True"
-                )
-            if verbose:
-                print("Building sequential training dataset ...")
-            train_ds = build_sequential_dataset_from_cache(
-                train_cache,
-                resources,
-                device,
-                n_sequences_per_map=cfg.n_sequences_per_map,
-                max_drills=cfg.max_drills,
-                prefix_steps=cfg.prefix_steps,
-                seed=cfg.sequential_seed,
-                verbose=verbose,
-            )
-            if verbose:
-                print("Building sequential validation dataset ...")
-            val_ds = build_sequential_dataset_from_cache(
-                val_cache,
-                resources,
-                device,
-                n_sequences_per_map=cfg.n_sequences_per_map,
-                max_drills=cfg.max_drills,
-                prefix_steps=cfg.prefix_steps,
-                seed=cfg.sequential_seed + 1,
-                verbose=verbose,
-            )
-        else:
-            if verbose:
-                print("Generating training dataset ...")
-            train_ds = GeologicalBeliefDataset.generate(
-                resources,
-                BeliefDatasetConfig(
-                    n_maps=cfg.n_train_maps,
-                    samples_per_map=cfg.samples_per_map,
-                    min_drills=cfg.min_drills,
-                    max_drills=cfg.max_drills,
-                    seed=cfg.seed,
-                ),
-                device=device,
-                sim_cfg=sim_cfg,
-                verbose=verbose,
-            )
+        raise ValueError("train_ds and val_ds must be provided.")
 
-            if verbose:
-                print("Generating validation dataset ...")
-            val_ds = GeologicalBeliefDataset.generate(
-                resources,
-                BeliefDatasetConfig(
-                    n_maps=cfg.n_val_maps,
-                    samples_per_map=cfg.val_samples_per_map,
-                    min_drills=cfg.min_drills,
-                    max_drills=cfg.max_drills,
-                    seed=cfg.seed + 1,
-                ),
-                device=device,
-                sim_cfg=sim_cfg,
-                verbose=verbose,
-            )
-    else:
-        if verbose:
-            print("Using pre-built datasets.")
-        # Wrap in new objects so attribute reassignments (normalisation, PCA,
-        # coordinate channels) do not mutate the caller's datasets.
-        train_ds = GeologicalBeliefDataset(
-            train_ds.inputs, train_ds.targets, train_ds.drill_counts, train_ds.metadata
-        )
-        val_ds = GeologicalBeliefDataset(
-            val_ds.inputs, val_ds.targets, val_ds.drill_counts, val_ds.metadata
-        )
+    n_x, n_y = train_ds.targets.shape[2], train_ds.targets.shape[3]
 
     # ---- target normalization -------------------------------------------------
-    normalizer = TargetNormalizer(mode=cfg.norm_mode)
-    normalizer.fit(train_ds.targets.numpy())
-    train_ds.apply_target_normalizer(normalizer)
-    val_ds.apply_target_normalizer(normalizer)
-
-    if verbose:
-        if cfg.norm_mode == "zscore":
-            print(
-                f"  target norm   : zscore  mean={normalizer.mean:.4f}  std={normalizer.std:.4f}"
-            )
-        elif cfg.norm_mode != "none":
-            print(f"  target norm   : {cfg.norm_mode}")
-
-    # ---- latent PCA reduction ------------------------------------------------
-    pca_reducer = None
-
-    if cfg.use_latent_pca and cfg.latent_dim > 0:
-        pca_reducer, actual_k = fit_and_apply_latent_pca(
-            train_ds, val_ds,
-            n_components=cfg.latent_pca_components,
-            checkpoint_dir=checkpoint_dir,
-            borehole_encoder=cfg.borehole_encoder,
-            verbose=verbose,
-        )
-        cfg.latent_dim  = actual_k
-        cfg.in_channels = 2 + actual_k
-        if verbose:
-            print(f"  in_channels   : {cfg.in_channels}")
-    else:
-        if verbose:
-            if cfg.latent_dim == 0:
-                print("  PCA reduction : skipped (no encoder)")
-            else:
-                print("  PCA reduction : disabled")
+    if normalizer is None:
+        raise ValueError("normalizer must be provided.")
 
     # ---- coordinate channels -------------------------------------------------
     if cfg.use_coordinate_channels:
@@ -223,24 +110,6 @@ def train_neural_belief(
     if verbose:
         print(f"  model params  : {sum(p.numel() for p in model.parameters()):,}")
 
-    # ---- helpers --------------------------------------------------------------
-    def _save_ckpt(path: Path, epoch: int) -> None:
-        torch.save(
-            {
-                "state_dict": model.state_dict(),
-                "cfg": cfg,
-                "epoch": epoch,
-                "history": history,
-                "normalizer": normalizer,
-                "pca_reducer": pca_reducer,
-                "sim_cfg": sim_cfg,
-                "n_x": sim_cfg.n_x,
-                "n_y": sim_cfg.n_y,
-                "latent_dim": cfg.latent_dim,
-            },
-            path,
-        )
-
     # ---- training loop --------------------------------------------------------
     best_val_mse = float("inf")
     history: list[dict] = []
@@ -255,7 +124,9 @@ def train_neural_belief(
             pred = model(x)
             loss = nn.functional.mse_loss(pred, y)  # loss in normalized space
             if cfg.use_false_positive_penalty:
-                loss = loss + cfg.false_positive_weight * false_positive_loss(pred, y, normalizer)
+                loss = loss + cfg.false_positive_weight * false_positive_loss(
+                    pred, y, normalizer
+                )
             optimiser.zero_grad()
             loss.backward()
             optimiser.step()
@@ -279,9 +150,29 @@ def train_neural_belief(
 
         if val_metrics["val_mse"] < best_val_mse:
             best_val_mse = val_metrics["val_mse"]
-            _save_ckpt(checkpoint_dir / "belief_best.pt", epoch)
+            save_checkpoint_model(
+                checkpoint_dir / "belief_best.pt",
+                model,
+                cfg,
+                epoch,
+                history,
+                normalizer,
+                n_x=n_x,
+                n_y=n_y,
+                latent_dim=cfg.latent_dim,
+            )
 
-    _save_ckpt(checkpoint_dir / "belief_last.pt", cfg.n_epochs)
+    save_checkpoint_model(
+        checkpoint_dir / "belief_last.pt",
+        model,
+        cfg,
+        cfg.n_epochs,
+        history,
+        normalizer,
+        n_x=n_x,
+        n_y=n_y,
+        latent_dim=cfg.latent_dim,
+    )
 
     # ---- baseline comparison --------------------------------------------------
     if verbose:
@@ -301,12 +192,19 @@ def train_neural_belief(
     if plot_dir is not None:
         if cfg.use_sequential_dataset:
             from ..sequential_eval import save_sequential_val_plots
+
             save_sequential_val_plots(
-                model, val_ds, normalizer, plot_dir, device,
+                model,
+                val_ds,
+                normalizer,
+                plot_dir,
+                device,
                 n_sequences=cfg.n_val_plots,
             )
         else:
-            save_val_plots(model, val_ds, normalizer, plot_dir, device, n_plots=cfg.n_val_plots)
+            save_val_plots(
+                model, val_ds, normalizer, plot_dir, device, n_plots=cfg.n_val_plots
+            )
 
     # Reload best weights before returning
     best_ckpt = torch.load(
@@ -346,6 +244,7 @@ def train_neural_belief(
     # ---- sequential step metrics -----------------------------------------------
     if cfg.use_sequential_dataset:
         from ..sequential_eval import validate_by_step
+
         step_metrics = validate_by_step(model, val_ds, normalizer, device)
         if step_metrics:
             if verbose:
@@ -364,15 +263,22 @@ def train_neural_belief(
 
     # ---- no-ore false-positive metrics -----------------------------------------
     no_ore_metrics = validate_no_ore(
-        model, val_loader, device, normalizer,
+        model,
+        val_loader,
+        device,
+        normalizer,
         threshold=cfg.false_positive_threshold,
     )
     save_no_ore_metrics(no_ore_metrics, checkpoint_dir, verbose=verbose)
 
     if cfg.use_sequential_dataset:
         from ..sequential_eval import validate_no_ore_by_step
+
         no_ore_step = validate_no_ore_by_step(
-            model, val_ds, normalizer, device,
+            model,
+            val_ds,
+            normalizer,
+            device,
             threshold=cfg.false_positive_threshold,
         )
         if no_ore_step:
@@ -401,24 +307,7 @@ def load_belief_checkpoint(
     def _model_fn(ckpt: dict) -> UNetBelief:
         cfg = ckpt["cfg"]
         return UNetBelief(in_channels=cfg.in_channels, base_channels=cfg.base_channels)
-    return load_model_encoder_checkpoint(path, _model_fn, NeuralBeliefTrainingConfig, device)
 
-
-
-
-def save_experiment_config(
-    checkpoint_dir: Path,
-    cfg: NeuralBeliefTrainingConfig,
-    cache_path: Path | None,
-    sim_cfg: SimConfig | None,
-) -> None:
-    """Save a JSON capturing full experiment provenance next to the checkpoints."""
-    record = {
-        **dataclasses.asdict(cfg),
-        "cache_path": str(cache_path) if cache_path is not None else None,
-        "sim_cfg": dataclasses.asdict(sim_cfg) if sim_cfg is not None else None,
-    }
-    out = Path(checkpoint_dir) / "experiment_config.json"
-    with open(out, "w") as f:
-        json.dump(record, f, indent=2)
-    print(f"  experiment config -> {out}")
+    return load_model_encoder_checkpoint(
+        path, _model_fn, NeuralBeliefTrainingConfig, device
+    )

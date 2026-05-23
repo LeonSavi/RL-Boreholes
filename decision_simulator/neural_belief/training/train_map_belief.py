@@ -27,9 +27,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
-from simulator.map_generator import SimConfig
-from decision_simulator.resources import DecisionSimulationResources
-from ..datasets import BeliefDatasetConfig, GeologicalBeliefDataset
+from ..datasets import GeologicalBeliefDataset
 from ..utils import TargetNormalizer
 from ..baselines import evaluate_baselines
 from ..training_utils import (
@@ -42,27 +40,25 @@ from ..training_utils import (
     save_val_plots,
     export_history,
     load_model_encoder_checkpoint,
+    save_checkpoint_model,
 )
 from ..models.map_encoders.map_belief_transformer import MapBeliefTransformer
 from .training_configs import MapBeliefTrainingConfig
-
 
 # ---------------------------------------------------------------------------
 # Main training function
 # ---------------------------------------------------------------------------
 
+
 def train_map_belief(
-    resources: DecisionSimulationResources,
     cfg: MapBeliefTrainingConfig,
     device: str,
     checkpoint_dir: Path,
-    sim_cfg: SimConfig | None = None,
     plot_dir: Path | None = None,
     verbose: bool = True,
     train_ds: GeologicalBeliefDataset | None = None,
     val_ds: GeologicalBeliefDataset | None = None,
-    train_cache=None,
-    val_cache=None,
+    normalizer: TargetNormalizer | None = None,
 ) -> tuple[MapBeliefTransformer, TargetNormalizer]:
     """Train the MapBeliefTransformer end-to-end.
 
@@ -79,7 +75,6 @@ def train_map_belief(
     cfg            : training hyper-parameters
     device         : torch device string  (e.g. "cuda" or "cpu")
     checkpoint_dir : directory for saved checkpoints
-    sim_cfg        : map dimensions / ore parameters (defaults to SimConfig())
     plot_dir       : if given, save 4 validation plots here after training
     verbose        : print per-epoch metrics
     train_ds / val_ds : optional pre-built datasets (skip generation if provided)
@@ -88,9 +83,6 @@ def train_map_belief(
     -------
     (trained MapBeliefTransformer with best weights, fitted TargetNormalizer)
     """
-    if sim_cfg is None:
-        sim_cfg = SimConfig()
-
     checkpoint_dir = Path(checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
@@ -99,105 +91,25 @@ def train_map_belief(
 
     # ---- datasets ----------------------------------------------------------------
     if train_ds is None or val_ds is None:
-        if cfg.use_sequential_dataset:
-            from ..datasets import build_sequential_dataset_from_cache
-            if train_cache is None or val_cache is None:
-                raise ValueError(
-                    "train_cache and val_cache must be provided when "
-                    "use_sequential_dataset=True"
-                )
-            if verbose:
-                print("Building sequential training dataset ...")
-            train_ds = build_sequential_dataset_from_cache(
-                train_cache,
-                resources,
-                device,
-                n_sequences_per_map=cfg.n_sequences_per_map,
-                max_drills=cfg.max_drills,
-                prefix_steps=cfg.prefix_steps,
-                seed=cfg.sequential_seed,
-                verbose=verbose,
-            )
-            if verbose:
-                print("Building sequential validation dataset ...")
-            val_ds = build_sequential_dataset_from_cache(
-                val_cache,
-                resources,
-                device,
-                n_sequences_per_map=cfg.n_sequences_per_map,
-                max_drills=cfg.max_drills,
-                prefix_steps=cfg.prefix_steps,
-                seed=cfg.sequential_seed + 1,
-                verbose=verbose,
-            )
-        else:
-            if verbose:
-                print("Generating training dataset ...")
-            train_ds = GeologicalBeliefDataset.generate(
-                resources,
-                BeliefDatasetConfig(
-                    n_maps=cfg.n_train_maps,
-                    samples_per_map=cfg.samples_per_map,
-                    min_drills=cfg.min_drills,
-                    max_drills=cfg.max_drills,
-                    seed=cfg.seed,
-                ),
-                device=device,
-                sim_cfg=sim_cfg,
-                verbose=verbose,
-            )
+        raise ValueError("train_ds and val_ds must be provided.")
 
-            if verbose:
-                print("Generating validation dataset ...")
-            val_ds = GeologicalBeliefDataset.generate(
-                resources,
-                BeliefDatasetConfig(
-                    n_maps=cfg.n_val_maps,
-                    samples_per_map=cfg.val_samples_per_map,
-                    min_drills=cfg.min_drills,
-                    max_drills=cfg.max_drills,
-                    seed=cfg.seed + 1,
-                ),
-                device=device,
-                sim_cfg=sim_cfg,
-                verbose=verbose,
-            )
-    else:
-        if verbose:
-            print("Using pre-built datasets.")
-        # Wrap in new objects so attribute reassignments (normalisation) do not
-        # mutate the caller's datasets.
-        train_ds = GeologicalBeliefDataset(
-            train_ds.inputs, train_ds.targets, train_ds.drill_counts, train_ds.metadata
-        )
-        val_ds = GeologicalBeliefDataset(
-            val_ds.inputs, val_ds.targets, val_ds.drill_counts, val_ds.metadata
-        )
+    n_x, n_y = train_ds.targets.shape[2], train_ds.targets.shape[3]
 
     # ---- target normalisation ---------------------------------------------------
-    normalizer = TargetNormalizer(mode=cfg.norm_mode)
-    normalizer.fit(train_ds.targets.numpy())
-    train_ds.apply_target_normalizer(normalizer)
-    val_ds.apply_target_normalizer(normalizer)
-
-    if verbose:
-        if cfg.norm_mode == "zscore":
-            print(
-                f"  target norm   : zscore  mean={normalizer.mean:.4f}"
-                f"  std={normalizer.std:.4f}"
-            )
-        elif cfg.norm_mode != "none":
-            print(f"  target norm   : {cfg.norm_mode}")
+    if normalizer is None:
+        raise ValueError("normalizer must be provided.")
 
     # ---- data loaders -----------------------------------------------------------
     train_loader = DataLoader(train_ds, batch_size=cfg.batch_size, shuffle=True)
-    val_loader   = DataLoader(val_ds,   batch_size=cfg.batch_size, shuffle=False)
+    val_loader = DataLoader(val_ds, batch_size=cfg.batch_size, shuffle=False)
 
     if verbose:
         print(f"  train samples : {len(train_ds)}")
         print(f"  val   samples : {len(val_ds)}")
 
     # ---- model ------------------------------------------------------------------
+    cfg.n_x = n_x
+    cfg.n_y = n_y
     model_cfg = cfg.to_model_config()
     model = MapBeliefTransformer(model_cfg).to(device)
     optimiser = torch.optim.AdamW(
@@ -210,27 +122,8 @@ def train_map_belief(
         print(f"  n_layers      : {cfg.n_encoder_layers}")
         print(f"  n_heads       : {cfg.n_heads}")
 
-    # ---- checkpoint helper ------------------------------------------------------
-    history: list[dict] = []
-
-    def _save_ckpt(path: Path, epoch: int) -> None:
-        torch.save(
-            {
-                "state_dict":        model.state_dict(),
-                "cfg":               cfg,            # MapBeliefTrainingConfig
-                "model_cfg":         model_cfg,      # MapBeliefConfig (for loading without training cfg)
-                "epoch":             epoch,
-                "history":           history,
-                "normalizer":        normalizer,
-                "sim_cfg":           sim_cfg,
-                "n_x":               sim_cfg.n_x,
-                "n_y":               sim_cfg.n_y,
-                "latent_dim":        cfg.latent_dim,
-            },
-            path,
-        )
-
     # ---- training loop ----------------------------------------------------------
+    history: list[dict] = []
     best_val_mse = float("inf")
 
     for epoch in range(1, cfg.n_epochs + 1):
@@ -244,7 +137,9 @@ def train_map_belief(
             pred = model(x)
             loss = nn.functional.mse_loss(pred, y)  # MSE in normalised space
             if cfg.use_false_positive_penalty:
-                loss = loss + cfg.false_positive_weight * false_positive_loss(pred, y, normalizer)
+                loss = loss + cfg.false_positive_weight * false_positive_loss(
+                    pred, y, normalizer
+                )
 
             optimiser.zero_grad()
             loss.backward()
@@ -273,9 +168,31 @@ def train_map_belief(
 
         if val_metrics["val_mse"] < best_val_mse:
             best_val_mse = val_metrics["val_mse"]
-            _save_ckpt(checkpoint_dir / "map_belief_best.pt", epoch)
+            save_checkpoint_model(
+                checkpoint_dir / "map_belief_best.pt",
+                model,
+                cfg,
+                epoch,
+                history,
+                normalizer,
+                model_cfg=model_cfg,
+                n_x=n_x,
+                n_y=n_y,
+                latent_dim=cfg.latent_dim,
+            )
 
-    _save_ckpt(checkpoint_dir / "map_belief_last.pt", cfg.n_epochs)
+    save_checkpoint_model(
+        checkpoint_dir / "map_belief_last.pt",
+        model,
+        cfg,
+        cfg.n_epochs,
+        history,
+        normalizer,
+        model_cfg=model_cfg,
+        n_x=n_x,
+        n_y=n_y,
+        latent_dim=cfg.latent_dim,
+    )
 
     # ---- export training history ------------------------------------------------
     export_history(history, checkpoint_dir)
@@ -299,12 +216,19 @@ def train_map_belief(
     if plot_dir is not None:
         if cfg.use_sequential_dataset:
             from ..sequential_eval import save_sequential_val_plots
+
             save_sequential_val_plots(
-                model, val_ds, normalizer, plot_dir, device,
+                model,
+                val_ds,
+                normalizer,
+                plot_dir,
+                device,
                 n_sequences=cfg.n_val_plots,
             )
         else:
-            save_val_plots(model, val_ds, normalizer, plot_dir, device, n_plots=cfg.n_val_plots)
+            save_val_plots(
+                model, val_ds, normalizer, plot_dir, device, n_plots=cfg.n_val_plots
+            )
 
     # ---- per-bin validation (best model) ----------------------------------------
     # Reload best weights first
@@ -322,9 +246,9 @@ def train_map_belief(
             print("\nValidation metrics by drill count (best model, ore-value space):")
             for lo, hi in DRILL_BINS:
                 key = f"{lo}_{hi}"
-                n    = bin_metrics.get(f"n_{key}", 0)
-                mse  = bin_metrics.get(f"mse_{key}", float("nan"))
-                mae  = bin_metrics.get(f"mae_{key}", float("nan"))
+                n = bin_metrics.get(f"n_{key}", 0)
+                mse = bin_metrics.get(f"mse_{key}", float("nan"))
+                mae = bin_metrics.get(f"mae_{key}", float("nan"))
                 corr = bin_metrics.get(f"corr_{key}", float("nan"))
                 print(
                     f"  drills {lo:2d}-{hi:2d}"
@@ -342,6 +266,7 @@ def train_map_belief(
     # ---- sequential step metrics -----------------------------------------------
     if cfg.use_sequential_dataset:
         from ..sequential_eval import validate_by_step
+
         step_metrics = validate_by_step(model, val_ds, normalizer, device)
         if step_metrics:
             if verbose:
@@ -360,15 +285,22 @@ def train_map_belief(
 
     # ---- no-ore false-positive metrics -----------------------------------------
     no_ore_metrics = validate_no_ore(
-        model, val_loader, device, normalizer,
+        model,
+        val_loader,
+        device,
+        normalizer,
         threshold=cfg.false_positive_threshold,
     )
     save_no_ore_metrics(no_ore_metrics, checkpoint_dir, verbose=verbose)
 
     if cfg.use_sequential_dataset:
         from ..sequential_eval import validate_no_ore_by_step
+
         no_ore_step = validate_no_ore_by_step(
-            model, val_ds, normalizer, device,
+            model,
+            val_ds,
+            normalizer,
+            device,
             threshold=cfg.false_positive_threshold,
         )
         if no_ore_step:
@@ -398,6 +330,7 @@ def train_map_belief(
 # Checkpoint loading
 # ---------------------------------------------------------------------------
 
+
 def load_map_belief_checkpoint(
     path: Path,
     device: str = "cpu",
@@ -406,11 +339,7 @@ def load_map_belief_checkpoint(
         if "model_cfg" in ckpt:
             return MapBeliefTransformer(ckpt["model_cfg"])
         return MapBeliefTransformer(ckpt["cfg"].to_model_config())
-    return load_model_encoder_checkpoint(path, _model_fn, MapBeliefTrainingConfig, device)
 
-
-# ---------------------------------------------------------------------------
-# Config builder
-# ---------------------------------------------------------------------------
-
-
+    return load_model_encoder_checkpoint(
+        path, _model_fn, MapBeliefTrainingConfig, device
+    )

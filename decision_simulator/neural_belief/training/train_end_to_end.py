@@ -51,10 +51,17 @@ from decision_simulator.resources import DecisionSimulationResources
 from ..map_cache import NpzMapCache
 from ..models.borehole_encoders.autoencoder import standardise
 from ..utils import TargetNormalizer
-from ..models.end_to_end.candidate_scoring_transformer import CandidateScoringTransformer
-from ..training_utils import export_history, false_positive_loss, load_model_encoder_checkpoint
+from ..models.end_to_end.candidate_scoring_transformer import (
+    CandidateScoringTransformer,
+)
+from ..training_utils import (
+    export_history,
+    false_positive_loss,
+    load_model_encoder_checkpoint,
+    save_checkpoint_model,
+    load_jepa_backbone_weights,
+)
 from .training_configs import E2ETrainingConfig
-
 
 # ---------------------------------------------------------------------------
 # Dataset constants
@@ -65,14 +72,15 @@ _ORE_EPS: float = 1e-3  # ore values below this are treated as "no ore"
 # Probabilities for each candidate ore-value bin when the map has ore
 _CANDIDATE_TYPE_PROBS: dict[str, float] = {
     "zero": 0.40,
-    "low":  0.20,
-    "mid":  0.20,
+    "low": 0.20,
+    "mid": 0.20,
     "high": 0.20,
 }
 
 # ---------------------------------------------------------------------------
 # Dataset
 # ---------------------------------------------------------------------------
+
 
 class E2EDataset(Dataset):
     """Pre-generated (partial observation + candidate) → scalar ore pairs.
@@ -93,7 +101,7 @@ class E2EDataset(Dataset):
 
     def __init__(self, samples: list[dict]) -> None:
         self.samples = samples
-        self._targets_raw: np.ndarray | None = None   # cached for normalizer fitting
+        self._targets_raw: np.ndarray | None = None  # cached for normalizer fitting
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -191,14 +199,16 @@ class E2EDataset(Dataset):
                     perm = rng.permutation(n_k)
                     drill_bhs = drill_bhs[perm]
 
-                samples.append({
-                    "boreholes":     drill_bhs,
-                    "ore_vals":      ore_vals_k,
-                    "positions":     positions_k,
-                    "candidate_pos": grid_pos[ci, cj],
-                    "target_ore":    float(target_ore[ci, cj]),
-                    "map_idx":       map_idx,
-                })
+                samples.append(
+                    {
+                        "boreholes": drill_bhs,
+                        "ore_vals": ore_vals_k,
+                        "positions": positions_k,
+                        "candidate_pos": grid_pos[ci, cj],
+                        "target_ore": float(target_ore[ci, cj]),
+                        "map_idx": map_idx,
+                    }
+                )
 
             if cfg.use_sequential_dataset:
                 # Sequential path: fixed drill orderings, prefix slices at each step.
@@ -238,6 +248,7 @@ class E2EDataset(Dataset):
 # Stratified candidate sampling helpers
 # ---------------------------------------------------------------------------
 
+
 def _build_candidate_pools(
     flat_ore: np.ndarray,
     visited: set[int],
@@ -263,8 +274,8 @@ def _build_candidate_pools(
         # No ore on this map — everything goes in the zero pool
         return {
             "zero": np.where(unvisited_mask)[0],
-            "low":  np.empty(0, dtype=np.intp),
-            "mid":  np.empty(0, dtype=np.intp),
+            "low": np.empty(0, dtype=np.intp),
+            "mid": np.empty(0, dtype=np.intp),
             "high": np.empty(0, dtype=np.intp),
         }
 
@@ -276,8 +287,8 @@ def _build_candidate_pools(
 
     return {
         "zero": _pool(flat_ore <= ore_eps),
-        "low":  _pool((flat_ore > ore_eps) & (flat_ore <= q50)),
-        "mid":  _pool((flat_ore > q50)     & (flat_ore <= q80)),
+        "low": _pool((flat_ore > ore_eps) & (flat_ore <= q50)),
+        "mid": _pool((flat_ore > q50) & (flat_ore <= q80)),
         "high": _pool(flat_ore > q80),
     }
 
@@ -308,7 +319,9 @@ def _sample_candidate_from_pools(
     probs /= probs.sum()
 
     chosen_type = types[int(rng.choice(len(types), p=probs))]
-    fallback_order = [chosen_type] + [t for t in ("high", "mid", "low", "zero") if t != chosen_type]
+    fallback_order = [chosen_type] + [
+        t for t in ("high", "mid", "low", "zero") if t != chosen_type
+    ]
 
     for t in fallback_order:
         if pools[t].size > 0:
@@ -325,6 +338,7 @@ def _sample_candidate_from_pools(
 # ---------------------------------------------------------------------------
 # Custom collate for variable-length observation sequences
 # ---------------------------------------------------------------------------
+
 
 def collate_e2e(batch: list[dict]) -> dict:
     """Pad borehole sequences to the longest K in the batch.
@@ -345,35 +359,36 @@ def collate_e2e(batch: list[dict]) -> dict:
     # Infer V and D from the first sample
     V, D = batch[0]["boreholes"].shape[1], batch[0]["boreholes"].shape[2]
 
-    boreholes_pad  = np.zeros((B, max_K, V, D), dtype=np.float32)
-    ore_pad        = np.zeros((B, max_K),        dtype=np.float32)
-    pos_pad        = np.zeros((B, max_K, 2),     dtype=np.float32)
-    padding_mask   = np.ones((B, max_K),         dtype=bool)   # True = padded
-    cand_pos_arr   = np.zeros((B, 2),            dtype=np.float32)
-    targets        = np.zeros((B, 1),            dtype=np.float32)
+    boreholes_pad = np.zeros((B, max_K, V, D), dtype=np.float32)
+    ore_pad = np.zeros((B, max_K), dtype=np.float32)
+    pos_pad = np.zeros((B, max_K, 2), dtype=np.float32)
+    padding_mask = np.ones((B, max_K), dtype=bool)  # True = padded
+    cand_pos_arr = np.zeros((B, 2), dtype=np.float32)
+    targets = np.zeros((B, 1), dtype=np.float32)
 
     for i, s in enumerate(batch):
         K = s["boreholes"].shape[0]
-        boreholes_pad[i, :K]  = s["boreholes"]
-        ore_pad[i, :K]        = s["ore_vals"]
-        pos_pad[i, :K]        = s["positions"]
-        padding_mask[i, :K]   = False           # real observations → not padded
-        cand_pos_arr[i]        = s["candidate_pos"]
-        targets[i, 0]          = s["target_ore"]
+        boreholes_pad[i, :K] = s["boreholes"]
+        ore_pad[i, :K] = s["ore_vals"]
+        pos_pad[i, :K] = s["positions"]
+        padding_mask[i, :K] = False  # real observations → not padded
+        cand_pos_arr[i] = s["candidate_pos"]
+        targets[i, 0] = s["target_ore"]
 
     return {
-        "boreholes":     torch.from_numpy(boreholes_pad),
-        "ore_vals":      torch.from_numpy(ore_pad),
-        "positions":     torch.from_numpy(pos_pad),
+        "boreholes": torch.from_numpy(boreholes_pad),
+        "ore_vals": torch.from_numpy(ore_pad),
+        "positions": torch.from_numpy(pos_pad),
         "candidate_pos": torch.from_numpy(cand_pos_arr),
-        "target_ore":    torch.from_numpy(targets),
-        "padding_mask":  torch.from_numpy(padding_mask),
+        "target_ore": torch.from_numpy(targets),
+        "padding_mask": torch.from_numpy(padding_mask),
     }
 
 
 # ---------------------------------------------------------------------------
 # Validation
 # ---------------------------------------------------------------------------
+
 
 def _validate_e2e(
     model: CandidateScoringTransformer,
@@ -390,36 +405,33 @@ def _validate_e2e(
     """
     model.eval()
     all_pred: list[torch.Tensor] = []
-    all_tgt:  list[torch.Tensor] = []
+    all_tgt: list[torch.Tensor] = []
 
     with torch.no_grad():
         for batch in val_loader:
-            bh  = batch["boreholes"].to(device)
-            ov  = batch["ore_vals"].to(device)
+            bh = batch["boreholes"].to(device)
+            ov = batch["ore_vals"].to(device)
             pos = batch["positions"].to(device)
-            cp  = batch["candidate_pos"].to(device)
+            cp = batch["candidate_pos"].to(device)
             tgt = batch["target_ore"].to(device)
-            pm  = batch["padding_mask"].to(device)
+            pm = batch["padding_mask"].to(device)
 
             pred_norm = model(bh, ov, pos, cp, pm)
-            pred = normalizer.inverse_tensor(pred_norm)   # (B, 1)
-            tgt_raw = normalizer.inverse_tensor(tgt)      # (B, 1)
+            pred = normalizer.inverse_tensor(pred_norm)  # (B, 1)
+            tgt_raw = normalizer.inverse_tensor(tgt)  # (B, 1)
 
             all_pred.append(pred.cpu())
             all_tgt.append(tgt_raw.cpu())
 
-    preds = torch.cat(all_pred).view(-1)   # (N,)
-    tgts  = torch.cat(all_tgt).view(-1)    # (N,)
+    preds = torch.cat(all_pred).view(-1)  # (N,)
+    tgts = torch.cat(all_tgt).view(-1)  # (N,)
 
     mse = nn.functional.mse_loss(preds, tgts).item()
     mae = (preds - tgts).abs().mean().item()
 
     p_c = preds - preds.mean()
-    t_c = tgts  - tgts.mean()
-    corr = (
-        (p_c * t_c).sum() /
-        (p_c.norm() * t_c.norm()).clamp(min=1e-8)
-    ).item()
+    t_c = tgts - tgts.mean()
+    corr = ((p_c * t_c).sum() / (p_c.norm() * t_c.norm()).clamp(min=1e-8)).item()
 
     return {"val_mse": mse, "val_mae": mae, "val_corr": corr}
 
@@ -427,6 +439,7 @@ def _validate_e2e(
 # ---------------------------------------------------------------------------
 # Main training function
 # ---------------------------------------------------------------------------
+
 
 def train_end_to_end(
     resources: DecisionSimulationResources,
@@ -437,8 +450,6 @@ def train_end_to_end(
     verbose: bool = True,
     train_ds: E2EDataset | None = None,
     val_ds: E2EDataset | None = None,
-    train_cache: NpzMapCache | None = None,
-    val_cache: NpzMapCache | None = None,
 ) -> tuple[CandidateScoringTransformer, TargetNormalizer]:
     """Train the end-to-end candidate scoring transformer.
 
@@ -455,9 +466,7 @@ def train_end_to_end(
     device           : torch device string
     checkpoint_dir   : directory for saved checkpoints
     verbose          : print per-epoch metrics
-    train_ds/val_ds  : pre-built E2EDataset (takes priority over caches)
-    train_cache/val_cache : NpzMapCache to build datasets from when datasets
-                            are not provided directly
+    train_ds/val_ds  : pre-built E2EDataset (required)
 
     Returns
     -------
@@ -474,30 +483,8 @@ def train_end_to_end(
         cfg.n_variables = len(resources.variable_names)
 
     # ---- datasets ------------------------------------------------------------
-    if train_ds is None:
-        if train_cache is None:
-            raise ValueError(
-                "Provide either train_ds (a pre-built E2EDataset) or "
-                "train_cache (an NpzMapCache) to build the training dataset from."
-            )
-        if verbose:
-            print("Building training dataset from cache …")
-        train_ds = E2EDataset.from_cache(train_cache, resources, cfg, verbose=verbose, is_val=False)
-
-    if val_ds is None:
-        if val_cache is None:
-            raise ValueError(
-                "Provide either val_ds (a pre-built E2EDataset) or "
-                "val_cache (an NpzMapCache) to build the validation dataset from."
-            )
-        if verbose:
-            print("Building validation dataset from cache …")
-        val_ds = E2EDataset.from_cache(val_cache, resources, cfg, verbose=verbose, is_val=True)
-
-    # Resolve grid dimensions and depth from cache / dataset
-    if train_cache is not None:
-        cfg.n_x = train_cache.n_x
-        cfg.n_y = train_cache.n_y
+    if train_ds is None or val_ds is None:
+        raise ValueError("train_ds and val_ds must be provided.")
     if cfg.n_depth == 440 and len(train_ds) > 0:
         cfg.n_depth = train_ds.samples[0]["boreholes"].shape[2]
 
@@ -540,7 +527,9 @@ def train_end_to_end(
 
     # Optional: initialise borehole encoder from pretrained JEPA weights
     if cfg.pretrained_bh_encoder_path and model_cfg.use_encoder:
-        _load_jepa_backbone_weights(model, cfg.pretrained_bh_encoder_path, device, verbose)
+        model = load_jepa_backbone_weights(
+            model, cfg.pretrained_bh_encoder_path, device, verbose
+        )
 
     optimiser = torch.optim.AdamW(
         model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay
@@ -559,23 +548,8 @@ def train_end_to_end(
         if cfg.pretrained_bh_encoder_path:
             print(f"  variant D     : JEPA init from {cfg.pretrained_bh_encoder_path}")
 
-    # ---- checkpoint helper ---------------------------------------------------
-    history: list[dict] = []
-
-    def _save_ckpt(path: Path, epoch: int) -> None:
-        torch.save(
-            {
-                "state_dict": model.state_dict(),
-                "cfg":        cfg,
-                "model_cfg":  model_cfg,
-                "epoch":      epoch,
-                "history":    history,
-                "normalizer": normalizer,
-            },
-            path,
-        )
-
     # ---- training loop -------------------------------------------------------
+    history: list[dict] = []
     best_val_mse = float("inf")
 
     for epoch in range(1, cfg.n_epochs + 1):
@@ -584,14 +558,14 @@ def train_end_to_end(
         n_batches = 0
 
         for batch in train_loader:
-            bh  = batch["boreholes"].to(device)
-            ov  = batch["ore_vals"].to(device)
+            bh = batch["boreholes"].to(device)
+            ov = batch["ore_vals"].to(device)
             pos = batch["positions"].to(device)
-            cp  = batch["candidate_pos"].to(device)
-            tgt = batch["target_ore"].to(device)    # (B, 1) — normalised
-            pm  = batch["padding_mask"].to(device)
+            cp = batch["candidate_pos"].to(device)
+            tgt = batch["target_ore"].to(device)  # (B, 1) — normalised
+            pm = batch["padding_mask"].to(device)
 
-            pred = model(bh, ov, pos, cp, pm)       # (B, 1)
+            pred = model(bh, ov, pos, cp, pm)  # (B, 1)
             loss = loss_fn(pred, tgt)
 
             if cfg.use_false_positive_penalty:
@@ -625,9 +599,25 @@ def train_end_to_end(
 
         if val_metrics["val_mse"] < best_val_mse:
             best_val_mse = val_metrics["val_mse"]
-            _save_ckpt(checkpoint_dir / "e2e_best.pt", epoch)
+            save_checkpoint_model(
+                checkpoint_dir / "e2e_best.pt",
+                model,
+                cfg,
+                epoch,
+                history,
+                normalizer,
+                model_cfg=model_cfg,
+            )
 
-    _save_ckpt(checkpoint_dir / "e2e_last.pt", cfg.n_epochs)
+    save_checkpoint_model(
+        checkpoint_dir / "e2e_last.pt",
+        model,
+        cfg,
+        cfg.n_epochs,
+        history,
+        normalizer,
+        model_cfg=model_cfg,
+    )
     export_history(history, checkpoint_dir)
 
     # ---- reload best weights -------------------------------------------------
@@ -662,7 +652,9 @@ def train_end_to_end(
     if plot_dir is not None:
         plot_dir = Path(plot_dir)
         plot_dir.mkdir(parents=True, exist_ok=True)
-        _save_e2e_val_plots(model, val_ds, val_loader, normalizer, plot_dir, device, cfg, val_cache=val_cache)
+        _save_e2e_val_plots(
+            model, val_ds, val_loader, normalizer, plot_dir, device, cfg
+        )
 
     if verbose:
         best_row = min(history, key=lambda r: r["val_mse"])
@@ -679,25 +671,25 @@ def train_end_to_end(
 # Checkpoint loading
 # ---------------------------------------------------------------------------
 
+
 def load_e2e_checkpoint(
     path: Path,
     device: str = "cpu",
-) -> tuple[CandidateScoringTransformer, E2ETrainingConfig, TargetNormalizer, list[dict]]:
+) -> tuple[
+    CandidateScoringTransformer, E2ETrainingConfig, TargetNormalizer, list[dict]
+]:
     def _model_fn(ckpt: dict) -> CandidateScoringTransformer:
         if "model_cfg" in ckpt:
             return CandidateScoringTransformer(ckpt["model_cfg"])
         return CandidateScoringTransformer(ckpt["cfg"].to_model_config())
+
     return load_model_encoder_checkpoint(path, _model_fn, E2ETrainingConfig, device)
-
-
-# ---------------------------------------------------------------------------
-# Config builder
-# ---------------------------------------------------------------------------
 
 
 # ---------------------------------------------------------------------------
 # Validation metrics helpers (by drill count / step)
 # ---------------------------------------------------------------------------
+
 
 def _validate_e2e_by_step(
     model: CandidateScoringTransformer,
@@ -721,17 +713,17 @@ def _validate_e2e_by_step(
 
     with torch.no_grad():
         for batch in val_loader:
-            bh  = batch["boreholes"].to(device)
-            ov  = batch["ore_vals"].to(device)
+            bh = batch["boreholes"].to(device)
+            ov = batch["ore_vals"].to(device)
             pos = batch["positions"].to(device)
-            cp  = batch["candidate_pos"].to(device)
+            cp = batch["candidate_pos"].to(device)
             tgt = batch["target_ore"].to(device)
-            pm  = batch["padding_mask"].to(device)
+            pm = batch["padding_mask"].to(device)
 
             pred_norm = model(bh, ov, pos, cp, pm)
             preds = normalizer.inverse_tensor(pred_norm).cpu().view(-1).tolist()
-            tgts  = normalizer.inverse_tensor(tgt).cpu().view(-1).tolist()
-            ks    = (~pm).sum(dim=1).cpu().tolist()
+            tgts = normalizer.inverse_tensor(tgt).cpu().view(-1).tolist()
+            ks = (~pm).sum(dim=1).cpu().tolist()
 
             for k, p, t in zip(ks, preds, tgts):
                 groups[int(k)][0].append(p)
@@ -741,10 +733,10 @@ def _validate_e2e_by_step(
     for k in sorted(groups):
         ps = torch.tensor(groups[k][0])
         ts = torch.tensor(groups[k][1])
-        mse  = nn.functional.mse_loss(ps, ts).item()
-        mae  = (ps - ts).abs().mean().item()
-        pc   = ps - ps.mean()
-        tc   = ts - ts.mean()
+        mse = nn.functional.mse_loss(ps, ts).item()
+        mae = (ps - ts).abs().mean().item()
+        pc = ps - ps.mean()
+        tc = ts - ts.mean()
         corr = ((pc * tc).sum() / (pc.norm() * tc.norm()).clamp(min=1e-8)).item()
         metrics[k] = {"n": len(ps), "mse": mse, "mae": mae, "corr": corr}
 
@@ -773,6 +765,7 @@ def _save_e2e_val_plots(
     """
     import datetime
     import matplotlib
+
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from ..visualize import plot_belief_sample
@@ -801,9 +794,9 @@ def _save_e2e_val_plots(
             if map_idx is None:
                 continue
 
-            bh  = torch.from_numpy(sample["boreholes"]).to(device)   # (K, V, D)
-            ov  = torch.from_numpy(sample["ore_vals"]).to(device)    # (K,)
-            pos = torch.from_numpy(sample["positions"]).to(device)   # (K, 2)
+            bh = torch.from_numpy(sample["boreholes"]).to(device)  # (K, V, D)
+            ov = torch.from_numpy(sample["ore_vals"]).to(device)  # (K,)
+            pos = torch.from_numpy(sample["positions"]).to(device)  # (K, 2)
 
             with torch.no_grad():
                 scores_norm = model.score_candidates(
@@ -817,14 +810,14 @@ def _save_e2e_val_plots(
             )
 
             # Sparse ore map and observation mask from drilled positions
-            sparse_ore_map  = np.zeros((n_x, n_y), dtype=np.float32)
+            sparse_ore_map = np.zeros((n_x, n_y), dtype=np.float32)
             observation_mask = np.zeros((n_x, n_y), dtype=np.float32)
             pos_np = sample["positions"]  # (K, 2) normalised
-            ore_np = sample["ore_vals"]   # (K,)
+            ore_np = sample["ore_vals"]  # (K,)
             for (px, py), ov_val in zip(pos_np, ore_np):
                 i = int(round(float(px) * (n_x - 1)))
                 j = int(round(float(py) * (n_y - 1)))
-                sparse_ore_map[i, j]   = float(ov_val)
+                sparse_ore_map[i, j] = float(ov_val)
                 observation_mask[i, j] = 1.0
 
             true_ore_map = val_cache.targets[map_idx].astype(np.float32)
@@ -841,31 +834,31 @@ def _save_e2e_val_plots(
             )
 
     # ---- scatter plots (predicted vs true) -------------------------------------
-    all_ks:    list[int]   = []
+    all_ks: list[int] = []
     all_preds: list[float] = []
-    all_tgts:  list[float] = []
+    all_tgts: list[float] = []
 
     with torch.no_grad():
         for batch in val_loader:
-            bh  = batch["boreholes"].to(device)
-            ov  = batch["ore_vals"].to(device)
+            bh = batch["boreholes"].to(device)
+            ov = batch["ore_vals"].to(device)
             pos = batch["positions"].to(device)
-            cp  = batch["candidate_pos"].to(device)
+            cp = batch["candidate_pos"].to(device)
             tgt = batch["target_ore"].to(device)
-            pm  = batch["padding_mask"].to(device)
+            pm = batch["padding_mask"].to(device)
 
             pred_norm = model(bh, ov, pos, cp, pm)
             preds = normalizer.inverse_tensor(pred_norm).cpu().view(-1).tolist()
-            tgts  = normalizer.inverse_tensor(tgt).cpu().view(-1).tolist()
-            ks    = (~pm).sum(dim=1).cpu().tolist()
+            tgts = normalizer.inverse_tensor(tgt).cpu().view(-1).tolist()
+            ks = (~pm).sum(dim=1).cpu().tolist()
 
             all_ks.extend(int(k) for k in ks)
             all_preds.extend(preds)
             all_tgts.extend(tgts)
 
     preds_arr = np.array(all_preds)
-    tgts_arr  = np.array(all_tgts)
-    ks_arr    = np.array(all_ks)
+    tgts_arr = np.array(all_tgts)
+    ks_arr = np.array(all_ks)
 
     def _scatter_ax(ax: "plt.Axes", p: np.ndarray, t: np.ndarray, title: str) -> None:
         ax.scatter(t, p, alpha=0.3, s=8, color="steelblue", rasterized=True)
@@ -885,12 +878,18 @@ def _save_e2e_val_plots(
     if len(unique_ks) > 1:
         ncols = min(4, len(unique_ks))
         nrows = (len(unique_ks) + ncols - 1) // ncols
-        fig, axes = plt.subplots(nrows, ncols, figsize=(4 * ncols, 4 * nrows), squeeze=False)
+        fig, axes = plt.subplots(
+            nrows, ncols, figsize=(4 * ncols, 4 * nrows), squeeze=False
+        )
         for i, k in enumerate(unique_ks):
             row, col = divmod(i, ncols)
             mask = ks_arr == k
-            _scatter_ax(axes[row][col], preds_arr[mask], tgts_arr[mask],
-                        f"K={k} drills (n={mask.sum()})")
+            _scatter_ax(
+                axes[row][col],
+                preds_arr[mask],
+                tgts_arr[mask],
+                f"K={k} drills (n={mask.sum()})",
+            )
         for i in range(len(unique_ks), nrows * ncols):
             row, col = divmod(i, ncols)
             axes[row][col].set_visible(False)
@@ -901,44 +900,3 @@ def _save_e2e_val_plots(
         plt.close(fig)
 
     print(f"  plots saved -> {out_dir}")
-
-
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-def _load_jepa_backbone_weights(
-    model: CandidateScoringTransformer,
-    jepa_path: str,
-    device: str,
-    verbose: bool,
-) -> None:
-    """Copy CNN backbone weights from a JEPA checkpoint into the borehole encoder.
-
-    Only the convolutional layers are transferred; the transformer and
-    projection layers of the new encoder are left randomly initialised since
-    the JEPA predictor architecture differs.
-    """
-    from ..models.borehole_encoders.jepa_encoder import JEPAModel
-
-    try:
-        ckpt = torch.load(jepa_path, map_location=device, weights_only=False)
-        jepa_state = ckpt.get("context_encoder", ckpt.get("state_dict", ckpt))
-
-        target_state = model.bh_encoder.state_dict()
-        transferred = 0
-        for name, param in jepa_state.items():
-            # JEPA stores backbone weights under "backbone.conv.*"
-            if name.startswith("backbone.conv."):
-                new_name = "conv." + name[len("backbone.conv."):]
-                if new_name in target_state and target_state[new_name].shape == param.shape:
-                    target_state[new_name].copy_(param)
-                    transferred += 1
-
-        model.bh_encoder.load_state_dict(target_state)
-        if verbose:
-            print(f"  JEPA init     : transferred {transferred} conv layer weight tensors")
-    except Exception as exc:
-        if verbose:
-            print(f"  JEPA init     : FAILED ({exc}) — continuing with random init")
-
