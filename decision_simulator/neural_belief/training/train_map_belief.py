@@ -19,10 +19,7 @@ Checkpoint files: ``map_belief_best.pt``, ``map_belief_last.pt``
 
 from __future__ import annotations
 
-import csv
-import dataclasses
 import json
-from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -43,96 +40,11 @@ from ..training_utils import (
     false_positive_loss,
     save_no_ore_metrics,
     save_val_plots,
+    export_history,
+    load_model_encoder_checkpoint,
 )
-from ..models.map_encoders.map_belief_transformer import MapBeliefConfig, MapBeliefTransformer
-
-
-# ---------------------------------------------------------------------------
-# Training configuration
-# ---------------------------------------------------------------------------
-
-@dataclass
-class MapBeliefTrainingConfig:
-    """Hyperparameters for training the MapBeliefTransformer.
-
-    Dataset and normalisation fields are identical to NeuralBeliefTrainingConfig
-    so the two training functions can be called with the same preparation code.
-    Architectural fields replace the UNet-specific ``in_channels`` / ``base_channels``.
-    """
-
-    # --- Dataset (same as NeuralBeliefTrainingConfig) ---
-    n_train_maps: int = 50
-    samples_per_map: int = 20
-    n_val_maps: int = 10
-    val_samples_per_map: int = 10
-    min_drills: int = 1
-    max_drills: int = 15
-
-    # --- Input / grid ---
-    latent_dim: int = 128           # borehole encoder latent dim (sets in_channels)
-    n_x: int = 32
-    n_y: int = 32
-
-    # --- Model architecture ---
-    d_model: int = 256
-    n_heads: int = 8
-    n_encoder_layers: int = 4
-    d_ff: int = 1024                # feedforward dim (4 × d_model)
-    dropout: float = 0.1
-    head_hidden_dim: int = 128
-
-    # --- Target normalisation (same as NeuralBeliefTrainingConfig) ---
-    norm_mode: str = "log1p"        # "log1p" | "zscore" | "none"
-
-    # --- Optimisation ---
-    batch_size: int = 16            # smaller than UNet due to transformer attention memory
-    lr: float = 1e-4               # lower than UNet; transformers train more stably at low lr
-    weight_decay: float = 1e-4
-    n_epochs: int = 50
-
-    # --- Gradient clipping (important for transformer stability) ---
-    grad_clip_norm: float = 1.0     # 0.0 = disabled
-
-    # --- Sequential dataset ---
-    use_sequential_dataset: bool = False
-    n_sequences_per_map: int = 3
-    prefix_steps: list[int] = field(default_factory=lambda: [1, 2, 3, 5, 8, 10, 15])
-    sequential_seed: int = 42
-
-    # --- False-positive penalty ---
-    use_false_positive_penalty: bool = False
-    false_positive_weight: float = 0.1
-    false_positive_threshold: float = 0.05
-
-    # --- Misc ---
-    seed: int = 42
-    borehole_encoder: str = "unknown"
-    n_val_plots: int = 20
-
-    def __post_init__(self) -> None:
-        if self.d_model % self.n_heads != 0:
-            raise ValueError(
-                f"d_model={self.d_model} must be divisible by n_heads={self.n_heads}"
-            )
-
-    @property
-    def in_channels(self) -> int:
-        """Total input channels: ore + mask + latent."""
-        return 2 + self.latent_dim
-
-    def to_model_config(self) -> MapBeliefConfig:
-        """Construct a MapBeliefConfig from the architectural fields of this dataclass."""
-        return MapBeliefConfig(
-            latent_dim=self.latent_dim,
-            n_x=self.n_x,
-            n_y=self.n_y,
-            d_model=self.d_model,
-            n_heads=self.n_heads,
-            n_encoder_layers=self.n_encoder_layers,
-            d_ff=self.d_ff,
-            dropout=self.dropout,
-            head_hidden_dim=self.head_hidden_dim,
-        )
+from ..models.map_encoders.map_belief_transformer import MapBeliefTransformer
+from .training_configs import MapBeliefTrainingConfig
 
 
 # ---------------------------------------------------------------------------
@@ -366,7 +278,7 @@ def train_map_belief(
     _save_ckpt(checkpoint_dir / "map_belief_last.pt", cfg.n_epochs)
 
     # ---- export training history ------------------------------------------------
-    _export_history(history, checkpoint_dir)
+    export_history(history, checkpoint_dir)
 
     # ---- baseline comparison ----------------------------------------------------
     if verbose:
@@ -490,97 +402,15 @@ def load_map_belief_checkpoint(
     path: Path,
     device: str = "cpu",
 ) -> tuple[MapBeliefTransformer, MapBeliefTrainingConfig, TargetNormalizer, list[dict]]:
-    """Load a saved MapBeliefTransformer checkpoint.
-
-    Returns
-    -------
-    (model, training_config, normalizer, training_history)
-    """
-    ckpt = torch.load(path, map_location=device, weights_only=False)
-
-    # Prefer the dedicated MapBeliefConfig stored in the checkpoint; fall back
-    # to reconstructing it from the training config for older checkpoints.
-    if "model_cfg" in ckpt:
-        model_cfg: MapBeliefConfig = ckpt["model_cfg"]
-    else:
-        train_cfg: MapBeliefTrainingConfig = ckpt["cfg"]
-        model_cfg = train_cfg.to_model_config()
-
-    model = MapBeliefTransformer(model_cfg).to(device)
-    model.load_state_dict(ckpt["state_dict"])
-    model.eval()
-
-    normalizer: TargetNormalizer = ckpt.get("normalizer", TargetNormalizer(mode="none"))
-    train_cfg = ckpt.get("cfg", MapBeliefTrainingConfig())
-
-    return model, train_cfg, normalizer, ckpt.get("history", [])
+    def _model_fn(ckpt: dict) -> MapBeliefTransformer:
+        if "model_cfg" in ckpt:
+            return MapBeliefTransformer(ckpt["model_cfg"])
+        return MapBeliefTransformer(ckpt["cfg"].to_model_config())
+    return load_model_encoder_checkpoint(path, _model_fn, MapBeliefTrainingConfig, device)
 
 
 # ---------------------------------------------------------------------------
 # Config builder
 # ---------------------------------------------------------------------------
 
-def build_map_belief_training_config(
-    debug: bool = False, overrides: dict | None = None
-) -> MapBeliefTrainingConfig:
-    """Construct a MapBeliefTrainingConfig with optional field overrides.
 
-    Parameters
-    ----------
-    debug     : if True, use minimal dataset / model for fast smoke testing
-    overrides : dict of field names → values to set after defaults
-
-    Raises
-    ------
-    ValueError if any override key is not a valid MapBeliefTrainingConfig field.
-    """
-    overrides = overrides or {}
-    valid_fields = {f.name for f in dataclasses.fields(MapBeliefTrainingConfig)}
-    invalid = set(overrides) - valid_fields
-    if invalid:
-        raise ValueError(
-            f"Unknown MapBeliefTrainingConfig field(s): {sorted(invalid)}.\n"
-            f"Valid fields: {sorted(valid_fields)}"
-        )
-
-    if debug:
-        cfg = MapBeliefTrainingConfig(
-            n_train_maps=2,
-            samples_per_map=2,
-            n_val_maps=1,
-            val_samples_per_map=2,
-            n_epochs=2,
-            batch_size=2,
-            d_model=64,
-            n_heads=4,
-            n_encoder_layers=1,
-            d_ff=128,
-            head_hidden_dim=32,
-            n_sequences_per_map=2,
-            prefix_steps=[1, 3, 5],
-        )
-    else:
-        cfg = MapBeliefTrainingConfig()
-
-    for key, value in overrides.items():
-        setattr(cfg, key, value)
-
-    return cfg
-
-
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-def _export_history(history: list[dict], directory: Path) -> None:
-    """Write training history to JSON and CSV files."""
-    if not history:
-        return
-    json_path = directory / "training_history.json"
-    csv_path  = directory / "training_history.csv"
-    with open(json_path, "w") as f:
-        json.dump(history, f, indent=2)
-    with open(csv_path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=list(history[0].keys()))
-        writer.writeheader()
-        writer.writerows(history)

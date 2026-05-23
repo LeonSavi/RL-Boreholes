@@ -10,8 +10,10 @@ returns ``(B, 1, n_x, n_y)``.
 from __future__ import annotations
 
 import csv
+import dataclasses
 import json
 from pathlib import Path
+from typing import Any, Callable
 
 import numpy as np
 import torch
@@ -204,15 +206,19 @@ def false_positive_loss(
     pred_norm: torch.Tensor,
     tgt_norm: torch.Tensor,
     normalizer: TargetNormalizer,
+    threshold: float = 0.0,
 ) -> torch.Tensor:
     """FP penalty: mean of clamp(pred, min=0) restricted to no-ore samples in the batch.
 
-    Returns a zero scalar when no no-ore samples are present (so the caller
-    can always add it to the MSE loss unconditionally).
+    *threshold* is the maximum summed ore value still considered "no ore".
+    For map outputs (B, 1, H, W) the default 0.0 matches the exact-zero check.
+    For scalar targets (B, 1) pass the per-sample threshold (e.g. 1e-3).
+
+    Returns a zero scalar when no no-ore samples are present.
     """
     tgt_ore = normalizer.inverse_tensor(tgt_norm)
     B = tgt_ore.shape[0]
-    no_ore = tgt_ore.view(B, -1).sum(dim=1) == 0  # (B,)
+    no_ore = tgt_ore.reshape(B, -1).sum(dim=1) <= threshold  # (B,)
     if not no_ore.any():
         return pred_norm.new_zeros(())
     return pred_norm[no_ore].clamp(min=0).mean()
@@ -246,6 +252,62 @@ def save_no_ore_metrics(
 
     if verbose:
         print(f"  no-ore metrics -> {json_path}")
+
+
+def load_model_encoder_checkpoint(
+    path: Path,
+    model_fn: Callable[[dict], nn.Module],
+    cfg_class: type,
+    device: str = "cpu",
+) -> tuple[nn.Module, Any, TargetNormalizer, list[dict]]:
+    """Load a model checkpoint generically.
+
+    *model_fn* receives the raw checkpoint dict and must return an un-moved,
+    un-eval'd ``nn.Module``.  The function moves the model to *device* and
+    sets eval mode before returning.  *cfg_class* is used as the default when
+    the checkpoint has no ``"cfg"`` key.
+
+    Returns
+    -------
+    (model, cfg, normalizer, history)
+    """
+    ckpt = torch.load(path, map_location=device, weights_only=False)
+    model = model_fn(ckpt).to(device)
+    model.load_state_dict(ckpt["state_dict"])
+    model.eval()
+    normalizer: TargetNormalizer = ckpt.get("normalizer", TargetNormalizer(mode="none"))
+    cfg = ckpt.get("cfg", cfg_class())
+    return model, cfg, normalizer, ckpt.get("history", [])
+
+
+def build_training_config(cfg_class: type, overrides: dict | None = None):
+    """Instantiate *cfg_class* with optional field overrides, validating keys."""
+    overrides = overrides or {}
+    valid_fields = {f.name for f in dataclasses.fields(cfg_class)}
+    invalid = set(overrides) - valid_fields
+    if invalid:
+        raise ValueError(
+            f"Unknown {cfg_class.__name__} field(s): {sorted(invalid)}.\n"
+            f"Valid fields: {sorted(valid_fields)}"
+        )
+    cfg = cfg_class()
+    for key, value in overrides.items():
+        setattr(cfg, key, value)
+    return cfg
+
+
+def export_history(history: list[dict], directory: Path) -> None:
+    """Write training history to JSON and CSV."""
+    if not history:
+        return
+    json_path = directory / "training_history.json"
+    csv_path  = directory / "training_history.csv"
+    with open(json_path, "w") as f:
+        json.dump(history, f, indent=2)
+    with open(csv_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(history[0].keys()))
+        writer.writeheader()
+        writer.writerows(history)
 
 
 # ---------------------------------------------------------------------------

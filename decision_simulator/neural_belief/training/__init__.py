@@ -21,28 +21,26 @@ paths and the original ``decision_simulator.neural_belief.training.*`` paths
 continue to work without modification.
 """
 
-from .train_unet_belief import (
+from .training_configs import (
     NeuralBeliefTrainingConfig,
+    MapBeliefTrainingConfig,
+    E2ETrainingConfig,
+)
+from .train_unet_belief import (
     train_neural_belief,
     load_belief_checkpoint,
-    build_training_config,
-    export_history,
     save_experiment_config,
 )
 from .train_map_belief import (
-    MapBeliefTrainingConfig,
     train_map_belief,
     load_map_belief_checkpoint,
-    build_map_belief_training_config,
 )
 from .train_raw_borehole_belief import train_raw_borehole_belief
 from .train_end_to_end import (
-    E2ETrainingConfig,
     E2EDataset,
     collate_e2e,
     train_end_to_end,
     load_e2e_checkpoint,
-    build_e2e_training_config,
 )
 
 # Shared validation utilities re-exported here for callers that previously
@@ -52,6 +50,9 @@ from ..training_utils import (
     validate_by_drill_bins,
     validate,
     save_val_plots,
+    export_history,
+    build_training_config,
+    load_model_encoder_checkpoint,
 )
 from ..sequential_eval import validate_by_step, save_sequential_val_plots
 from ..datasets import build_sequential_dataset_from_cache
@@ -61,14 +62,11 @@ __all__ = [
     "NeuralBeliefTrainingConfig",
     "train_neural_belief",
     "load_belief_checkpoint",
-    "build_training_config",
-    "export_history",
     "save_experiment_config",
     # Transformer pipeline
     "MapBeliefTrainingConfig",
     "train_map_belief",
     "load_map_belief_checkpoint",
-    "build_map_belief_training_config",
     # Placeholder
     "train_raw_borehole_belief",
     # End-to-end candidate scoring
@@ -77,7 +75,10 @@ __all__ = [
     "collate_e2e",
     "train_end_to_end",
     "load_e2e_checkpoint",
-    "build_e2e_training_config",
+    # Shared utilities
+    "build_training_config",
+    "load_model_encoder_checkpoint",
+    "export_history",
     # Shared utilities (backward-compat re-exports)
     "DRILL_BINS",
     "validate_by_drill_bins",

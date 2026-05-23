@@ -39,10 +39,7 @@ e2e_last.pt  — final epoch
 
 from __future__ import annotations
 
-import csv
-import dataclasses
 import json
-from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -54,10 +51,9 @@ from decision_simulator.resources import DecisionSimulationResources
 from ..map_cache import NpzMapCache
 from ..models.borehole_encoders.autoencoder import standardise
 from ..utils import TargetNormalizer
-from ..models.end_to_end.candidate_scoring_transformer import (
-    E2EConfig,
-    CandidateScoringTransformer,
-)
+from ..models.end_to_end.candidate_scoring_transformer import CandidateScoringTransformer
+from ..training_utils import export_history, false_positive_loss, load_model_encoder_checkpoint
+from .training_configs import E2ETrainingConfig
 
 
 # ---------------------------------------------------------------------------
@@ -73,104 +69,6 @@ _CANDIDATE_TYPE_PROBS: dict[str, float] = {
     "mid":  0.20,
     "high": 0.20,
 }
-
-# ---------------------------------------------------------------------------
-# Training configuration
-# ---------------------------------------------------------------------------
-
-@dataclass
-class E2ETrainingConfig:
-    """Hyperparameters for training the end-to-end candidate scoring model."""
-
-    # Dataset
-    n_train_maps: int = 50
-    samples_per_map: int = 20
-    candidates_per_sample: int = 1   # candidates sampled per (map, drilling-history) pair
-    n_val_maps: int = 30
-    val_samples_per_map: int = 10
-    min_drills: int = 1
-    max_drills: int = 15
-
-    # Sequential dataset mode: ordered drill sequences at fixed prefix lengths.
-    # Mirrors the real exploration setting where each drill informs the next.
-    # When False (default), K drills are sampled randomly from [min_drills, max_drills].
-    use_sequential_dataset: bool = False
-    n_sequences_per_map: int = 3
-    prefix_steps: list[int] = field(default_factory=lambda: [1, 2, 3, 5, 8, 10, 15])
-
-    # Borehole dimensions — resolved from resources at training time
-    n_variables: int = 5
-    n_depth: int = 440
-
-    # Borehole encoder architecture
-    bh_channels: tuple[int, ...] = field(default_factory=lambda: (32, 64, 128, 256))
-    bh_d_model: int = 128
-    bh_n_heads: int = 4
-    bh_n_layers: int = 2
-    latent_dim: int = 128
-
-    # Candidate scoring transformer architecture
-    d_model: int = 256
-    n_heads: int = 8
-    n_layers: int = 4
-    d_ff: int = 1024
-    dropout: float = 0.1
-    head_hidden_dim: int = 128
-
-    # Positional encoding
-    pe_max_freq: float = 10000.0
-
-    # Optimisation
-    batch_size: int = 32
-    lr: float = 1e-4
-    weight_decay: float = 1e-4
-    n_epochs: int = 50
-    norm_mode: str = "log1p"         # "log1p" | "zscore" | "none"
-    grad_clip_norm: float = 1.0      # 0.0 = disabled
-
-    # False-positive penalty: penalise high predictions where true ore = 0
-    use_false_positive_penalty: bool = False
-    false_positive_weight: float = 0.1
-    fp_threshold: float = 1e-3       # ore values below this are treated as "no ore"
-
-    # Experiment controls
-    shuffle_boreholes: bool = False        # variant C sanity check
-    pretrained_bh_encoder_path: str | None = None  # variant D: JEPA init
-
-    # Grid dimensions — set automatically from cache in train_end_to_end()
-    n_x: int = 32
-    n_y: int = 32
-
-    # Misc
-    seed: int = 42
-    borehole_encoder: str = "end_to_end"  # informational; stored in checkpoint
-    n_val_plots: int = 20
-
-    def __post_init__(self) -> None:
-        if self.d_model % self.n_heads != 0:
-            raise ValueError(
-                f"d_model={self.d_model} must be divisible by n_heads={self.n_heads}"
-            )
-
-    def to_model_config(self) -> E2EConfig:
-        """Build an E2EConfig from the architectural fields of this dataclass."""
-        return E2EConfig(
-            n_variables=self.n_variables,
-            n_depth=self.n_depth,
-            bh_channels=self.bh_channels,
-            bh_d_model=self.bh_d_model,
-            bh_n_heads=self.bh_n_heads,
-            bh_n_layers=self.bh_n_layers,
-            latent_dim=self.latent_dim,
-            d_model=self.d_model,
-            n_heads=self.n_heads,
-            n_layers=self.n_layers,
-            d_ff=self.d_ff,
-            dropout=self.dropout,
-            head_hidden_dim=self.head_hidden_dim,
-            pe_max_freq=self.pe_max_freq,
-        )
-
 
 # ---------------------------------------------------------------------------
 # Dataset
@@ -474,29 +372,6 @@ def collate_e2e(batch: list[dict]) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Loss helpers
-# ---------------------------------------------------------------------------
-
-def _false_positive_loss(
-    pred_norm: torch.Tensor,
-    tgt_norm: torch.Tensor,
-    normalizer: TargetNormalizer,
-    threshold: float = 1e-3,
-) -> torch.Tensor:
-    """Penalise positive predictions where the true ore value is (near) zero.
-
-    Adapted from training_utils.false_positive_loss for scalar targets.
-
-    Returns a zero tensor when no no-ore samples are present in the batch.
-    """
-    tgt_ore = normalizer.inverse_tensor(tgt_norm)          # (B, 1) — raw space
-    no_ore = tgt_ore.squeeze(-1) < threshold               # (B,) bool
-    if not no_ore.any():
-        return pred_norm.new_zeros(())
-    return pred_norm[no_ore].clamp(min=0.0).mean()
-
-
-# ---------------------------------------------------------------------------
 # Validation
 # ---------------------------------------------------------------------------
 
@@ -720,7 +595,7 @@ def train_end_to_end(
             loss = loss_fn(pred, tgt)
 
             if cfg.use_false_positive_penalty:
-                fp_loss = _false_positive_loss(pred, tgt, normalizer, cfg.fp_threshold)
+                fp_loss = false_positive_loss(pred, tgt, normalizer, cfg.fp_threshold)
                 loss = loss + cfg.false_positive_weight * fp_loss
 
             optimiser.zero_grad()
@@ -753,7 +628,7 @@ def train_end_to_end(
             _save_ckpt(checkpoint_dir / "e2e_best.pt", epoch)
 
     _save_ckpt(checkpoint_dir / "e2e_last.pt", cfg.n_epochs)
-    _export_history(history, checkpoint_dir)
+    export_history(history, checkpoint_dir)
 
     # ---- reload best weights -------------------------------------------------
     best_ckpt = torch.load(
@@ -808,84 +683,16 @@ def load_e2e_checkpoint(
     path: Path,
     device: str = "cpu",
 ) -> tuple[CandidateScoringTransformer, E2ETrainingConfig, TargetNormalizer, list[dict]]:
-    """Load a saved CandidateScoringTransformer checkpoint.
-
-    Returns
-    -------
-    (model, training_config, normalizer, training_history)
-    """
-    ckpt = torch.load(path, map_location=device, weights_only=False)
-
-    if "model_cfg" in ckpt:
-        model_cfg: E2EConfig = ckpt["model_cfg"]
-    else:
-        train_cfg: E2ETrainingConfig = ckpt["cfg"]
-        model_cfg = train_cfg.to_model_config()
-
-    model = CandidateScoringTransformer(model_cfg).to(device)
-    model.load_state_dict(ckpt["state_dict"])
-    model.eval()
-
-    normalizer: TargetNormalizer = ckpt.get("normalizer", TargetNormalizer(mode="none"))
-    train_cfg = ckpt.get("cfg", E2ETrainingConfig())
-
-    return model, train_cfg, normalizer, ckpt.get("history", [])
+    def _model_fn(ckpt: dict) -> CandidateScoringTransformer:
+        if "model_cfg" in ckpt:
+            return CandidateScoringTransformer(ckpt["model_cfg"])
+        return CandidateScoringTransformer(ckpt["cfg"].to_model_config())
+    return load_model_encoder_checkpoint(path, _model_fn, E2ETrainingConfig, device)
 
 
 # ---------------------------------------------------------------------------
 # Config builder
 # ---------------------------------------------------------------------------
-
-def build_e2e_training_config(
-    debug: bool = False,
-    overrides: dict | None = None,
-) -> E2ETrainingConfig:
-    """Build an E2ETrainingConfig with optional field overrides.
-
-    Parameters
-    ----------
-    debug     : if True, use minimal dataset / model for fast smoke testing
-    overrides : dict of field names → values applied after defaults
-
-    Raises
-    ------
-    ValueError if any override key is not a valid E2ETrainingConfig field.
-    """
-    overrides = overrides or {}
-    valid_fields = {f.name for f in dataclasses.fields(E2ETrainingConfig)}
-    invalid = set(overrides) - valid_fields
-    if invalid:
-        raise ValueError(
-            f"Unknown E2ETrainingConfig field(s): {sorted(invalid)}.\n"
-            f"Valid fields: {sorted(valid_fields)}"
-        )
-
-    if debug:
-        cfg = E2ETrainingConfig(
-            n_train_maps=2,
-            samples_per_map=4,
-            candidates_per_sample=1,
-            n_val_maps=1,
-            val_samples_per_map=4,
-            n_epochs=2,
-            batch_size=4,
-            d_model=64,
-            n_heads=4,
-            n_layers=1,
-            d_ff=128,
-            head_hidden_dim=32,
-            bh_d_model=32,
-            bh_n_heads=4,
-            bh_n_layers=1,
-            latent_dim=32,
-        )
-    else:
-        cfg = E2ETrainingConfig()
-
-    for key, value in overrides.items():
-        setattr(cfg, key, value)
-
-    return cfg
 
 
 # ---------------------------------------------------------------------------
@@ -1135,16 +942,3 @@ def _load_jepa_backbone_weights(
         if verbose:
             print(f"  JEPA init     : FAILED ({exc}) — continuing with random init")
 
-
-def _export_history(history: list[dict], directory: Path) -> None:
-    """Write training history to JSON and CSV."""
-    if not history:
-        return
-    json_path = directory / "training_history.json"
-    csv_path  = directory / "training_history.csv"
-    with open(json_path, "w") as f:
-        json.dump(history, f, indent=2)
-    with open(csv_path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=list(history[0].keys()))
-        writer.writeheader()
-        writer.writerows(history)

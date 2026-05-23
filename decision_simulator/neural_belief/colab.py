@@ -21,18 +21,38 @@ from .models.map_encoders.unet_belief import UNetBelief
 
 from .map_cache import NpzMapCacheStore
 from .training import (
+    NeuralBeliefTrainingConfig,
+    MapBeliefTrainingConfig,
+    E2ETrainingConfig,
     build_training_config,
-    build_map_belief_training_config,
     export_history,
     load_belief_checkpoint,
     load_map_belief_checkpoint,
     save_experiment_config,
     train_neural_belief,
     train_map_belief,
-    build_e2e_training_config,
     train_end_to_end,
     load_e2e_checkpoint,
 )
+
+_DEBUG_UNET: dict = {
+    "n_train_maps": 2, "samples_per_map": 2, "n_val_maps": 1,
+    "val_samples_per_map": 2, "n_epochs": 2, "batch_size": 2,
+    "base_channels": 16, "n_sequences_per_map": 2, "prefix_steps": [1, 3, 5],
+}
+_DEBUG_MAP: dict = {
+    "n_train_maps": 2, "samples_per_map": 2, "n_val_maps": 1,
+    "val_samples_per_map": 2, "n_epochs": 2, "batch_size": 2,
+    "d_model": 64, "n_heads": 4, "n_encoder_layers": 1, "d_ff": 128,
+    "head_hidden_dim": 32, "n_sequences_per_map": 2, "prefix_steps": [1, 3, 5],
+}
+_DEBUG_E2E: dict = {
+    "n_train_maps": 2, "samples_per_map": 4, "candidates_per_sample": 1,
+    "n_val_maps": 1, "val_samples_per_map": 4, "n_epochs": 2, "batch_size": 4,
+    "d_model": 64, "n_heads": 4, "n_layers": 1, "d_ff": 128,
+    "head_hidden_dim": 32, "bh_d_model": 32, "bh_n_heads": 4, "bh_n_layers": 1,
+    "latent_dim": 32,
+}
 
 # Fields present in NeuralBeliefTrainingConfig but not in MapBeliefTrainingConfig.
 # These are silently dropped when building a transformer config from **overrides.
@@ -154,7 +174,7 @@ def train_belief_from_colab(
     # in_channels and latent_dim are derived from the encoder;
     # explicit user overrides take precedence.
     encoder_defaults = {"in_channels": 2 + latent_dim, "latent_dim": latent_dim}
-    cfg = build_training_config(debug, {**encoder_defaults, **overrides})
+    cfg = build_training_config(NeuralBeliefTrainingConfig, {**(_DEBUG_UNET if debug else {}), **encoder_defaults, **overrides})
     cfg.borehole_encoder = borehole_encoder
 
     print(f"\nborehole_encoder : {borehole_encoder}")
@@ -307,8 +327,8 @@ def compare_belief_encoders_from_colab(
 
     # Both config types share the same dataset fields, so UNet config suffices here.
     base_cfg = build_training_config(
-        debug,
-        {k: v for k, v in overrides.items() if k not in ("in_channels", "latent_dim")},
+        NeuralBeliefTrainingConfig,
+        {**(_DEBUG_UNET if debug else {}), **{k: v for k, v in overrides.items() if k not in ("in_channels", "latent_dim")}},
     )
 
     resolved_steps = prefix_steps or [1, 2, 3, 5, 8, 10, 15]
@@ -453,27 +473,17 @@ def compare_belief_encoders_from_colab(
 
                     is_transformer = map_encoder == "transformer"
                     if is_transformer:
-                        cfg = build_map_belief_training_config(
-                            debug,
-                            {
-                                "latent_dim": latent_dim,
-                                **{
-                                    k: v
-                                    for k, v in effective_overrides.items()
-                                    if k not in _UNET_ONLY_OVERRIDE_FIELDS
-                                },
-                                **seq_cfg_overrides,
-                            },
+                        cfg = build_training_config(
+                            MapBeliefTrainingConfig,
+                            {**(_DEBUG_MAP if debug else {}), "latent_dim": latent_dim,
+                             **{k: v for k, v in effective_overrides.items() if k not in _UNET_ONLY_OVERRIDE_FIELDS},
+                             **seq_cfg_overrides},
                         )
                     else:
                         cfg = build_training_config(
-                            debug,
-                            {
-                                "in_channels": 2 + latent_dim,
-                                "latent_dim": latent_dim,
-                                **effective_overrides,
-                                **seq_cfg_overrides,
-                            },
+                            NeuralBeliefTrainingConfig,
+                            {**(_DEBUG_UNET if debug else {}), "in_channels": 2 + latent_dim,
+                             "latent_dim": latent_dim, **effective_overrides, **seq_cfg_overrides},
                         )
                     cfg.borehole_encoder = f"{shuffle_label}{borehole_encoder}"
 
@@ -713,13 +723,11 @@ def train_sequential_belief_from_colab(
     }
 
     if is_transformer:
-        cfg = build_map_belief_training_config(
-            debug,
-            {
-                "latent_dim": latent_dim,
-                **{k: v for k, v in overrides.items() if k not in _UNET_ONLY_OVERRIDE_FIELDS},
-                **sequential_overrides,
-            },
+        cfg = build_training_config(
+            MapBeliefTrainingConfig,
+            {**(_DEBUG_MAP if debug else {}), "latent_dim": latent_dim,
+             **{k: v for k, v in overrides.items() if k not in _UNET_ONLY_OVERRIDE_FIELDS},
+             **sequential_overrides},
         )
         cfg.borehole_encoder = borehole_encoder
 
@@ -753,8 +761,8 @@ def train_sequential_belief_from_colab(
     else:
         encoder_defaults = {"in_channels": 2 + latent_dim, "latent_dim": latent_dim}
         cfg = build_training_config(
-            debug,
-            {**encoder_defaults, **overrides, **sequential_overrides},
+            NeuralBeliefTrainingConfig,
+            {**(_DEBUG_UNET if debug else {}), **encoder_defaults, **overrides, **sequential_overrides},
         )
         cfg.borehole_encoder = borehole_encoder
 
@@ -926,7 +934,7 @@ def train_end_to_end_from_colab(
             "prefix_steps": prefix_steps or [1, 2, 3, 5, 8, 10, 15],
         }
 
-    cfg = build_e2e_training_config(debug=debug, overrides={**overrides, **seq_overrides})
+    cfg = build_training_config(E2ETrainingConfig, {**(_DEBUG_E2E if debug else {}), **overrides, **seq_overrides})
 
     # ---- load map cache -------------------------------------------------------
     store = NpzMapCacheStore(resolved_pool)

@@ -9,10 +9,8 @@ Checkpoint files: ``belief_best.pt``, ``belief_last.pt``
 
 from __future__ import annotations
 
-import csv
 import dataclasses
 import json
-from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -34,73 +32,11 @@ from ..training_utils import (
     false_positive_loss,
     save_no_ore_metrics,
     save_val_plots,
+    export_history,
+    load_model_encoder_checkpoint,
 )
 from ..dataset_transformations import fit_and_apply_latent_pca
-
-
-@dataclass
-class NeuralBeliefTrainingConfig:
-    """Hyper-parameters for training the neural belief updater."""
-
-    # --- dataset ---
-    n_train_maps: int = 50
-    samples_per_map: int = 20
-    n_val_maps: int = 10
-    val_samples_per_map: int = 10
-    min_drills: int = 1
-    max_drills: int = 15
-
-    # --- model ---
-    # in_channels must equal 2 + latent_dim:
-    #   ch 0   : sparse ore map
-    #   ch 1   : observation mask
-    #   ch 2.. : JEPA latent vector (latent_dim channels)
-    in_channels: int = 130
-    base_channels: int = 64
-
-    # --- target normalization ---
-    norm_mode: str = "log1p"  # "log1p" | "zscore" | "none"
-
-    # --- optimisation ---
-    batch_size: int = 32
-    lr: float = 3e-4
-    weight_decay: float = 1e-4
-    n_epochs: int = 50
-
-    # --- latent PCA ---
-    use_latent_pca: bool = False
-    latent_pca_components: int = 32
-
-    # --- coordinate channels ---
-    use_coordinate_channels: bool = False
-
-    # --- sequential dataset ---
-    use_sequential_dataset: bool = False
-    n_sequences_per_map: int = 3
-    prefix_steps: list[int] = field(default_factory=lambda: [1, 2, 3, 5, 8, 10, 15])
-    sequential_seed: int = 42
-
-    # --- false-positive penalty ---
-    use_false_positive_penalty: bool = False
-    false_positive_weight: float = 0.1
-    false_positive_threshold: float = 0.05
-
-    # --- misc ---
-    seed: int = 42
-    latent_dim: int = 128
-    borehole_encoder: str = "unknown"
-    n_val_plots: int = 20
-
-    def __post_init__(self) -> None:
-        expected = 2 + self.latent_dim
-        if self.in_channels != expected:
-            raise ValueError(
-                f"NeuralBeliefTrainingConfig: in_channels={self.in_channels} does not "
-                f"match 2 + latent_dim = {expected}. "
-                f"UNetBelief input layout is [ore_map, mask, JEPA_latent], so "
-                f"in_channels must always equal 2 + latent_dim. "
-                f"Either set in_channels={expected} or latent_dim={self.in_channels - 2}."
-            )
+from .training_configs import NeuralBeliefTrainingConfig
 
 
 def train_neural_belief(
@@ -462,68 +398,12 @@ def load_belief_checkpoint(
     path: Path,
     device: str = "cpu",
 ) -> tuple[UNetBelief, NeuralBeliefTrainingConfig, TargetNormalizer, list[dict]]:
-    """Load a saved UNetBelief checkpoint.
-
-    Returns
-    -------
-    (model, training_config, normalizer, training_history)
-    """
-    ckpt = torch.load(path, map_location=device, weights_only=False)
-    cfg: NeuralBeliefTrainingConfig = ckpt["cfg"]
-    model = UNetBelief(in_channels=cfg.in_channels, base_channels=cfg.base_channels).to(
-        device
-    )
-    model.load_state_dict(ckpt["state_dict"])
-    model.eval()
-    normalizer: TargetNormalizer = ckpt.get("normalizer", TargetNormalizer(mode="none"))
-    return model, cfg, normalizer, ckpt.get("history", [])
+    def _model_fn(ckpt: dict) -> UNetBelief:
+        cfg = ckpt["cfg"]
+        return UNetBelief(in_channels=cfg.in_channels, base_channels=cfg.base_channels)
+    return load_model_encoder_checkpoint(path, _model_fn, NeuralBeliefTrainingConfig, device)
 
 
-def build_training_config(debug: bool, overrides: dict) -> NeuralBeliefTrainingConfig:
-    valid_fields = {f.name for f in dataclasses.fields(NeuralBeliefTrainingConfig)}
-    invalid = set(overrides) - valid_fields
-    if invalid:
-        raise ValueError(
-            f"Unknown NeuralBeliefTrainingConfig field(s): {sorted(invalid)}.\n"
-            f"Valid fields: {sorted(valid_fields)}"
-        )
-
-    if debug:
-        cfg = NeuralBeliefTrainingConfig(
-            n_train_maps=2,
-            samples_per_map=2,
-            n_val_maps=1,
-            val_samples_per_map=2,
-            n_epochs=2,
-            batch_size=2,
-            base_channels=16,
-            n_sequences_per_map=2,
-            prefix_steps=[1, 3, 5],
-        )
-    else:
-        cfg = NeuralBeliefTrainingConfig()
-
-    for key, value in overrides.items():
-        setattr(cfg, key, value)
-
-    return cfg
-
-
-def export_history(history: list[dict], checkpoint_dir: Path) -> None:
-    if not history:
-        return
-
-    json_path = checkpoint_dir / "training_history.json"
-    with open(json_path, "w") as f:
-        json.dump(history, f, indent=2)
-    print(f"History -> {json_path}")
-
-    csv_path = checkpoint_dir / "training_history.csv"
-    with open(csv_path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=list(history[0].keys()))
-        writer.writeheader()
-        writer.writerows(history)
-    print(f"History -> {csv_path}")
 
 
 def save_experiment_config(
