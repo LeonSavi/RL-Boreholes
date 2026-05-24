@@ -15,16 +15,8 @@ from decision_simulator.resources import (
 )
 
 from .datasets import GeologicalBeliefDataset
-from .map_cache import NpzMapCacheStore
-from .map_hdf5 import HDF5MapStore
+from .map_hdf5 import HDF5MapDirectory, HDF5MapStore
 from .models.map_encoders.unet_belief import UNetBelief
-
-# ---------------------------------------------------------------------------
-# Data source flag
-# ---------------------------------------------------------------------------
-# True  → read maps from a pre-built HDF5 shard  (HDF5MapStore,    default)
-# False → read maps from an npz pool directory    (NpzMapCacheStore, legacy)
-USE_HDF5_STORE: bool = True
 
 from .training import (
     NeuralBeliefTrainingConfig,
@@ -43,6 +35,9 @@ from .training import (
     load_e2e_map_belief_checkpoint,
     train_patch_borehole_transformer,
     load_patch_borehole_checkpoint,
+    PatchBoreholeCLSE2ETrainingConfig,
+    train_patch_borehole_cls_transformer,
+    load_patch_borehole_cls_checkpoint,
 )
 
 _DEBUG_UNET: dict = {
@@ -89,6 +84,7 @@ _DEBUG_E2E: dict = {
     "latent_dim": 32,
 }
 _DEBUG_PATCH: dict = {**_DEBUG_E2E, "bh_patch_size": 10}
+_DEBUG_CLS: dict = {**_DEBUG_E2E, "bh_patch_size": 10}
 
 # Fields present in NeuralBeliefTrainingConfig but not in MapBeliefTrainingConfig.
 # These are silently dropped when building a transformer config from **overrides.
@@ -225,7 +221,7 @@ def train_belief_from_colab(
     resolved_pool_path = Path(map_pool_path)
     if not resolved_pool_path.is_absolute():
         resolved_pool_path = root / resolved_pool_path
-    store = HDF5MapStore(resolved_pool_path) if USE_HDF5_STORE else NpzMapCacheStore(resolved_pool_path)
+    store = HDF5MapDirectory(resolved_pool_path) if resolved_pool_path.is_dir() else HDF5MapStore(resolved_pool_path)
 
     train_cache, val_cache = store.load_map_data(
         n_train_maps=cfg.n_train_maps,
@@ -407,7 +403,7 @@ def compare_belief_encoders_from_colab(
         else {}
     )
 
-    store = HDF5MapStore(resolved_pool_path) if USE_HDF5_STORE else NpzMapCacheStore(resolved_pool_path)
+    store = HDF5MapDirectory(resolved_pool_path) if resolved_pool_path.is_dir() else HDF5MapStore(resolved_pool_path)
 
     train_cache, val_cache = store.load_map_data(
         n_train_maps=base_cfg.n_train_maps,
@@ -772,7 +768,7 @@ def train_sequential_belief_from_colab(
     effective_n_train = 2 if debug else n_train_maps
     effective_n_val = 1 if debug else n_val_maps
 
-    store = HDF5MapStore(resolved_pool) if USE_HDF5_STORE else NpzMapCacheStore(resolved_pool)
+    store = HDF5MapDirectory(resolved_pool) if resolved_pool.is_dir() else HDF5MapStore(resolved_pool)
 
     train_cache, val_cache = store.load_map_data(
         n_train_maps=effective_n_train,
@@ -904,13 +900,14 @@ def train_end_to_end_from_colab(
     use_sequential_dataset: bool = False,
     n_sequences_per_map: int = 3,
     prefix_steps: list[int] | None = None,
-    bh_encoder_model: Literal["cnn", "patch"] = "cnn",
+    bh_encoder_model: Literal["cnn", "patch", "cls"] = "cnn",
     **overrides,
 ) -> tuple[object, list[dict]]:
     """Train the end-to-end map belief transformer from a Colab notebook.
 
-    Trains EndToEndMapBeliefTransformer (``bh_encoder_model="cnn"``) or
-    PatchBoreholeEndToEndMapBeliefTransformer (``bh_encoder_model="patch"``) with a
+    Trains EndToEndMapBeliefTransformer (``bh_encoder_model="cnn"``),
+    PatchBoreholeEndToEndMapBeliefTransformer (``bh_encoder_model="patch"``), or
+    PatchBoreholeCLSEndToEndMapBeliefTransformer (``bh_encoder_model="cls"``) with a
     full-map MSE reconstruction objective.  The borehole encoder and map belief
     transformer are trained jointly from scratch — no pre-trained JEPA or
     autoencoder weights are required.  The ``norm_stats_from`` parameter
@@ -929,12 +926,21 @@ def train_end_to_end_from_colab(
     ...     debug=True,
     ... )
 
-    # Patch tokenisation front-end
+    # Patch tokenisation front-end (mean pooling)
     >>> model, history = train_end_to_end_from_colab(
     ...     storage_root="/content/drive/MyDrive/thesis",
     ...     checkpoint_dir="checkpoints/e2e_patch",
     ...     device="cuda",
     ...     bh_encoder_model="patch",
+    ...     bh_patch_size=20,
+    ... )
+
+    # Patch tokenisation front-end (CLS-token pooling)
+    >>> model, history = train_end_to_end_from_colab(
+    ...     storage_root="/content/drive/MyDrive/thesis",
+    ...     checkpoint_dir="checkpoints/e2e_cls",
+    ...     device="cuda",
+    ...     bh_encoder_model="cls",
     ...     bh_patch_size=20,
     ... )
 
@@ -963,17 +969,18 @@ def train_end_to_end_from_colab(
         Which borehole encoder front-end to use:
 
         ``"cnn"``   — 1D CNN downsampling + transformer (default, current baseline)
-        ``"patch"`` — depth-patch tokenisation + transformer (new experiment)
+        ``"patch"`` — depth-patch tokenisation + mean pooling
+        ``"cls"``   — depth-patch tokenisation + learned CLS-token pooling
 
-        When ``"patch"``, pass ``bh_patch_size=N`` in ``**overrides`` to
-        control the patch size (default 20).
+        When ``"patch"`` or ``"cls"``, pass ``bh_patch_size=N`` in ``**overrides``
+        to control the patch size (default 20).
     **overrides
         Any field of the selected training config by name.  Common overrides:
 
         * ``n_epochs=100`` — train longer
         * ``use_false_positive_penalty=True`` — penalise false positives
         * ``batch_size=4`` — reduce if GPU memory is tight
-        * ``bh_patch_size=20`` — patch size (``bh_encoder_model="patch"`` only)
+        * ``bh_patch_size=20`` — patch size (``"patch"`` and ``"cls"`` only)
 
     Returns
     -------
@@ -1023,8 +1030,16 @@ def train_end_to_end_from_colab(
         }
 
     is_patch = bh_encoder_model == "patch"
-    cfg_class = PatchBoreholeE2ETrainingConfig if is_patch else E2EMapBeliefTrainingConfig
-    debug_defaults = _DEBUG_PATCH if (debug and is_patch) else (_DEBUG_E2E if debug else {})
+    is_cls = bh_encoder_model == "cls"
+    if is_cls:
+        cfg_class = PatchBoreholeCLSE2ETrainingConfig
+        debug_defaults = _DEBUG_CLS if debug else {}
+    elif is_patch:
+        cfg_class = PatchBoreholeE2ETrainingConfig
+        debug_defaults = _DEBUG_PATCH if debug else {}
+    else:
+        cfg_class = E2EMapBeliefTrainingConfig
+        debug_defaults = _DEBUG_E2E if debug else {}
 
     cfg = build_training_config(
         cfg_class,
@@ -1032,7 +1047,7 @@ def train_end_to_end_from_colab(
     )
 
     # ---- load map cache -------------------------------------------------------
-    store = HDF5MapStore(resolved_pool) if USE_HDF5_STORE else NpzMapCacheStore(resolved_pool)
+    store = HDF5MapDirectory(resolved_pool) if resolved_pool.is_dir() else HDF5MapStore(resolved_pool)
     seed = overrides.get("seed", cfg.seed)
 
     train_cache, val_cache = store.load_map_data(
@@ -1047,7 +1062,7 @@ def train_end_to_end_from_colab(
 
     print(f"\nnorm_stats_from  : {norm_stats_from}")
     print(f"bh_encoder_model : {bh_encoder_model}")
-    if is_patch:
+    if is_patch or is_cls:
         print(f"bh_patch_size    : {cfg.bh_patch_size}")
     print(f"map_pool_path    : {resolved_pool}")
     print(f"n_orebodies      : {n_orebodies}")
@@ -1069,7 +1084,21 @@ def train_end_to_end_from_colab(
         val_cache, resources, cfg, verbose=True, is_val=True
     )
 
-    if is_patch:
+    if is_cls:
+        trained_model, _ = train_patch_borehole_cls_transformer(
+            resources=resources,
+            cfg=cfg,
+            device=device,
+            checkpoint_dir=ckpt_dir,
+            plot_dir=ckpt_dir / "plots",
+            verbose=True,
+            train_ds=train_ds,
+            val_ds=val_ds,
+        )
+        _, _, _, history = load_patch_borehole_cls_checkpoint(
+            ckpt_dir / "patch_borehole_cls_best.pt", device=device
+        )
+    elif is_patch:
         trained_model, _ = train_patch_borehole_transformer(
             resources=resources,
             cfg=cfg,

@@ -1,13 +1,13 @@
 """Generate belief map pool for neural-belief training.
 
-Maps are generated in parallel and stored as per-map npz files that
-``NpzMapCacheStore`` can read directly.  Re-running with a larger ``--n-maps``
-appends only the missing files (resume-safe).
+Maps are generated in parallel and stored as per-map npz files.
+Re-running with a larger ``--n-maps`` appends only the missing files (resume-safe).
+Convert the resulting pool to HDF5 shards with ``colab_npz_to_hdf5_full.py``.
 
 Output layout
 -------------
     <out-dir>/
-        config.pkl              pool metadata (read by NpzMapCacheStore)
+        config.pkl              pool metadata
         labels_vocab.pkl        {rocks: {name: idx}, formations: {name: idx}}
         map_00000.npz           per-map arrays
         map_00001.npz
@@ -259,7 +259,7 @@ def main() -> None:
         )
         del bank, geom
 
-    # Write config (read by NpzMapCacheStore.load_subset)
+    # Write config (read by colab_npz_to_hdf5_full.py during HDF5 conversion)
     with open(config_path, "wb") as f:
         pickle.dump(
             {
@@ -330,8 +330,8 @@ def main() -> None:
     print(f"\n  done in {(time.perf_counter() - t0) / 60:.1f} min")
     print(f"  pool -> {args.out_dir}  ({args.n_maps} maps)")
 
-    # Write a flat index so NpzMapCacheStore can stratify by body count without
-    # opening every map file at load time.
+    # Write a flat index so colab_npz_to_hdf5_full.py can stratify by body count
+    # without opening every map file.
     index_path = args.out_dir / "n_bodies_index.npy"
     index = np.array(
         [int(np.load(args.out_dir / f"map_{i:05d}.npz")["n_bodies"])
