@@ -16,10 +16,16 @@ from decision_simulator.resources import (
 
 from .datasets import GeologicalBeliefDataset
 from .map_cache import NpzMapCacheStore
+from .map_hdf5 import HDF5MapStore
 from .models.map_encoders.unet_belief import UNetBelief
 
+# ---------------------------------------------------------------------------
+# Data source flag
+# ---------------------------------------------------------------------------
+# True  → read maps from a pre-built HDF5 shard  (HDF5MapStore,    default)
+# False → read maps from an npz pool directory    (NpzMapCacheStore, legacy)
+USE_HDF5_STORE: bool = True
 
-from .map_cache import NpzMapCacheStore
 from .training import (
     NeuralBeliefTrainingConfig,
     MapBeliefTrainingConfig,
@@ -215,7 +221,7 @@ def train_belief_from_colab(
     resolved_pool_path = Path(map_pool_path)
     if not resolved_pool_path.is_absolute():
         resolved_pool_path = root / resolved_pool_path
-    store = NpzMapCacheStore(resolved_pool_path)
+    store = HDF5MapStore(resolved_pool_path) if USE_HDF5_STORE else NpzMapCacheStore(resolved_pool_path)
 
     train_cache, val_cache = store.load_map_data(
         n_train_maps=cfg.n_train_maps,
@@ -397,7 +403,7 @@ def compare_belief_encoders_from_colab(
         else {}
     )
 
-    store = NpzMapCacheStore(resolved_pool_path)
+    store = HDF5MapStore(resolved_pool_path) if USE_HDF5_STORE else NpzMapCacheStore(resolved_pool_path)
 
     train_cache, val_cache = store.load_map_data(
         n_train_maps=base_cfg.n_train_maps,
@@ -762,7 +768,7 @@ def train_sequential_belief_from_colab(
     effective_n_train = 2 if debug else n_train_maps
     effective_n_val = 1 if debug else n_val_maps
 
-    store = NpzMapCacheStore(resolved_pool)
+    store = HDF5MapStore(resolved_pool) if USE_HDF5_STORE else NpzMapCacheStore(resolved_pool)
 
     train_cache, val_cache = store.load_map_data(
         n_train_maps=effective_n_train,
@@ -1000,7 +1006,7 @@ def train_end_to_end_from_colab(
     )
 
     # ---- load map cache -------------------------------------------------------
-    store = NpzMapCacheStore(resolved_pool)
+    store = HDF5MapStore(resolved_pool) if USE_HDF5_STORE else NpzMapCacheStore(resolved_pool)
     seed = overrides.get("seed", cfg.seed)
 
     train_cache, val_cache = store.load_map_data(
