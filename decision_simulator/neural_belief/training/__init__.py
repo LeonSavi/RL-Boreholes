@@ -11,6 +11,9 @@ train_map_belief(resources, cfg, device, checkpoint_dir, ...)
 train_end_to_end_map_belief(resources, cfg, device, checkpoint_dir, ...)
     Train EndToEndMapBeliefTransformer. Config: E2EMapBeliefTrainingConfig.
 
+train_patch_borehole_transformer(resources, cfg, device, checkpoint_dir, ...)
+    Train PatchBoreholeEndToEndMapBeliefTransformer. Config: PatchBoreholeE2ETrainingConfig.
+
 train_raw_borehole_belief(...)
     Planned future training pipeline. Raises NotImplementedError.
 
@@ -19,6 +22,7 @@ Checkpoint loading
 load_belief_checkpoint(path, device)              → UNetBelief
 load_map_belief_checkpoint(path, device)          → MapBeliefTransformer
 load_e2e_map_belief_checkpoint(path, device)      → EndToEndMapBeliefTransformer
+load_patch_borehole_checkpoint(path, device)      → PatchBoreholeEndToEndMapBeliefTransformer
 
 All public symbols are re-exported here so that both the new canonical import
 paths and the original ``decision_simulator.neural_belief.training.*`` paths
@@ -44,6 +48,11 @@ from .train_end_to_end_map_belief import (
     collate_e2e_map,
     train_end_to_end_map_belief,
     load_e2e_map_belief_checkpoint,
+)
+from .train_patch_borehole_transformer import (
+    PatchBoreholeE2ETrainingConfig,
+    train_patch_borehole_transformer,
+    load_patch_borehole_checkpoint,
 )
 
 # Shared validation utilities re-exported here for callers that previously
@@ -77,6 +86,10 @@ __all__ = [
     "collate_e2e_map",
     "train_end_to_end_map_belief",
     "load_e2e_map_belief_checkpoint",
+    # Patch borehole experiment
+    "PatchBoreholeE2ETrainingConfig",
+    "train_patch_borehole_transformer",
+    "load_patch_borehole_checkpoint",
     # Placeholder
     "train_raw_borehole_belief",
     # Shared utilities
