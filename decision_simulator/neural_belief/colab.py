@@ -30,6 +30,7 @@ from .training import (
     NeuralBeliefTrainingConfig,
     MapBeliefTrainingConfig,
     E2EMapBeliefTrainingConfig,
+    PatchBoreholeE2ETrainingConfig,
     E2EMapDataset,
     build_training_config,
     export_history,
@@ -40,6 +41,8 @@ from .training import (
     train_map_belief,
     train_end_to_end_map_belief,
     load_e2e_map_belief_checkpoint,
+    train_patch_borehole_transformer,
+    load_patch_borehole_checkpoint,
 )
 
 _DEBUG_UNET: dict = {
@@ -85,6 +88,7 @@ _DEBUG_E2E: dict = {
     "bh_n_layers": 1,
     "latent_dim": 32,
 }
+_DEBUG_PATCH: dict = {**_DEBUG_E2E, "bh_patch_size": 10}
 
 # Fields present in NeuralBeliefTrainingConfig but not in MapBeliefTrainingConfig.
 # These are silently dropped when building a transformer config from **overrides.
@@ -900,27 +904,38 @@ def train_end_to_end_from_colab(
     use_sequential_dataset: bool = False,
     n_sequences_per_map: int = 3,
     prefix_steps: list[int] | None = None,
+    bh_encoder_model: Literal["cnn", "patch"] = "cnn",
     **overrides,
 ) -> tuple[object, list[dict]]:
     """Train the end-to-end map belief transformer from a Colab notebook.
 
-    Trains EndToEndMapBeliefTransformer with a full-map MSE reconstruction
-    objective.  The borehole encoder and map belief transformer are trained
-    jointly from scratch — no pre-trained JEPA or autoencoder weights are
-    required.  The ``norm_stats_from`` parameter controls which checkpoint's
-    per-variable normalization statistics are used to standardise raw borehole
-    inputs.
+    Trains EndToEndMapBeliefTransformer (``bh_encoder_model="cnn"``) or
+    PatchBoreholeEndToEndMapBeliefTransformer (``bh_encoder_model="patch"``) with a
+    full-map MSE reconstruction objective.  The borehole encoder and map belief
+    transformer are trained jointly from scratch — no pre-trained JEPA or
+    autoencoder weights are required.  The ``norm_stats_from`` parameter
+    controls which checkpoint's per-variable normalization statistics are used
+    to standardise raw borehole inputs.
 
     Example
     -------
     >>> from decision_simulator.neural_belief.colab import train_end_to_end_from_colab
 
-    # Default: use JEPA norm stats, train from scratch
+    # CNN front-end (default)
     >>> model, history = train_end_to_end_from_colab(
     ...     storage_root="/content/drive/MyDrive/thesis",
-    ...     checkpoint_dir="checkpoints/e2e_map",
+    ...     checkpoint_dir="checkpoints/e2e_cnn",
     ...     device="cuda",
     ...     debug=True,
+    ... )
+
+    # Patch tokenisation front-end
+    >>> model, history = train_end_to_end_from_colab(
+    ...     storage_root="/content/drive/MyDrive/thesis",
+    ...     checkpoint_dir="checkpoints/e2e_patch",
+    ...     device="cuda",
+    ...     bh_encoder_model="patch",
+    ...     bh_patch_size=20,
     ... )
 
     Parameters
@@ -929,9 +944,8 @@ def train_end_to_end_from_colab(
         Absolute root for all data and checkpoint paths.  Relative paths are
         resolved against this directory.
     checkpoint_dir
-        Where ``e2e_map_belief_best.pt``, ``e2e_map_belief_last.pt``, and
-        ``training_history.{json,csv}`` are saved.  Relative paths are
-        resolved against ``storage_root``.
+        Where checkpoints and ``training_history.{json,csv}`` are saved.
+        Relative paths are resolved against ``storage_root``.
     device
         ``"cuda"`` or ``"cpu"``.  Raises a clear error when CUDA is requested
         but unavailable.
@@ -945,17 +959,25 @@ def train_end_to_end_from_colab(
         ``"jepa"``        — JEPA checkpoint norm stats (recommended)
         ``"autoencoder"`` — Autoencoder checkpoint norm stats
         ``"none"``        — skip normalization (raw geological values)
+    bh_encoder_model
+        Which borehole encoder front-end to use:
+
+        ``"cnn"``   — 1D CNN downsampling + transformer (default, current baseline)
+        ``"patch"`` — depth-patch tokenisation + transformer (new experiment)
+
+        When ``"patch"``, pass ``bh_patch_size=N`` in ``**overrides`` to
+        control the patch size (default 20).
     **overrides
-        Any field of :class:`E2EMapBeliefTrainingConfig` by name.  Common
-        overrides:
+        Any field of the selected training config by name.  Common overrides:
 
         * ``n_epochs=100`` — train longer
         * ``use_false_positive_penalty=True`` — penalise false positives
         * ``batch_size=4`` — reduce if GPU memory is tight
+        * ``bh_patch_size=20`` — patch size (``bh_encoder_model="patch"`` only)
 
     Returns
     -------
-    tuple[EndToEndMapBeliefTransformer, list[dict]]
+    tuple[model, list[dict]]
         ``(model, history)`` — the trained model loaded with its best weights,
         and the per-epoch training history.
     """
@@ -1000,9 +1022,13 @@ def train_end_to_end_from_colab(
             "prefix_steps": prefix_steps or [1, 2, 3, 5, 8, 10, 15],
         }
 
+    is_patch = bh_encoder_model == "patch"
+    cfg_class = PatchBoreholeE2ETrainingConfig if is_patch else E2EMapBeliefTrainingConfig
+    debug_defaults = _DEBUG_PATCH if (debug and is_patch) else (_DEBUG_E2E if debug else {})
+
     cfg = build_training_config(
-        E2EMapBeliefTrainingConfig,
-        {**(_DEBUG_E2E if debug else {}), **overrides, **seq_overrides},
+        cfg_class,
+        {**debug_defaults, **overrides, **seq_overrides},
     )
 
     # ---- load map cache -------------------------------------------------------
@@ -1020,6 +1046,9 @@ def train_end_to_end_from_colab(
     cfg.n_y = train_cache.n_y
 
     print(f"\nnorm_stats_from  : {norm_stats_from}")
+    print(f"bh_encoder_model : {bh_encoder_model}")
+    if is_patch:
+        print(f"bh_patch_size    : {cfg.bh_patch_size}")
     print(f"map_pool_path    : {resolved_pool}")
     print(f"n_orebodies      : {n_orebodies}")
     print(f"n_train_maps     : {cfg.n_train_maps}  n_val_maps: {cfg.n_val_maps}")
@@ -1040,23 +1069,37 @@ def train_end_to_end_from_colab(
         val_cache, resources, cfg, verbose=True, is_val=True
     )
 
-    model, _ = train_end_to_end_map_belief(
-        resources=resources,
-        cfg=cfg,
-        device=device,
-        checkpoint_dir=ckpt_dir,
-        plot_dir=ckpt_dir / "plots",
-        verbose=True,
-        train_ds=train_ds,
-        val_ds=val_ds,
-    )
+    if is_patch:
+        trained_model, _ = train_patch_borehole_transformer(
+            resources=resources,
+            cfg=cfg,
+            device=device,
+            checkpoint_dir=ckpt_dir,
+            plot_dir=ckpt_dir / "plots",
+            verbose=True,
+            train_ds=train_ds,
+            val_ds=val_ds,
+        )
+        _, _, _, history = load_patch_borehole_checkpoint(
+            ckpt_dir / "patch_borehole_best.pt", device=device
+        )
+    else:
+        trained_model, _ = train_end_to_end_map_belief(
+            resources=resources,
+            cfg=cfg,
+            device=device,
+            checkpoint_dir=ckpt_dir,
+            plot_dir=ckpt_dir / "plots",
+            verbose=True,
+            train_ds=train_ds,
+            val_ds=val_ds,
+        )
+        _, _, _, history = load_e2e_map_belief_checkpoint(
+            ckpt_dir / "e2e_map_belief_best.pt", device=device
+        )
 
-    # Smoke test: verify the saved checkpoint loads cleanly.
-    _, _, _, history = load_e2e_map_belief_checkpoint(
-        ckpt_dir / "e2e_map_belief_best.pt", device=device
-    )
     print(
         f"\nSmoke test passed: checkpoint loaded with {len(history)} epoch(s) of history."
     )
 
-    return model, history
+    return trained_model, history
