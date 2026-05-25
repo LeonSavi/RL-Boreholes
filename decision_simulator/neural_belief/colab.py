@@ -17,6 +17,7 @@ from decision_simulator.resources import (
 from .datasets import GeologicalBeliefDataset
 from .map_hdf5 import HDF5MapDirectory, HDF5MapStore
 from .models.map_encoders.unet_belief import UNetBelief
+from .utils import TargetNormalizer
 
 from .training import (
     NeuralBeliefTrainingConfig,
@@ -572,6 +573,12 @@ def compare_belief_encoders_from_colab(
                         val_ds.metadata,
                     )
 
+                    # Build and apply normalizer from this run's training targets.
+                    normalizer_run = TargetNormalizer(mode=cfg.norm_mode)
+                    normalizer_run.fit(train_ds_run.targets.numpy())
+                    train_ds_run.apply_target_normalizer(normalizer_run)
+                    val_ds_run.apply_target_normalizer(normalizer_run)
+
                     if is_transformer:
                         train_map_belief(
                             cfg=cfg,
@@ -581,6 +588,7 @@ def compare_belief_encoders_from_colab(
                             verbose=True,
                             train_ds=train_ds_run,
                             val_ds=val_ds_run,
+                            normalizer=normalizer_run,
                         )
                         _, _, _, history = load_map_belief_checkpoint(
                             ckpt_dir / "map_belief_best.pt", device=device
@@ -594,6 +602,7 @@ def compare_belief_encoders_from_colab(
                             verbose=True,
                             train_ds=train_ds_run,
                             val_ds=val_ds_run,
+                            normalizer=normalizer_run,
                         )
                         _, _, _, history = load_belief_checkpoint(
                             ckpt_dir / "belief_best.pt", device=device
