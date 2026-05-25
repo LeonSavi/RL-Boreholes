@@ -112,6 +112,9 @@ def train_neural_belief(
 
     # ---- training loop --------------------------------------------------------
     best_val_mse = float("inf")
+    best_epoch = 0
+    patience_counter = 0
+    epoch = 0
     history: list[dict] = []
 
     for epoch in range(1, cfg.n_epochs + 1):
@@ -148,8 +151,10 @@ def train_neural_belief(
                 f"  val_corr={val_metrics['val_corr']:.4f}"
             )
 
-        if val_metrics["val_mse"] < best_val_mse:
+        if val_metrics["val_mse"] < best_val_mse - cfg.min_delta:
             best_val_mse = val_metrics["val_mse"]
+            best_epoch = epoch
+            patience_counter = 0
             save_checkpoint_model(
                 checkpoint_dir / "belief_best.pt",
                 model,
@@ -161,12 +166,22 @@ def train_neural_belief(
                 n_y=n_y,
                 latent_dim=cfg.latent_dim,
             )
+        else:
+            patience_counter += 1
+
+        if cfg.early_stopping and patience_counter >= cfg.patience:
+            if verbose:
+                print(
+                    f"\nEarly stopping triggered at epoch {epoch}. "
+                    f"Best val MSE: {best_val_mse:.4f} at epoch {best_epoch}."
+                )
+            break
 
     save_checkpoint_model(
         checkpoint_dir / "belief_last.pt",
         model,
         cfg,
-        cfg.n_epochs,
+        epoch,
         history,
         normalizer,
         n_x=n_x,

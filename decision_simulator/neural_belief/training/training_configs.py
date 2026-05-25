@@ -37,6 +37,11 @@ class NeuralBeliefTrainingConfig:
     weight_decay: float = 1e-4
     n_epochs: int = 50
 
+    # --- early stopping ---
+    early_stopping: bool = True
+    patience: int = 10
+    min_delta: float = 0.0
+
     # --- coordinate channels ---
     use_coordinate_channels: bool = False
 
@@ -110,6 +115,11 @@ class MapBeliefTrainingConfig:
 
     # --- Gradient clipping (important for transformer stability) ---
     grad_clip_norm: float = 1.0  # 0.0 = disabled
+
+    # --- Early stopping ---
+    early_stopping: bool = True
+    patience: int = 10
+    min_delta: float = 0.0
 
     # --- Sequential dataset ---
     use_sequential_dataset: bool = False
