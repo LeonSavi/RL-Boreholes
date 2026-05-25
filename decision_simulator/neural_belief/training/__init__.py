@@ -17,6 +17,9 @@ train_patch_borehole_transformer(resources, cfg, device, checkpoint_dir, ...)
 train_patch_borehole_cls_transformer(resources, cfg, device, checkpoint_dir, ...)
     Train PatchBoreholeCLSEndToEndMapBeliefTransformer. Config: PatchBoreholeCLSE2ETrainingConfig.
 
+train_variable_aware_patch_borehole_transformer(resources, cfg, device, checkpoint_dir, ...)
+    Train VariableAwarePatchBoreholeEndToEndMapBeliefTransformer. Config: VariableAwarePatchBoreholeE2ETrainingConfig.
+
 train_raw_borehole_belief(...)
     Planned future training pipeline. Raises NotImplementedError.
 
@@ -27,6 +30,7 @@ load_map_belief_checkpoint(path, device)          → MapBeliefTransformer
 load_e2e_map_belief_checkpoint(path, device)      → EndToEndMapBeliefTransformer
 load_patch_borehole_checkpoint(path, device)      → PatchBoreholeEndToEndMapBeliefTransformer
 load_patch_borehole_cls_checkpoint(path, device)  → PatchBoreholeCLSEndToEndMapBeliefTransformer
+load_variable_aware_patch_borehole_checkpoint(path, device)  → VariableAwarePatchBoreholeEndToEndMapBeliefTransformer
 
 All public symbols are re-exported here so that both the new canonical import
 paths and the original ``decision_simulator.neural_belief.training.*`` paths
@@ -62,6 +66,11 @@ from .train_patch_borehole_cls_transformer import (
     PatchBoreholeCLSE2ETrainingConfig,
     train_patch_borehole_cls_transformer,
     load_patch_borehole_cls_checkpoint,
+)
+from .train_variable_aware_patch_borehole_transformer import (
+    VariableAwarePatchBoreholeE2ETrainingConfig,
+    train_variable_aware_patch_borehole_transformer,
+    load_variable_aware_patch_borehole_checkpoint,
 )
 
 # Shared validation utilities re-exported here for callers that previously
@@ -103,6 +112,10 @@ __all__ = [
     "PatchBoreholeCLSE2ETrainingConfig",
     "train_patch_borehole_cls_transformer",
     "load_patch_borehole_cls_checkpoint",
+    # Variable-aware patch borehole experiment
+    "VariableAwarePatchBoreholeE2ETrainingConfig",
+    "train_variable_aware_patch_borehole_transformer",
+    "load_variable_aware_patch_borehole_checkpoint",
     # Placeholder
     "train_raw_borehole_belief",
     # Shared utilities

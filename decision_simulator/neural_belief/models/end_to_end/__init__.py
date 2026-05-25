@@ -18,6 +18,12 @@ from .patch_borehole_cls_transformer import (
     PatchBoreholeCLSEndToEndConfig,
     PatchBoreholeCLSEndToEndMapBeliefTransformer,
 )
+from .variable_aware_patch_borehole_transformer import (
+    VariableAwarePatchBoreholeConfig,
+    VariableAwarePatchBoreholeTransformerEncoder,
+    VariableAwarePatchBoreholeEndToEndConfig,
+    VariableAwarePatchBoreholeEndToEndMapBeliefTransformer,
+)
 
 __all__ = [
     "E2EConfig",
@@ -32,4 +38,8 @@ __all__ = [
     "PatchBoreholeCLSTransformerEncoder",
     "PatchBoreholeCLSEndToEndConfig",
     "PatchBoreholeCLSEndToEndMapBeliefTransformer",
+    "VariableAwarePatchBoreholeConfig",
+    "VariableAwarePatchBoreholeTransformerEncoder",
+    "VariableAwarePatchBoreholeEndToEndConfig",
+    "VariableAwarePatchBoreholeEndToEndMapBeliefTransformer",
 ]

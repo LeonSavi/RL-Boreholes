@@ -50,14 +50,12 @@ from ..map_encoders.map_belief_transformer import (
     SpatialTokenEmbedding,
 )
 
-
 # ---------------------------------------------------------------------------
 # Positional encoding helper (used by BoreholeTransformerEncoder)
 # ---------------------------------------------------------------------------
 
-def _sinusoidal_pe_1d(
-    n_tokens: int, d_model: int, device: torch.device
-) -> torch.Tensor:
+
+def sinusoidal_pe_1d(n_tokens: int, d_model: int, device: torch.device) -> torch.Tensor:
     """Standard 1D sinusoidal positional encoding.
 
     Returns
@@ -78,6 +76,7 @@ def _sinusoidal_pe_1d(
 # ---------------------------------------------------------------------------
 # Borehole encoder config
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class E2EConfig:
@@ -133,6 +132,7 @@ class E2EConfig:
 # Borehole encoder
 # ---------------------------------------------------------------------------
 
+
 class BoreholeTransformerEncoder(nn.Module):
     """1D CNN + transformer borehole encoder.
 
@@ -173,7 +173,9 @@ class BoreholeTransformerEncoder(nn.Module):
                 batch_first=True,
                 norm_first=True,
             )
-            self.transformer: nn.Module = nn.TransformerEncoder(enc_layer, cfg.bh_n_layers)
+            self.transformer: nn.Module = nn.TransformerEncoder(
+                enc_layer, cfg.bh_n_layers
+            )
         else:
             self.transformer = nn.Identity()
 
@@ -181,24 +183,25 @@ class BoreholeTransformerEncoder(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: (B, V, D)
-        feat = self.conv(x)                        # (B, C, T)
-        feat = feat.transpose(1, 2)                # (B, T, C)
-        feat = self.seq_proj(feat)                 # (B, T, bh_d_model)
+        feat = self.conv(x)  # (B, C, T)
+        feat = feat.transpose(1, 2)  # (B, T, C)
+        feat = self.seq_proj(feat)  # (B, T, bh_d_model)
 
         T = feat.shape[1]
-        pe = _sinusoidal_pe_1d(T, self.cfg.bh_d_model, feat.device)
+        pe = sinusoidal_pe_1d(T, self.cfg.bh_d_model, feat.device)
         feat = feat + pe.unsqueeze(0)
 
         if self.cfg.bh_n_layers > 0:
             feat = self.transformer(feat)
 
-        pooled = feat.mean(dim=1)                  # (B, bh_d_model)
-        return self.out_proj(pooled)               # (B, latent_dim)
+        pooled = feat.mean(dim=1)  # (B, bh_d_model)
+        return self.out_proj(pooled)  # (B, latent_dim)
 
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class EndToEndMapBeliefConfig:
@@ -292,6 +295,7 @@ class EndToEndMapBeliefConfig:
 # Model
 # ---------------------------------------------------------------------------
 
+
 class EndToEndMapBeliefTransformer(nn.Module):
     """End-to-end geological map belief transformer.
 
@@ -343,12 +347,15 @@ class EndToEndMapBeliefTransformer(nn.Module):
         B, K = boreholes.shape[:2]
 
         if padding_mask is not None:
-            not_padded = ~padding_mask                              # (B, K)
-            bh_valid = boreholes[not_padded]                        # (N_valid, V, D)
-            lat_valid = self.bh_encoder(bh_valid)                   # (N_valid, latent_dim)
+            not_padded = ~padding_mask  # (B, K)
+            bh_valid = boreholes[not_padded]  # (N_valid, V, D)
+            lat_valid = self.bh_encoder(bh_valid)  # (N_valid, latent_dim)
             lat = torch.zeros(
-                B, K, self.cfg.latent_dim,
-                device=boreholes.device, dtype=lat_valid.dtype,
+                B,
+                K,
+                self.cfg.latent_dim,
+                device=boreholes.device,
+                dtype=lat_valid.dtype,
             )
             lat[not_padded] = lat_valid
         else:
@@ -398,16 +405,16 @@ class EndToEndMapBeliefTransformer(nn.Module):
 
         if padding_mask is not None:
             flat_idx = flat_idx.masked_fill(padding_mask, N)
-            valid = (~padding_mask).to(dtype)                       # (B, K)
+            valid = (~padding_mask).to(dtype)  # (B, K)
         else:
             valid = torch.ones(B, K, device=device, dtype=dtype)
 
-        ore_ch = (ore_vals * valid).unsqueeze(1)                    # (B, 1, K)
-        mask_ch = valid.unsqueeze(1)                                # (B, 1, K)
-        lat_ch = (latents * valid.unsqueeze(-1)).transpose(1, 2)    # (B, latent_dim, K)
-        values = torch.cat([ore_ch, mask_ch, lat_ch], dim=1)        # (B, C, K)
+        ore_ch = (ore_vals * valid).unsqueeze(1)  # (B, 1, K)
+        mask_ch = valid.unsqueeze(1)  # (B, 1, K)
+        lat_ch = (latents * valid.unsqueeze(-1)).transpose(1, 2)  # (B, latent_dim, K)
+        values = torch.cat([ore_ch, mask_ch, lat_ch], dim=1)  # (B, C, K)
 
-        flat_idx_exp = flat_idx.unsqueeze(1).expand(B, C, K)        # (B, C, K)
+        flat_idx_exp = flat_idx.unsqueeze(1).expand(B, C, K)  # (B, C, K)
         out_flat = torch.zeros(B, C, N + 1, device=device, dtype=dtype)
         out_flat.scatter_(2, flat_idx_exp, values)
 

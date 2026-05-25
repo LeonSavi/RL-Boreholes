@@ -41,12 +41,12 @@ from ..map_encoders.map_belief_transformer import (
     OreReconstructionHead,
     SpatialTokenEmbedding,
 )
-from .end_to_end_helpers import _sinusoidal_pe_1d
-
+from .end_to_end_helpers import sinusoidal_pe_1d
 
 # ---------------------------------------------------------------------------
 # Borehole encoder config
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class PatchBoreholeConfig:
@@ -103,6 +103,7 @@ class PatchBoreholeConfig:
 # Borehole encoder
 # ---------------------------------------------------------------------------
 
+
 class PatchBoreholeTransformerEncoder(nn.Module):
     """Patch-based borehole encoder.
 
@@ -139,7 +140,9 @@ class PatchBoreholeTransformerEncoder(nn.Module):
                 batch_first=True,
                 norm_first=True,
             )
-            self.transformer: nn.Module = nn.TransformerEncoder(enc_layer, cfg.bh_n_layers)
+            self.transformer: nn.Module = nn.TransformerEncoder(
+                enc_layer, cfg.bh_n_layers
+            )
         else:
             self.transformer = nn.Identity()
 
@@ -166,24 +169,27 @@ class PatchBoreholeTransformerEncoder(nn.Module):
 
         # Split depth into patches and flatten variables per patch
         x = x.view(B, V, self.n_patches, self.cfg.bh_patch_size)
-        x = x.permute(0, 2, 1, 3).contiguous()          # (B, n_patches, V, patch_size)
-        x = x.reshape(B, self.n_patches, V * self.cfg.bh_patch_size)  # (B, n_patches, token_dim)
+        x = x.permute(0, 2, 1, 3).contiguous()  # (B, n_patches, V, patch_size)
+        x = x.reshape(
+            B, self.n_patches, V * self.cfg.bh_patch_size
+        )  # (B, n_patches, token_dim)
 
-        feat = self.patch_proj(x)                        # (B, n_patches, bh_d_model)
+        feat = self.patch_proj(x)  # (B, n_patches, bh_d_model)
 
-        pe = _sinusoidal_pe_1d(self.n_patches, self.cfg.bh_d_model, feat.device)
+        pe = sinusoidal_pe_1d(self.n_patches, self.cfg.bh_d_model, feat.device)
         feat = feat + pe.unsqueeze(0)
 
         if self.cfg.bh_n_layers > 0:
-            feat = self.transformer(feat)                # (B, n_patches, bh_d_model)
+            feat = self.transformer(feat)  # (B, n_patches, bh_d_model)
 
-        pooled = feat.mean(dim=1)                        # (B, bh_d_model)
-        return self.out_proj(pooled)                     # (B, latent_dim)
+        pooled = feat.mean(dim=1)  # (B, bh_d_model)
+        return self.out_proj(pooled)  # (B, latent_dim)
 
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class PatchBoreholeEndToEndConfig:
@@ -277,6 +283,7 @@ class PatchBoreholeEndToEndConfig:
 # Model
 # ---------------------------------------------------------------------------
 
+
 class PatchBoreholeEndToEndMapBeliefTransformer(nn.Module):
     """End-to-end map belief transformer with a patch-based borehole encoder.
 
@@ -328,12 +335,15 @@ class PatchBoreholeEndToEndMapBeliefTransformer(nn.Module):
         B, K = boreholes.shape[:2]
 
         if padding_mask is not None:
-            not_padded = ~padding_mask                              # (B, K)
-            bh_valid = boreholes[not_padded]                        # (N_valid, V, D)
-            lat_valid = self.bh_encoder(bh_valid)                   # (N_valid, latent_dim)
+            not_padded = ~padding_mask  # (B, K)
+            bh_valid = boreholes[not_padded]  # (N_valid, V, D)
+            lat_valid = self.bh_encoder(bh_valid)  # (N_valid, latent_dim)
             lat = torch.zeros(
-                B, K, self.cfg.latent_dim,
-                device=boreholes.device, dtype=lat_valid.dtype,
+                B,
+                K,
+                self.cfg.latent_dim,
+                device=boreholes.device,
+                dtype=lat_valid.dtype,
             )
             lat[not_padded] = lat_valid
         else:
@@ -383,16 +393,16 @@ class PatchBoreholeEndToEndMapBeliefTransformer(nn.Module):
 
         if padding_mask is not None:
             flat_idx = flat_idx.masked_fill(padding_mask, N)
-            valid = (~padding_mask).to(dtype)                       # (B, K)
+            valid = (~padding_mask).to(dtype)  # (B, K)
         else:
             valid = torch.ones(B, K, device=device, dtype=dtype)
 
-        ore_ch = (ore_vals * valid).unsqueeze(1)                    # (B, 1, K)
-        mask_ch = valid.unsqueeze(1)                                # (B, 1, K)
-        lat_ch = (latents * valid.unsqueeze(-1)).transpose(1, 2)    # (B, latent_dim, K)
-        values = torch.cat([ore_ch, mask_ch, lat_ch], dim=1)        # (B, C, K)
+        ore_ch = (ore_vals * valid).unsqueeze(1)  # (B, 1, K)
+        mask_ch = valid.unsqueeze(1)  # (B, 1, K)
+        lat_ch = (latents * valid.unsqueeze(-1)).transpose(1, 2)  # (B, latent_dim, K)
+        values = torch.cat([ore_ch, mask_ch, lat_ch], dim=1)  # (B, C, K)
 
-        flat_idx_exp = flat_idx.unsqueeze(1).expand(B, C, K)        # (B, C, K)
+        flat_idx_exp = flat_idx.unsqueeze(1).expand(B, C, K)  # (B, C, K)
         out_flat = torch.zeros(B, C, N + 1, device=device, dtype=dtype)
         out_flat.scatter_(2, flat_idx_exp, values)
 

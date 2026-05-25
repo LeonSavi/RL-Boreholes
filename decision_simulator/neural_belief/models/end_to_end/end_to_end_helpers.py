@@ -7,9 +7,7 @@ import math
 import torch
 
 
-def _sinusoidal_pe_1d(
-    n_tokens: int, d_model: int, device: torch.device
-) -> torch.Tensor:
+def sinusoidal_pe_1d(n_tokens: int, d_model: int, device: torch.device) -> torch.Tensor:
     """Standard 1D sinusoidal positional encoding.
 
     Returns

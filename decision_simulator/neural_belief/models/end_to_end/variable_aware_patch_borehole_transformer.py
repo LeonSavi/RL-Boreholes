@@ -1,25 +1,30 @@
-"""Patch-based borehole encoder with CLS-token pooling and end-to-end map belief transformer.
+"""Variable-aware patch borehole encoder with CLS-token pooling and end-to-end map belief transformer.
 
-Experimental variant of PatchBoreholeEndToEndMapBeliefTransformer that replaces
-mean pooling with a learned CLS token.
+Experimental variant of PatchBoreholeCLSEndToEndMapBeliefTransformer that gives
+each geological variable its own token stream instead of flattening all variables
+into a single patch token.
 
 Architecture comparison
 -----------------------
-Mean-pool (patch_borehole_transformer.py):
-  raw borehole → patches → linear → PE → transformer → mean pool → latent
+CLS-patch (patch_borehole_cls_transformer.py):
+  (B, V, D) → (B, n_patches, V * patch_size) → linear → PE → CLS → transformer → CLS[0] → latent
+  Variables are anonymous channels inside each patch token.
 
-CLS-token (this file):
-  raw borehole → patches → linear → PE → prepend CLS → transformer → CLS[0] → latent
+Variable-aware (this file):
+  (B, V, D) → (B, V, n_patches, patch_size) → (B, V*n_patches, patch_size)
+            → linear → + var_embed + depth_PE → prepend CLS → transformer → CLS[0] → latent
+  Each variable gets its own token per patch; the transformer can model
+  cross-variable interactions across depth explicitly.
 
 Rationale
 ---------
-Mean pooling averages all patch outputs equally.  A CLS token introduces a
-learned summary vector that can attend selectively to the most informative
-depth intervals — potentially beneficial when ore-related signals are localised
-in only a few patches and diluted by averaging.
+Flattening V variables into a single patch token treats them as anonymous
+channels. Adding a learned variable embedding lets the transformer distinguish
+"this is the Fe column at depth 3" from "this is the Al column at depth 3",
+enabling explicit cross-variable and cross-depth attention.
 
 Everything downstream (scatter, SpatialTokenEmbedding, MapBeliefEncoder,
-OreReconstructionHead) is identical to the mean-pool variant.
+OreReconstructionHead) is identical to the CLS-patch variant.
 
 Input (forward)
 ---------------
@@ -36,7 +41,7 @@ ore_map : (B, 1, n_x, n_y)  full reconstructed ore map (normalised space)
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
@@ -56,8 +61,8 @@ from .end_to_end_helpers import sinusoidal_pe_1d
 
 
 @dataclass
-class PatchBoreholeCLSConfig:
-    """Hyperparameters for PatchBoreholeCLSTransformerEncoder."""
+class VariableAwarePatchBoreholeConfig:
+    """Hyperparameters for VariableAwarePatchBoreholeTransformerEncoder."""
 
     # Borehole dimensions
     n_variables: int = 5
@@ -77,7 +82,7 @@ class PatchBoreholeCLSConfig:
     # Shared dropout rate
     dropout: float = 0.1
 
-    # Fields forwarded from PatchBoreholeCLSEndToEndConfig — used for validation only
+    # Fields forwarded from VariableAwarePatchBoreholeEndToEndConfig — used for validation only
     d_model: int = 256
     n_heads: int = 8
     n_layers: int = 4
@@ -111,34 +116,39 @@ class PatchBoreholeCLSConfig:
 # ---------------------------------------------------------------------------
 
 
-class PatchBoreholeCLSTransformerEncoder(nn.Module):
-    """Patch-based borehole encoder with CLS-token pooling.
+class VariableAwarePatchBoreholeTransformerEncoder(nn.Module):
+    """Variable-aware patch borehole encoder with CLS-token pooling.
 
     Architecture:
       1. Divide the depth axis into non-overlapping patches of size bh_patch_size.
          Depth is zero-padded to the nearest multiple of bh_patch_size if needed.
-      2. Each patch flattens variables × depth_interval into a token vector of
-         size n_variables * bh_patch_size.
-      3. A linear layer projects each token to bh_d_model.
-      4. 1D sinusoidal positional encoding is added to patch tokens only.
-      5. A learned CLS token is prepended before the transformer.
-      6. A small transformer captures cross-patch dependencies.
-      7. CLS token output (index 0) + linear projection → latent_dim embedding.
+      2. Each (variable, patch) pair becomes one token of size bh_patch_size —
+         giving n_variables * n_patches tokens per borehole.
+      3. A linear layer projects each token from bh_patch_size to bh_d_model.
+      4. A learned variable embedding is added (distinguishes variable identity).
+      5. 1D sinusoidal positional encoding is added (encodes depth position).
+      6. A learned CLS token is prepended before the transformer.
+      7. A small transformer captures cross-variable and cross-depth dependencies.
+      8. CLS token output (index 0) + linear projection → latent_dim embedding.
 
     Input:  (B, V, D)
     Output: (B, latent_dim)
     """
 
-    def __init__(self, cfg: PatchBoreholeCLSConfig) -> None:
+    def __init__(self, cfg: VariableAwarePatchBoreholeConfig) -> None:
         super().__init__()
         self.cfg = cfg
         self.n_patches = math.ceil(cfg.n_depth / cfg.bh_patch_size)
         self.padded_depth = self.n_patches * cfg.bh_patch_size
 
-        token_dim = cfg.n_variables * cfg.bh_patch_size
-        self.patch_proj = nn.Linear(token_dim, cfg.bh_d_model)
+        # Each token contains one variable × one depth patch
+        self.patch_proj = nn.Linear(cfg.bh_patch_size, cfg.bh_d_model)
 
-        # Learned CLS token — initialised with trunc_normal (std=0.02, same as JEPA/ViT)
+        # Learned variable embedding — gives each variable a unique identity
+        self.var_embed = nn.Embedding(cfg.n_variables, cfg.bh_d_model)
+        nn.init.trunc_normal_(self.var_embed.weight, std=0.02)
+
+        # Learned CLS token — initialised with trunc_normal (std=0.02, same as ViT/JEPA)
         self.cls_token = nn.Parameter(torch.zeros(1, 1, cfg.bh_d_model))
         nn.init.trunc_normal_(self.cls_token, std=0.02)
 
@@ -160,11 +170,18 @@ class PatchBoreholeCLSTransformerEncoder(nn.Module):
 
         self.out_proj = nn.Linear(cfg.bh_d_model, cfg.latent_dim)
 
+        n_bh_tokens = cfg.n_variables * self.n_patches
         n_params = sum(p.numel() for p in self.parameters())
         print(
-            f"PatchBoreholeCLSTransformerEncoder: "
-            f"V={cfg.n_variables}, D={cfg.n_depth}, "
-            f"patch_size={cfg.bh_patch_size}, n_patches={self.n_patches}, cls_pooling=True"
+            "VariableAwarePatchBoreholeTransformerEncoder: variable-aware patching enabled"
+        )
+        print(
+            f"  n_variables={cfg.n_variables}, patch_size={cfg.bh_patch_size}, "
+            f"n_patches={self.n_patches}"
+        )
+        print(
+            f"  total borehole tokens = {cfg.n_variables} × {self.n_patches} + 1 CLS"
+            f" = {n_bh_tokens + 1}"
         )
         print(
             f"  bh_d_model={cfg.bh_d_model}, n_layers={cfg.bh_n_layers}, "
@@ -179,42 +196,42 @@ class PatchBoreholeCLSTransformerEncoder(nn.Module):
         if pad_len > 0:
             x = F.pad(x, (0, pad_len))  # (B, V, padded_depth)
 
-        # Split depth into patches and flatten variables per patch
+        # Create one token per (variable, depth patch)
         x = x.view(B, V, self.n_patches, self.cfg.bh_patch_size)
-        x = x.permute(0, 2, 1, 3).contiguous()  # (B, n_patches, V, patch_size)
-        x = x.reshape(
-            B, self.n_patches, V * self.cfg.bh_patch_size
-        )  # (B, n_patches, token_dim)
+        x = x.reshape(B, V * self.n_patches, self.cfg.bh_patch_size)
 
-        feat = self.patch_proj(x)  # (B, n_patches, bh_d_model)
+        feat = self.patch_proj(x)  # (B, V * n_patches, bh_d_model)
 
-        # Positional encoding applied to patch tokens only — CLS gets none
-        pe = sinusoidal_pe_1d(self.n_patches, self.cfg.bh_d_model, feat.device)
-        feat = feat + pe.unsqueeze(0)
+        # Variable embedding: token v*n_patches+p belongs to variable v
+        var_idx = torch.arange(V, device=x.device).repeat_interleave(self.n_patches)
+        var_emb = self.var_embed(var_idx)  # (V * n_patches, bh_d_model)
+        feat = feat + var_emb.unsqueeze(0)
+
+        # Depth positional encoding: token v*n_patches+p belongs to patch p
+        pe_full = sinusoidal_pe_1d(self.n_patches, self.cfg.bh_d_model, feat.device)
+        patch_idx = torch.arange(self.n_patches, device=feat.device).repeat(V)
+        depth_pe = pe_full[patch_idx]  # (V * n_patches, bh_d_model)
+        feat = feat + depth_pe.unsqueeze(0)
 
         # Prepend CLS token
         cls_tokens = self.cls_token.expand(B, -1, -1)  # (B, 1, bh_d_model)
-        feat = torch.cat([cls_tokens, feat], dim=1)  # (B, 1 + n_patches, bh_d_model)
+        feat = torch.cat([cls_tokens, feat], dim=1)  # (B, 1 + V*n_patches, bh_d_model)
 
         if self.cfg.bh_n_layers > 0:
-            feat = self.transformer(feat)  # (B, 1 + n_patches, bh_d_model)
+            feat = self.transformer(feat)
 
         cls_out = feat[:, 0]  # (B, bh_d_model)
         return self.out_proj(cls_out)  # (B, latent_dim)
 
 
 # ---------------------------------------------------------------------------
-# Configuration
+# End-to-end configuration
 # ---------------------------------------------------------------------------
 
 
 @dataclass
-class PatchBoreholeCLSEndToEndConfig:
-    """Hyperparameters for PatchBoreholeCLSEndToEndMapBeliefTransformer.
-
-    Identical to PatchBoreholeEndToEndConfig except the borehole encoder uses
-    CLS-token pooling instead of mean pooling.
-    """
+class VariableAwarePatchBoreholeEndToEndConfig:
+    """Hyperparameters for VariableAwarePatchBoreholeEndToEndMapBeliefTransformer."""
 
     # Borehole dimensions
     n_variables: int = 5
@@ -223,7 +240,7 @@ class PatchBoreholeCLSEndToEndConfig:
     # Borehole encoder: depth patch size
     bh_patch_size: int = 20
 
-    # Borehole encoder: transformer over patch tokens
+    # Borehole encoder: transformer over (variable, patch) tokens
     bh_d_model: int = 128
     bh_n_heads: int = 4
     bh_n_layers: int = 2
@@ -260,9 +277,9 @@ class PatchBoreholeCLSEndToEndConfig:
                 "(d_model/2 dims for x-axis, d_model/2 dims for y-axis)"
             )
 
-    def to_cls_config(self) -> PatchBoreholeCLSConfig:
-        """Build a PatchBoreholeCLSConfig to construct PatchBoreholeCLSTransformerEncoder."""
-        return PatchBoreholeCLSConfig(
+    def to_encoder_config(self) -> VariableAwarePatchBoreholeConfig:
+        """Build a VariableAwarePatchBoreholeConfig for the borehole encoder."""
+        return VariableAwarePatchBoreholeConfig(
             n_variables=self.n_variables,
             n_depth=self.n_depth,
             bh_patch_size=self.bh_patch_size,
@@ -300,12 +317,15 @@ class PatchBoreholeCLSEndToEndConfig:
 # ---------------------------------------------------------------------------
 
 
-class PatchBoreholeCLSEndToEndMapBeliefTransformer(nn.Module):
-    """End-to-end map belief transformer with a CLS-token patch borehole encoder.
+class VariableAwarePatchBoreholeEndToEndMapBeliefTransformer(nn.Module):
+    """End-to-end map belief transformer with a variable-aware patch borehole encoder.
 
-    Identical to PatchBoreholeEndToEndMapBeliefTransformer except that the
-    borehole encoder uses a learned CLS token for pooling instead of mean
-    pooling over patch tokens.
+    Borehole encoding: each (variable, depth patch) pair becomes a separate
+    transformer token, allowing explicit cross-variable and cross-depth attention
+    via a learned variable embedding plus sinusoidal depth positional encoding.
+
+    Everything downstream (scatter, SpatialTokenEmbedding, MapBeliefEncoder,
+    OreReconstructionHead) is identical to the CLS-patch variant.
 
     Training objective: full-map MSE reconstruction loss.
 
@@ -313,11 +333,13 @@ class PatchBoreholeCLSEndToEndMapBeliefTransformer(nn.Module):
     token), or forward_with_latent() to get both outputs in one pass.
     """
 
-    def __init__(self, cfg: PatchBoreholeCLSEndToEndConfig) -> None:
+    def __init__(self, cfg: VariableAwarePatchBoreholeEndToEndConfig) -> None:
         super().__init__()
         self.cfg = cfg
 
-        self.bh_encoder = PatchBoreholeCLSTransformerEncoder(cfg.to_cls_config())
+        self.bh_encoder = VariableAwarePatchBoreholeTransformerEncoder(
+            cfg.to_encoder_config()
+        )
 
         map_cfg = cfg.to_map_belief_config()
         self.token_embed = SpatialTokenEmbedding(map_cfg)
