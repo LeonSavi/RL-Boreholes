@@ -19,6 +19,9 @@ data/dataset/
 *.csv
 *.csv*
 *.xlsx
+*.xlsx:mshield
+*.xlsx:Zone.Identifier
+
 !boreholes.xlsx
 !data/nlog/boreholes.xlsx
 
@@ -37,3 +40,4 @@ test.py
 *.npy
 
 .claude/
+.tex/
