@@ -576,6 +576,7 @@ def train_variable_aware_patch_uncertainty_borehole_transformer(
                 + (f"  unc={unc_loss_sum / n:.4f}" if cfg.use_uncertainty_head else "")
                 + f"  val_mse={val_metrics['val_mse']:.4f}"
                 f"  val_corr={val_metrics['val_corr']:.4f}"
+                f"  val_unc_mse={val_metrics['val_unc_mse']:.4f}"
                 f"  unc_corr={val_metrics['val_unc_corr']:.4f}"
             )
 
