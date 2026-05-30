@@ -72,6 +72,11 @@ from .train_variable_aware_patch_borehole_transformer import (
     train_variable_aware_patch_borehole_transformer,
     load_variable_aware_patch_borehole_checkpoint,
 )
+from .train_variable_aware_patch_borehole_uncertainty_transformer import (
+    VariableAwarePatchBoreholeUncertaintyE2ETrainingConfig,
+    train_variable_aware_patch_uncertainty_borehole_transformer,
+    load_variable_aware_patch_uncertainty_borehole_checkpoint,
+)
 
 # Shared validation utilities re-exported here for callers that previously
 # imported validate_by_drill_bins from decision_simulator.neural_belief.training
@@ -116,6 +121,10 @@ __all__ = [
     "VariableAwarePatchBoreholeE2ETrainingConfig",
     "train_variable_aware_patch_borehole_transformer",
     "load_variable_aware_patch_borehole_checkpoint",
+    # Variable-aware patch borehole + uncertainty head
+    "VariableAwarePatchBoreholeUncertaintyE2ETrainingConfig",
+    "train_variable_aware_patch_uncertainty_borehole_transformer",
+    "load_variable_aware_patch_uncertainty_borehole_checkpoint",
     # Placeholder
     "train_raw_borehole_belief",
     # Shared utilities

@@ -42,6 +42,9 @@ from .training import (
     VariableAwarePatchBoreholeE2ETrainingConfig,
     train_variable_aware_patch_borehole_transformer,
     load_variable_aware_patch_borehole_checkpoint,
+    VariableAwarePatchBoreholeUncertaintyE2ETrainingConfig,
+    train_variable_aware_patch_uncertainty_borehole_transformer,
+    load_variable_aware_patch_uncertainty_borehole_checkpoint,
 )
 
 _DEBUG_UNET: dict = {
@@ -90,6 +93,7 @@ _DEBUG_E2E: dict = {
 _DEBUG_PATCH: dict = {**_DEBUG_E2E, "bh_patch_size": 10}
 _DEBUG_CLS: dict = {**_DEBUG_E2E, "bh_patch_size": 10}
 _DEBUG_VAR_AWARE: dict = {**_DEBUG_E2E, "bh_patch_size": 10}
+_DEBUG_VAR_AWARE_UNCERTAINTY: dict = {**_DEBUG_E2E, "bh_patch_size": 10}
 
 # Fields present in NeuralBeliefTrainingConfig but not in MapBeliefTrainingConfig.
 # These are silently dropped when building a transformer config from **overrides.
@@ -913,7 +917,7 @@ def train_end_to_end_from_colab(
     use_sequential_dataset: bool = False,
     n_sequences_per_map: int = 3,
     prefix_steps: list[int] | None = None,
-    bh_encoder_model: Literal["cnn", "patch", "cls", "variable_aware"] = "cnn",
+    bh_encoder_model: Literal["cnn", "patch", "cls", "variable_aware", "variable_aware_uncertainty"] = "cnn",
     **overrides,
 ) -> tuple[object, list[dict]]:
     """Train the end-to-end map belief transformer from a Colab notebook.
@@ -981,12 +985,13 @@ def train_end_to_end_from_colab(
     bh_encoder_model
         Which borehole encoder front-end to use:
 
-        ``"cnn"``            — 1D CNN downsampling + transformer (default, current baseline)
-        ``"patch"``          — depth-patch tokenisation + mean pooling
-        ``"cls"``            — depth-patch tokenisation + learned CLS-token pooling
-        ``"variable_aware"`` — one token per (variable, depth patch) + variable embedding + CLS pooling
+        ``"cnn"``                        — 1D CNN downsampling + transformer (default, current baseline)
+        ``"patch"``                      — depth-patch tokenisation + mean pooling
+        ``"cls"``                        — depth-patch tokenisation + learned CLS-token pooling
+        ``"variable_aware"``             — one token per (variable, depth patch) + variable embedding + CLS pooling
+        ``"variable_aware_uncertainty"`` — same as ``"variable_aware"`` with a parallel uncertainty head that predicts per-cell prediction error
 
-        When ``"patch"``, ``"cls"``, or ``"variable_aware"``, pass
+        When ``"patch"``, ``"cls"``, ``"variable_aware"``, or ``"variable_aware_uncertainty"``, pass
         ``bh_patch_size=N`` in ``**overrides`` to control the patch size (default 20).
     **overrides
         Any field of the selected training config by name.  Common overrides:
@@ -1046,7 +1051,11 @@ def train_end_to_end_from_colab(
     is_patch = bh_encoder_model == "patch"
     is_cls = bh_encoder_model == "cls"
     is_var_aware = bh_encoder_model == "variable_aware"
-    if is_var_aware:
+    is_var_aware_uncertainty = bh_encoder_model == "variable_aware_uncertainty"
+    if is_var_aware_uncertainty:
+        cfg_class = VariableAwarePatchBoreholeUncertaintyE2ETrainingConfig
+        debug_defaults = _DEBUG_VAR_AWARE_UNCERTAINTY if debug else {}
+    elif is_var_aware:
         cfg_class = VariableAwarePatchBoreholeE2ETrainingConfig
         debug_defaults = _DEBUG_VAR_AWARE if debug else {}
     elif is_cls:
@@ -1080,7 +1089,7 @@ def train_end_to_end_from_colab(
 
     print(f"\nnorm_stats_from  : {norm_stats_from}")
     print(f"bh_encoder_model : {bh_encoder_model}")
-    if is_patch or is_cls or is_var_aware:
+    if is_patch or is_cls or is_var_aware or is_var_aware_uncertainty:
         print(f"bh_patch_size    : {cfg.bh_patch_size}")
     print(f"map_pool_path    : {resolved_pool}")
     print(f"n_orebodies      : {n_orebodies}")
@@ -1102,7 +1111,21 @@ def train_end_to_end_from_colab(
         val_cache, resources, cfg, verbose=True, is_val=True
     )
 
-    if is_var_aware:
+    if is_var_aware_uncertainty:
+        trained_model, _ = train_variable_aware_patch_uncertainty_borehole_transformer(
+            resources=resources,
+            cfg=cfg,
+            device=device,
+            checkpoint_dir=ckpt_dir,
+            plot_dir=ckpt_dir / "plots",
+            verbose=True,
+            train_ds=train_ds,
+            val_ds=val_ds,
+        )
+        _, _, _, history = load_variable_aware_patch_uncertainty_borehole_checkpoint(
+            ckpt_dir / "variable_aware_patch_uncertainty_best.pt", device=device
+        )
+    elif is_var_aware:
         trained_model, _ = train_variable_aware_patch_borehole_transformer(
             resources=resources,
             cfg=cfg,
