@@ -29,8 +29,20 @@ VARIABLES = [
     #   cali_in  — borehole diameter, indicates washouts not lithology
 ]
 
-DEPTH_BINS = [0, 400, 800, 1200, 1600, 2000, 2400, 2800, 3200,
-              3600, 4000, 4400, 4800, 5200, 5600, 6000]
+DEPTH_BINS = list(range(0, 6001, 10))
+# 10 m bins (matches the encoder's cell size exactly; what John asked
+# for explicitly). Chosen from scripts/diagnostics/bank_bin_width.py:
+#   width   bins  coverage  median-n
+#    10 m   440   46.7 %       384
+#    20 m   220   52.1 %       653
+#    50 m    88   59.3 %     1,200
+#   100 m    44   62.2 %     2,076
+#   400 m    11   68.9 %     6,712   (the old default)
+# Decision rule: smallest width whose populated-cell coverage stays
+# >= 30 % AND median samples per populated cell stays >= 100 (KDE
+# bandwidth comfort). 10 m clears both bars. Empty cells fall through
+# the nearest-populated-cell fallback in
+# DistributionBank._resolve_cell, so no sampling-code changes needed.
 
 
 # Physically-meaningful pairs to check per rock type.
@@ -48,16 +60,19 @@ CHECK_PAIRS = [
     ("gr_api", "res_deep_log"),
 ]
 
-# bin 5 = 2000-2400m, bin 6 = 2400-2800m
+# With 10 m bins + formation key: (rock, formation, bin_idx).
+# Cells picked from the dominant (rock, formation) pairs at typical
+# Dutch reservoir depths.
 CHECK_CELLS = [
-    ("claystone_hot",   5),
-    ("claystone_cool",  4),
-    ("sandstone_clean", 6),
-    ("sandstone_shaly", 5),
-    ("halite_pure",     6),
-    ("dolomite",        5),
-    ("chalk",           4),
-    ("anhydrite",       6),
+    ("claystone_hot",   "DC", 220),   # Carboniferous source rock
+    ("claystone_hot",   "RB", 220),   # Triassic Bunt source
+    ("claystone_cool",  "KN", 180),   # Cretaceous marl
+    ("sandstone_clean", "RO", 260),   # Slochteren reservoir
+    ("sandstone_shaly", "RB", 220),   # Bunt sandstone
+    ("halite_pure",     "ZE", 260),   # Zechstein cap
+    ("dolomite",        "ZE", 220),   # Zechstein carbonate
+    ("chalk",           "CK", 180),   # Chalk Group
+    ("anhydrite",       "ZE", 260),   # Zechstein anhydrite
 ]
 
 

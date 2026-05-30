@@ -314,7 +314,8 @@ def _fit_transition_matrix(
     bin_step_m: float = TRANSITION_BIN_STEP_M,
     laplace: float = TRANSITION_LAPLACE,
     calibrate_to_empirical_runs: bool = True,
-    max_p_self: float = 0.998,
+    max_p_self: float = 0.97,
+    max_gap_cells: int = 5,
 ) -> tuple[pd.DataFrame, int]:
     """Fit a 1-step Markov transition matrix at the given depth step.
 
@@ -354,7 +355,12 @@ def _fit_transition_matrix(
     work["_prev_bin"] = work.groupby("borehole")["_bin"].shift(1)
     work["_prev_rock"] = work.groupby("borehole")["rock_type_fine"].shift(1)
     pairs = work.dropna(subset=["_prev_bin", "_prev_rock"])
-    pairs = pairs[pairs["_bin"] - pairs["_prev_bin"] == 1]
+    # v3.3 (Phase S): allow up to MAX_GAP_CELLS missing bins between
+    # observed bins. The previous strict +1 filter dropped rare-rock
+    # transitions that survive across small log gaps -- making the
+    # bank's matrix miss e.g. RB sandstone entirely.
+    pair_gap = pairs["_bin"] - pairs["_prev_bin"]
+    pairs = pairs[(pair_gap >= 1) & (pair_gap <= max_gap_cells)]
     if not pairs.empty:
         ij = pairs[["_prev_rock", "rock_type_fine"]].to_numpy()
         for r_prev, r_cur in ij:

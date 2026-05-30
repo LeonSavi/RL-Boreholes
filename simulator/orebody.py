@@ -327,6 +327,7 @@ def sample_orebodies(
     max_interbed_cells: int = 3,
     grade_lateral_scale: float = 4.0,
     grade_vertical_scale: float = 5.0,
+    max_bodies: int = 2,
 ) -> tuple[np.ndarray, list[OreBody]]:
     """Generate a 3D yield field with 0-3 stratabound ore bodies.
 
@@ -340,7 +341,8 @@ def sample_orebodies(
         the reservoir interval (up to 30m at 10m/cell)
     """
     if n_bodies is None:
-        n_bodies = int(rng.integers(0, 4))
+        # +1 so the upper bound is inclusive (rng.integers high is exclusive)
+        n_bodies = int(rng.integers(0, max(1, max_bodies + 1)))
 
     yield_field = np.zeros((n_x, n_y, n_depth), dtype=np.float32)
     bodies: list[OreBody] = []

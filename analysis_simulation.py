@@ -400,20 +400,25 @@ def plot_distribution_bank_overview(bank: DistributionBank,
                                      variable: str = "rhob") -> None:
     """KDE of `variable` for 8 representative cells — visualises what the
     simulator draws from."""
+    # v3.1: probes are (rock, formation, bin_idx) -- 10 m bins.
+    # bin = depth // 10 (e.g. 220 == 2200 m).
     key_cells = [
-        ("claystone_hot",   3),
-        ("claystone_cool",  3),
-        ("sandstone_clean", 5),
-        ("sandstone_shaly", 5),
-        ("halite_pure",     6),
-        ("anhydrite",       6),
-        ("chalk",           4),
-        ("dolomite",        5),
+        ("claystone_hot",   "DC", 220),
+        ("claystone_cool",  "KN", 180),
+        ("sandstone_clean", "RO", 260),
+        ("sandstone_shaly", "RB", 220),
+        ("halite_pure",     "ZE", 260),
+        ("anhydrite",       "ZE", 260),
+        ("chalk",           "CK", 180),
+        ("dolomite",        "ZE", 220),
     ]
     fig, axes = plt.subplots(2, 4, figsize=(18, 8))
     axes = axes.flatten()
     for ax, key in zip(axes, key_cells):
         cell = bank.cells.get(key)
+        # backward-compat: legacy 2-tuple key for older rock-only banks
+        if cell is None and len(key) == 3:
+            cell = bank.cells.get((key[0], key[2]))
         if cell is None or variable not in getattr(cell, "kdes", {}):
             ax.set_visible(False)
             continue
@@ -431,10 +436,9 @@ def plot_distribution_bank_overview(bank: DistributionBank,
         c = ROCK_COLOURS.get(key[0], "#2166ac")
         ax.fill_between(x, 0, y, alpha=0.45, color=c)
         ax.plot(x, y, color=c, lw=1.4)
-        depth_lo = key[1] * 400
-        depth_hi = (key[1] + 1) * 400
-        ax.set_title(f"{key[0]}  ({depth_lo}-{depth_hi} m)\n"
-                      f"n={cell.n_samples:,}", fontsize=10)
+        ax.set_title(f"{key[0]} in {key[1]}  "
+                     f"({cell.depth_lo:.0f}-{cell.depth_hi:.0f} m)\n"
+                     f"n={cell.n_samples:,}", fontsize=10)
         ax.set_xlabel(variable)
         ax.set_ylabel("density")
         ax.grid(alpha=0.25)

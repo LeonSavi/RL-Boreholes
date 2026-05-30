@@ -70,12 +70,15 @@ HARD_BOUNDS = {
 
 @dataclass
 class CellDistribution:
-    """Fitted distribution for one (rock_type_fine, depth_bin) cell."""
+    """Fitted distribution for one (rock_type_fine, formation, depth_bin) cell."""
     rock_type: str
     depth_lo: float
     depth_hi: float
     variables: list[str]
     n_samples: int
+    # v3.1: formation as third key dimension (None on legacy banks loaded
+    # from the (rock, depth)-only schema; the load() method backfills).
+    formation: str | None = None
     # per-variable marginals, fitted as KDE on clamped, finite values
     kdes: dict[str, gaussian_kde] = field(default_factory=dict)
     # per-variable support (empirical P5, P95 after clamping)
@@ -141,13 +144,23 @@ class CellDistribution:
 
 
 class DistributionBank:
-    """Collection of CellDistributions indexed by (rock_type, depth_bin)."""
+    """Collection of CellDistributions indexed by (rock_type, formation, depth_bin).
+
+    v3.1: formation is a third key dimension. The empirical observation
+    is that the same rock label (e.g. claystone_hot) has materially
+    different petrophysics in different formations (e.g. SG vs DC). The
+    sampler accepts ``formation=`` to pick the right cell; if omitted,
+    it falls back to whichever formation has the most data at that
+    (rock, depth) location.
+    """
 
     def __init__(self, variables: list[str], depth_bins: list[float]):
         self.variables = variables
         self.depth_bins = depth_bins
-        self.cells: dict[tuple[str, int], CellDistribution] = {}
+        # key: (rock_type, formation, bin_idx)
+        self.cells: dict[tuple[str, str, int], CellDistribution] = {}
         self.rock_types: list[str] = []
+        self.formations: list[str] = []
         # [0.5%, 99.5%] empirical quantiles per variable, computed in fit()
         # from the full real corpus (Task 5a).  Replaces HARD_BOUNDS at
         # sampling time for variables present here; HARD_BOUNDS remains
@@ -168,19 +181,34 @@ class DistributionBank:
         depth_bins: Sequence[float],
         min_samples_per_cell: int = 30,
         kde_bandwidth: str | float = "scott",
+        row_filter: str | None = None,
     ) -> "DistributionBank":
-        """Fit all per-cell distributions from the cleaned samples parquet."""
+        """Fit all per-cell distributions from the cleaned samples parquet.
+
+        ``row_filter`` is a `pandas.DataFrame.query` expression applied
+        AFTER load and BEFORE the variable / pivot logic. Use it to fit
+        a parallel "subset" bank (e.g. ``hc_discovery == True`` for the
+        HcPositiveBank used to inject gas-bearing signatures in
+        ore-body cells)."""
         df = pd.read_parquet(parquet_path)
         bank = cls(list(variables), list(depth_bins))
 
         if "rock_type_fine" not in df.columns:
             raise ValueError("samples.parquet needs rock_type_fine (v4 schema)")
 
+        if row_filter is not None:
+            before = len(df)
+            df = df.query(row_filter)
+            print(f"row_filter {row_filter!r}: {len(df):,} of {before:,} rows kept")
+
         df = df[df["measurement"].isin(variables)]
+        if "formation" not in df.columns:
+            raise ValueError("samples.parquet needs `formation` column "
+                             "for the per-(rock, formation, depth) bank")
         # wide pivot so each row is (borehole, depth) with all variables
         # as columns — lets us compute correlations
         wide = df.pivot_table(
-            index=["dataset", "borehole", "depth", "rock_type_fine"],
+            index=["dataset", "borehole", "depth", "rock_type_fine", "formation"],
             columns="measurement",
             values="value",
             aggfunc="mean",
@@ -194,7 +222,9 @@ class DistributionBank:
         )
 
         bank.rock_types = sorted(wide["rock_type_fine"].dropna().unique())
+        bank.formations = sorted(wide["formation"].dropna().unique())
         print(f"Fitting distributions over {len(bank.rock_types)} rock types, "
+              f"{len(bank.formations)} formations, "
               f"{len(depth_bins)-1} depth bins, {len(variables)} variables")
 
         # ---- Task 5a: empirical [0.5%, 99.5%] bounds per variable ----
@@ -220,29 +250,35 @@ class DistributionBank:
 
         import time
         total_cells = 0
+        per_rock = 0
         t_start = time.time()
+        # iterate over (rock, formation, bin) triples; many will have
+        # too few samples and get skipped (handled at sample-time by the
+        # nearest-cell fallback, which tries same-formation other-bin
+        # first, then any-formation nearest-bin).
         for rock in bank.rock_types:
-            for bin_idx in range(len(depth_bins) - 1):
-                lo, hi = depth_bins[bin_idx], depth_bins[bin_idx + 1]
-                sub = wide[
-                    (wide["rock_type_fine"] == rock)
-                    & (wide["depth_bin"] == bin_idx)
-                ]
-                if len(sub) < min_samples_per_cell:
-                    continue
-                t0 = time.time()
-                cell = cls._fit_cell(
-                    rock, lo, hi, list(variables), sub, kde_bandwidth,
-                    bounds=bank.empirical_bounds,
-                )
-                dt = time.time() - t0
-                bank.cells[(rock, bin_idx)] = cell
-                total_cells += 1
-                print(f"  {rock:14s} {lo:>5.0f}-{hi:<5.0f}m  "
-                      f"n={cell.n_samples:>6d}  "
-                      f"vars_corr={len(cell.corr_variables)}  "
-                      f"({dt:.1f}s)")
-
+            per_rock = 0
+            for formation in bank.formations:
+                for bin_idx in range(len(depth_bins) - 1):
+                    lo, hi = depth_bins[bin_idx], depth_bins[bin_idx + 1]
+                    sub = wide[
+                        (wide["rock_type_fine"] == rock)
+                        & (wide["formation"] == formation)
+                        & (wide["depth_bin"] == bin_idx)
+                    ]
+                    if len(sub) < min_samples_per_cell:
+                        continue
+                    cell = cls._fit_cell(
+                        rock, lo, hi, list(variables), sub, kde_bandwidth,
+                        bounds=bank.empirical_bounds,
+                        formation=formation,
+                    )
+                    bank.cells[(rock, formation, bin_idx)] = cell
+                    total_cells += 1
+                    per_rock += 1
+            print(f"  {rock:18s}  {per_rock:>4d} populated cells across "
+                  f"{len(bank.formations)} formations x "
+                  f"{len(depth_bins)-1} bins")
 
         print(f"\nfitted {total_cells} cells in {time.time()-t_start:.0f}s")
         return bank
@@ -256,6 +292,7 @@ class DistributionBank:
         sub: pd.DataFrame,
         bandwidth,
         bounds: dict[str, tuple[float, float]] | None = None,
+        formation: str | None = None,
     ) -> CellDistribution:
         cell = CellDistribution(
             rock_type=rock,
@@ -264,6 +301,7 @@ class DistributionBank:
             variables=variables,
             n_samples=len(sub),
             bounds=dict(bounds) if bounds else {},
+            formation=formation,
         )
         # per-variable marginals.
         # Two-stage filtering before KDE fit:
@@ -329,31 +367,33 @@ class DistributionBank:
         n: int = 1,
         rng: np.random.Generator | None = None,
         interpolate: bool = True,
+        formation: str | None = None,
     ) -> dict[str, np.ndarray]:
-        """Draw n joint samples of all variables for given rock type at depth.
+        """Draw n joint samples of all variables for given (rock_type,
+        formation, depth).
 
-        With `interpolate=True` (default), samples are blended between the
-        two adjacent bin centres so the marginal distribution at depth d
-        is a mixture of the floor-bin and ceiling-bin distributions.
+        If ``formation`` is None, the sampler picks the formation with
+        the most data at the requested cell (legacy behaviour). Pass it
+        explicitly when the caller knows which formation the cell sits
+        in (the map generator does).
 
-        Three-level fallback when a requested cell/variable is missing:
-          1. If the exact (rock_type, depth_bin) cell has no fit, use the
-             nearest populated depth bin of the same rock type.
-          2. For any variable that the chosen cell lacks a KDE for, borrow
-             that variable's KDE from the nearest sibling cell.
-          3. If the rock has no fitted cells anywhere, returns NaN.
+        Fallback chain (when the exact cell is missing or has no KDE):
+          1. nearest depth bin in the SAME (rock, formation)
+          2. nearest (rock, ANY formation) at any bin
+          3. NaN if rock has no fitted cells anywhere
         """
         if rng is None:
             rng = np.random.default_rng()
 
         if not interpolate:
-            cell = self._resolve_cell(rock_type, depth)
+            cell = self._resolve_cell(rock_type, depth, formation=formation)
             if cell is None:
                 return {v: np.full(n, np.nan) for v in self.variables}
             return self._sample_cell_with_fallback(cell, rock_type, n, rng)
 
         centres = self._bin_centres()
-        cell_lo, cell_hi, alpha = self._bracket_cells(rock_type, depth, centres)
+        cell_lo, cell_hi, alpha = self._bracket_cells(
+            rock_type, depth, centres, formation=formation)
 
         if cell_lo is None and cell_hi is None:
             return {v: np.full(n, np.nan) for v in self.variables}
@@ -386,14 +426,26 @@ class DistributionBank:
             out[v] = out[v][idx]
         return out
 
-    def _resolve_cell(self, rock_type: str, depth: float
+    def cell_for(self, rock_type: str, depth: float,
+                 formation: str | None = None) -> CellDistribution | None:
+        """Public lookup: resolve the cell that ``sample()`` would draw from,
+        for the GRF-blend mu/sigma read in map_generator.py."""
+        return self._resolve_cell(rock_type, depth, formation=formation)
+
+    def _resolve_cell(self, rock_type: str, depth: float,
+                      formation: str | None = None
                       ) -> CellDistribution | None:
         bin_idx = np.searchsorted(self.depth_bins, depth, side="right") - 1
         bin_idx = int(np.clip(bin_idx, 0, len(self.depth_bins) - 2))
-        cell = self.cells.get((rock_type, bin_idx))
-        if cell is None:
-            cell = self._nearest_cell(rock_type, bin_idx)
-        return cell
+        if formation is not None:
+            cell = self.cells.get((rock_type, formation, bin_idx))
+            if cell is not None:
+                return cell
+            cell = self._nearest_cell(rock_type, bin_idx, formation=formation)
+            if cell is not None:
+                return cell
+        # fall back to any-formation lookup
+        return self._nearest_cell(rock_type, bin_idx, formation=None)
 
     def _bin_centres(self) -> list[float]:
         return [0.5 * (self.depth_bins[i] + self.depth_bins[i + 1])
@@ -401,15 +453,39 @@ class DistributionBank:
 
     def _bracket_cells(
         self, rock_type: str, depth: float, centres: list[float],
+        formation: str | None = None,
     ) -> tuple[CellDistribution | None, CellDistribution | None, float]:
-        populated = sorted(
-            [(b, self.cells[(rock_type, b)])
-             for (r, b) in self.cells if r == rock_type],
-            key=lambda t: t[0],
-        )
-        if not populated:
-            return None, None, 0.0
+        if formation is not None:
+            populated = sorted(
+                [(b, self.cells[(rock_type, formation, b)])
+                 for (r, f, b) in self.cells
+                 if r == rock_type and f == formation],
+                key=lambda t: t[0],
+            )
+            if not populated:
+                # no cells in that formation -> fall through to any-formation
+                pass
+            else:
+                return self._bracket_from_populated(populated, depth, centres)
 
+        # any-formation: for each bin, pick the cell with the most samples
+        # (the de-facto "averaged" cell, matching legacy semantics)
+        best_per_bin: dict[int, CellDistribution] = {}
+        for (r, f, b), c in self.cells.items():
+            if r != rock_type:
+                continue
+            prev = best_per_bin.get(b)
+            if prev is None or c.n_samples > prev.n_samples:
+                best_per_bin[b] = c
+        if not best_per_bin:
+            return None, None, 0.0
+        populated = sorted(best_per_bin.items(), key=lambda t: t[0])
+        return self._bracket_from_populated(populated, depth, centres)
+
+    def _bracket_from_populated(
+        self, populated: list[tuple[int, CellDistribution]],
+        depth: float, centres: list[float],
+    ) -> tuple[CellDistribution | None, CellDistribution | None, float]:
         for i, (b, c) in enumerate(populated):
             centre = centres[b]
             if depth <= centre:
@@ -422,7 +498,6 @@ class DistributionBank:
                 alpha = (depth - centre_prev) / (centre - centre_prev)
                 alpha = float(np.clip(alpha, 0.0, 1.0))
                 return c_prev, c, alpha
-
         _, c_last = populated[-1]
         return c_last, c_last, 0.0
 
@@ -434,16 +509,19 @@ class DistributionBank:
         rng: np.random.Generator,
     ) -> dict[str, np.ndarray]:
         bin_idx = 0
-        for (r, b), c in self.cells.items():
+        formation: str | None = None
+        for (r, f, b), c in self.cells.items():
             if c is cell and r == rock_type:
                 bin_idx = b
+                formation = f
                 break
 
         donors = {}
         for v in self.variables:
             if v in cell.kdes:
                 continue
-            donor = self._nearest_cell_with_variable(rock_type, bin_idx, v)
+            donor = self._nearest_cell_with_variable(
+                rock_type, bin_idx, v, formation=formation)
             if donor is not None:
                 donors[v] = donor
 
@@ -460,33 +538,53 @@ class DistributionBank:
             out[v] = np.clip(vals, lo, hi)
         return out
 
-    def _nearest_cell(self, rock_type: str, bin_idx: int
+    def _nearest_cell(self, rock_type: str, bin_idx: int,
+                      formation: str | None = None
                       ) -> CellDistribution | None:
-        candidates = [
-            (abs(b - bin_idx), b)
-            for (r, b) in self.cells
-            if r == rock_type
-        ]
+        if formation is not None:
+            candidates = [
+                (abs(b - bin_idx), b)
+                for (r, f, b) in self.cells
+                if r == rock_type and f == formation
+            ]
+            if not candidates:
+                return None
+            candidates.sort()
+            _, nearest_bin = candidates[0]
+            return self.cells[(rock_type, formation, nearest_bin)]
+        # any-formation: prefer cells with more samples at the same distance
+        candidates = []
+        for (r, f, b), c in self.cells.items():
+            if r != rock_type:
+                continue
+            candidates.append((abs(b - bin_idx), -c.n_samples, f, b))
         if not candidates:
             return None
         candidates.sort()
-        _, nearest_bin = candidates[0]
-        return self.cells[(rock_type, nearest_bin)]
+        _, _, f, b = candidates[0]
+        return self.cells[(rock_type, f, b)]
 
     def _nearest_cell_with_variable(
         self, rock_type: str, bin_idx: int, variable: str,
+        formation: str | None = None,
     ) -> CellDistribution | None:
         candidates = []
-        for (r, b), c in self.cells.items():
+        for (r, f, b), c in self.cells.items():
             if r != rock_type:
                 continue
             if variable not in c.kdes:
                 continue
-            candidates.append((abs(b - bin_idx), c))
+            if formation is not None and f != formation:
+                continue
+            candidates.append((abs(b - bin_idx), -c.n_samples, c))
         if not candidates:
-            return None
-        candidates.sort(key=lambda t: t[0])
-        return candidates[0][1]
+            if formation is None:
+                return None
+            # widen: drop formation filter
+            return self._nearest_cell_with_variable(
+                rock_type, bin_idx, variable, formation=None)
+        candidates.sort(key=lambda t: (t[0], t[1]))
+        return candidates[0][2]
 
     def save(self, path: str | Path) -> None:
         with open(path, "wb") as f:
@@ -500,23 +598,45 @@ class DistributionBank:
         # backfill Task 5a attrs on older pickles
         if not hasattr(obj, "empirical_bounds"):
             obj.empirical_bounds = {}
+        if not hasattr(obj, "formations"):
+            obj.formations = []
+        # migrate legacy (rock, bin) keys -> (rock, "*", bin)
+        new_cells = {}
+        needs_migration = False
+        for key, cell in obj.cells.items():
+            if len(key) == 2:
+                needs_migration = True
+                rock, b = key
+                if not hasattr(cell, "formation"):
+                    cell.formation = "*"
+                new_cells[(rock, "*", b)] = cell
+            else:
+                new_cells[key] = cell
+        if needs_migration:
+            obj.cells = new_cells
+            if "*" not in obj.formations:
+                obj.formations.append("*")
         for cell in obj.cells.values():
             if not hasattr(cell, "bounds"):
                 cell.bounds = {}
+            if not hasattr(cell, "formation"):
+                cell.formation = "*"
         return obj
 
     def summary(self) -> pd.DataFrame:
         """Tabular summary of fit coverage."""
         rows = []
-        for (rock, bin_idx), cell in self.cells.items():
+        for (rock, formation, bin_idx), cell in self.cells.items():
             rows.append({
                 "rock_type": rock,
+                "formation": formation,
                 "depth_bin": f"{cell.depth_lo:.0f}-{cell.depth_hi:.0f}",
                 "n_samples": cell.n_samples,
                 "n_vars_marginal": len(cell.kdes),
                 "n_vars_correlated": len(cell.corr_variables),
             })
-        return pd.DataFrame(rows).sort_values(["rock_type", "depth_bin"])
+        return (pd.DataFrame(rows)
+                  .sort_values(["rock_type", "formation", "depth_bin"]))
 
 
 # =============================================================================

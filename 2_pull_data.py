@@ -385,6 +385,16 @@ class PullReport:
     flat_intervals:        dict = field(default_factory=lambda: defaultdict(int))
     large_depth_gaps:      int = 0
 
+    # TVD-alignment stats (v3 fix)
+    nlog_wells_with_dirsurvey:  int = 0
+    nlog_wells_md_only:         list = field(default_factory=list)
+    tvd_survey_corrupt:         list = field(default_factory=list)
+    tvd_extrapolated_wells:     list = field(default_factory=list)
+    tvd_max_correction_m:       dict = field(default_factory=dict)
+
+    # Datum-normalisation stats (v3.2 fix)
+    datum_normalised_wells:     int = 0
+
     def write(self, path: Path) -> None:
         L: list = []
         add = L.append
@@ -409,6 +419,22 @@ class PullReport:
         add(f"    used                            {self.nlog_wells_used:>14,}")
         add(f"    feet-depth auto-converted       {len(self.nlog_feet_wells):>14,}")
         add(f"  rows written                      {self.nlog_rows_out:>14,}")
+
+        add("\n## TVD alignment (v3)")
+        add(f"  wells with usable dirsurvey       {self.nlog_wells_with_dirsurvey:>14,}")
+        add(f"  wells assumed vertical (MD=TVD)   {len(self.nlog_wells_md_only):>14,}")
+        add(f"  wells with corrupt dirsurvey      {len(self.tvd_survey_corrupt):>14,}")
+        add(f"  wells with LAS past survey end    {len(self.tvd_extrapolated_wells):>14,}")
+        if self.tvd_max_correction_m:
+            corr = np.asarray(list(self.tvd_max_correction_m.values()))
+            add(f"  per-well max |MD-TVD| correction:")
+            add(f"    median   {float(np.median(corr)):>10.1f} m")
+            add(f"    P95      {float(np.percentile(corr, 95)):>10.1f} m")
+            add(f"    max      {float(np.max(corr)):>10.1f} m")
+
+        add("\n## Datum normalisation (v3.2)")
+        add(f"  wells with drpHeight subtracted   {self.datum_normalised_wells:>14,}")
+        add("  (depths in samples.parquet are now NAP/MSL-relative, not RT-relative)")
 
         add(f"\n## boreholes.xlsx (location + hc_result)")
         add(f"  rows read                         {self.xlsx_rows:>14,}")
@@ -920,6 +946,11 @@ def _read_details(folder: Path, report: PullReport) -> dict:
         "x_rd": np.nan, "y_rd": np.nan, "location_type": None,
         "hc_result": None, "field_name": None,
         "borehole_name_long": None, "nitg_nr": None,
+        # v3.2: KB elevation above NAP (onshore) / MSL (offshore).
+        # Subtracted from each LAS sample's depth so the parquet's
+        # `depth` column is consistently NAP/MSL-relative across wells
+        # instead of per-well-KB-relative.
+        "drp_height_m": 0.0,
     }
     if not f.exists() or f.stat().st_size <= 4:
         return out
@@ -982,6 +1013,13 @@ def _read_details(folder: Path, report: PullReport) -> dict:
     nn = data.get("nitgNr")
     if isinstance(nn, str) and nn.strip():
         out["nitg_nr"] = nn.strip()
+
+    drp = data.get("drpHeightInMeters")
+    if drp is not None:
+        try:
+            out["drp_height_m"] = float(drp)
+        except (TypeError, ValueError):
+            pass
     return out
 
 
@@ -1059,6 +1097,96 @@ def _flag_flat_intervals(values: np.ndarray, min_run: int) -> np.ndarray:
     if len(values) - start >= min_run:
         mask[start:] = True
     return mask
+
+
+def _load_md_to_tvd(folder: Path, report: "PullReport"):
+    """Build an MD -> TVD interpolator from dirsurvey.json.
+
+    Returns None if no usable survey exists (caller should treat as
+    MD == TVD, i.e. vertical well). Uses the surveyor-provided per-point
+    tvDepth, which is computed by the minimum-curvature method and so
+    handles both inclination and curvature for the depth axis.
+
+    When the well has multiple `dirSurveys` (sidetracks etc.), picks the
+    one with the most points. When LAS MD extends beyond the survey's
+    deepest point, linearly extrapolates using the deepest two points'
+    slope and flags the well in the report.
+    """
+    fp = folder / "dirsurvey.json"
+    if not fp.exists():
+        report.nlog_wells_md_only.append(folder.name)
+        return None
+    try:
+        obj = json.loads(fp.read_text())
+    except (json.JSONDecodeError, OSError):
+        report.tvd_survey_corrupt.append(folder.name)
+        return None
+    if not isinstance(obj, dict):
+        return None
+
+    surveys = obj.get("dirSurveys") or []
+    best_pts: list = []
+    for s in surveys:
+        pts = s.get("dirSurveyPoints") or []
+        if len(pts) > len(best_pts):
+            best_pts = pts
+    if len(best_pts) < 2:
+        report.nlog_wells_md_only.append(folder.name)
+        return None
+
+    mds, tvds = [], []
+    for p in best_pts:
+        md = p.get("ahDepth")
+        tvd = p.get("tvDepth")
+        if md is None or tvd is None:
+            continue
+        mds.append(float(md))
+        tvds.append(float(tvd))
+    if len(mds) < 2:
+        report.nlog_wells_md_only.append(folder.name)
+        return None
+
+    mds = np.asarray(mds, dtype=float)
+    tvds = np.asarray(tvds, dtype=float)
+    order = np.argsort(mds)
+    mds, tvds = mds[order], tvds[order]
+    keep = np.r_[True, np.diff(mds) > 1e-6]
+    mds, tvds = mds[keep], tvds[keep]
+    if len(mds) < 2:
+        report.nlog_wells_md_only.append(folder.name)
+        return None
+
+    report.nlog_wells_with_dirsurvey += 1
+    md_max = float(mds[-1])
+    tail_slope = float((tvds[-1] - tvds[-2]) /
+                       max(mds[-1] - mds[-2], 1e-6))
+    head_slope = float((tvds[1] - tvds[0]) /
+                       max(mds[1] - mds[0], 1e-6))
+
+    def md_to_tvd(md):
+        md_a = np.asarray(md, dtype=float)
+        out = np.interp(md_a, mds, tvds)
+        beyond = md_a > md_max
+        if beyond.any():
+            out = np.where(beyond,
+                           tvds[-1] + tail_slope * (md_a - md_max),
+                           out)
+            extrap = float((md_a[beyond] - md_max).max())
+            if extrap > 50:
+                report.tvd_extrapolated_wells.append((folder.name, extrap))
+        before = md_a < mds[0]
+        if before.any():
+            out = np.where(before,
+                           tvds[0] + head_slope * (md_a - mds[0]),
+                           out)
+        # the largest |MD - TVD| inside this well; tracks how aggressive
+        # the correction was
+        if md_a.size:
+            corr = float(np.max(np.abs(md_a - out)))
+            report.tvd_max_correction_m[folder.name] = corr
+        return out
+
+    return md_to_tvd
 
 
 def _resolve_alias(df: pd.DataFrame, aliases: tuple) -> str | None:
@@ -1179,6 +1307,21 @@ def pull_nlog(
             continue
 
         depths = df.index.values
+        # v3 TVD fix: build per-well MD->TVD interpolator. Formation
+        # lookup below stays in MD (NLOG strat intervals are reported in
+        # MD), but every sample's OUTPUT `depth` is TVD so the simulator
+        # bins by true vertical depth.
+        md_to_tvd = _load_md_to_tvd(folder, report)
+        tvd_depths = (md_to_tvd(depths)
+                      if md_to_tvd is not None
+                      else depths.astype(float))
+        # v3.2 datum fix: subtract KB elevation so depths are NAP/MSL-
+        # relative, consistent across wells, instead of per-well RT-
+        # relative (which differed by drpHeight typically 5-60 m).
+        drp_height = float(details.get("drp_height_m") or 0.0)
+        if drp_height != 0.0:
+            tvd_depths = tvd_depths - drp_height
+            report.datum_normalised_wells += 1
         depth_to_formation  = np.full(len(depths), None, dtype=object)
         depth_to_strat_unit = np.full(len(depths), None, dtype=object)
         for iv in intervals:
@@ -1217,7 +1360,9 @@ def pull_nlog(
             if formation is None:
                 continue
             strat_unit = depth_to_strat_unit[idx]
-            depth = float(depths[idx])
+            # MD for the formation/strat lookup just above; TVD for the
+            # output row (downstream binning happens in TVD space).
+            depth = float(tvd_depths[idx])
 
             rock_type = NLOG_FORMATION_TO_ROCK.get(formation, "other")
             rock_type_fine = classify_strat_unit(strat_unit, formation)

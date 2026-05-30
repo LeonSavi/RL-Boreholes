@@ -25,7 +25,21 @@
     with strat.json                          6,508
     used                                     1,537
     feet-depth auto-converted                  428
-  rows written                           7,715,821
+  rows written                           7,723,634
+
+## TVD alignment (v3)
+  wells with usable dirsurvey                1,561
+  wells assumed vertical (MD=TVD)                9
+  wells with corrupt dirsurvey                   0
+  wells with LAS past survey end                81
+  per-well max |MD-TVD| correction:
+    median         11.5 m
+    P95           822.0 m
+    max         41204.4 m
+
+## Datum normalisation (v3.2)
+  wells with drpHeight subtracted            1,570
+  (depths in samples.parquet are now NAP/MSL-relative, not RT-relative)
 
 ## boreholes.xlsx (location + hc_result)
   rows read                                  6,721
@@ -67,7 +81,7 @@
     rhob             wells=   998   rows= 1,028,604
     gr_api           wells= 1,274   rows= 2,548,763
     nphi             wells=   780   rows=   530,158
-    dt_us_ft         wells= 1,283   rows= 1,799,982
+    dt_us_ft         wells= 1,284   rows= 1,807,795
     pef              wells=    95   rows=    61,560
     cali_in          wells=   307   rows=   336,435
     sp_mv            wells=   187   rows=   196,162
@@ -245,7 +259,7 @@
     NEUT               44
 
 ## Clipping events (values outside physical range — dropped)
-    dt_us_ft         shear-suspect         302,191
+    dt_us_ft         shear-suspect         294,378
     nphi             above                  75,099
     sp_mv            above                  17,269
     nphi             below                   7,480
@@ -267,7 +281,7 @@
     pef              below                     256
 
 ## Tier 2 — statistical sanity
-  duplicate rows removed                    78,785
+  duplicate rows removed                    78,936
   large depth gaps flagged                       1
 
   implausible gradients (dropped):
@@ -331,7 +345,7 @@
         BOZ-01
         BRK-16-S1
         D12-A-02-S1
-    NLOG/dt_us_ft          (36 wells)
+    NLOG/dt_us_ft          (38 wells)
         A15-03
         A15-04
         A18-02

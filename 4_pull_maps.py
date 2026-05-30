@@ -149,7 +149,7 @@ def main() -> None:
     p.add_argument("--out-dir", type=Path, default=Path("data/dataset"))
     p.add_argument("--n-maps", type=int, default=10000)
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--workers", type=int, default=16)
+    p.add_argument("--workers", type=int, default=12)
     p.add_argument("--n-stats-maps", type=int, default=10,
                    help="number of maps used to fit standardisation stats")
     p.add_argument("--bank", type=Path,

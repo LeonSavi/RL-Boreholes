@@ -90,6 +90,16 @@ class SimConfig:
     ore_radius_xy_range: tuple[float, float] = (3.0, 8.0)
     ore_radius_z_range: tuple[float, float] = (50.0, 200.0)
     ore_yield_peak_range: tuple[float, float] = (0.5, 5.0)
+    # max_ore_bodies caps the per-map body count drawn uniformly from
+    # [0, max_ore_bodies]. User constraint: 2.
+    max_ore_bodies: int = 2
+
+    # ----- gas-response petrophysics (Phase O) -----
+    # Path to the per-rock empirical shift table produced by
+    # scripts/diagnostics/fit_gas_shift_table.py. When non-None the
+    # map generator looks up shifts per rock_type and adds them to
+    # rhob / nphi / res_deep_log inside ore-body cells (yield > 0).
+    gas_shift_table_path: str | None = "data/clean/gas_shift_table.json"
 
     @property
     def dz(self) -> float:
@@ -133,49 +143,9 @@ def generate_map(
             rock_types[x, y, :] = r
             formations[x, y, :] = f
 
-    # --- 2. sample variable values per cell -------------------------------
-    variables_out = {
-        v: np.full((nx, ny, nz), np.nan, dtype=np.float32)
-        for v in config.variables
-    }
-
-    noise_fields = _make_noise_fields(
-        rng, nx, ny, nz, config.variables,
-        lateral_len_scale=config.lateral_correlation_cells,
-        vertical_len_scale=config.vertical_correlation_cells,
-        method=config.grf_method,
-        mode_no=config.grf_mode_no,
-    )
-
-    for z_idx, depth in enumerate(depth_axis):
-        for rock in bank.rock_types:
-            mask = (rock_types[:, :, z_idx] == rock)
-            n_cells = int(mask.sum())
-            if n_cells == 0:
-                continue
-            samples = bank.sample(rock, float(depth), n=n_cells, rng=rng)
-            xs, ys = np.where(mask)
-            for var in config.variables:
-                if var not in samples:
-                    continue
-                iid = samples[var]
-                if np.all(np.isnan(iid)):
-                    continue
-                cell = bank.cells.get((rock, _bin_for(bank, depth)))
-                if cell is None or var not in cell.kdes:
-                    variables_out[var][xs, ys, z_idx] = iid.astype(np.float32)
-                    continue
-                mu = cell.means.get(var, float(np.nanmean(iid)))
-                sigma = cell.stds.get(var, float(np.nanstd(iid)))
-                grf_values = noise_fields[var][xs, ys, z_idx]
-                smooth_baseline = mu + sigma * grf_values
-                alpha = config.spatial_correlation_strength
-                blended = alpha * smooth_baseline + (1 - alpha) * iid
-                lo, hi = bank.bounds_for(var)
-                blended = np.clip(blended, lo, hi)
-                variables_out[var][xs, ys, z_idx] = blended.astype(np.float32)
-
-    # --- 3. 3D ore yield field --------------------------------------------
+    # --- 2. ore yield field (moved BEFORE variables, Phase O) ------------
+    # Ore bodies are placed first so the variable-sampling loop knows
+    # which cells should receive the gas-response shift.
     yield_field, bodies = sample_orebodies(
         rng=rng,
         n_x=nx,
@@ -190,7 +160,82 @@ def generate_map(
         radius_xy_range=config.ore_radius_xy_range,
         radius_z_range=config.ore_radius_z_range,
         yield_peak_range=config.ore_yield_peak_range,
+        max_bodies=config.max_ore_bodies,
     )
+    in_orebody = yield_field > 0
+
+    # --- gas-response shift table (Phase O) ------------------------------
+    # {rock_type: {variable: shift}}; "default" is the cross-rock mean
+    # for rocks we have no entry for.
+    gas_shifts: dict = {}
+    if config.gas_shift_table_path:
+        try:
+            import json as _json
+            with open(config.gas_shift_table_path) as _fh:
+                gas_shifts = _json.load(_fh)
+        except (OSError, ValueError) as _exc:
+            print(f"[map_generator] could not load gas shift table "
+                  f"{config.gas_shift_table_path}: {_exc!r}; "
+                  "ore-body cells will NOT receive a gas shift.")
+
+    # --- 3. sample variable values per cell ------------------------------
+    variables_out = {
+        v: np.full((nx, ny, nz), np.nan, dtype=np.float32)
+        for v in config.variables
+    }
+
+    noise_fields = _make_noise_fields(
+        rng, nx, ny, nz, config.variables,
+        lateral_len_scale=config.lateral_correlation_cells,
+        vertical_len_scale=config.vertical_correlation_cells,
+        method=config.grf_method,
+        mode_no=config.grf_mode_no,
+    )
+
+    for z_idx, depth in enumerate(depth_axis):
+        # iterate over unique (rock, formation) pairs at this depth slice
+        rock_slice = rock_types[:, :, z_idx]
+        fm_slice   = formations[:, :, z_idx]
+        ore_slice  = in_orebody[:, :, z_idx]
+        pairs = set(zip(rock_slice.ravel().tolist(),
+                        fm_slice.ravel().tolist()))
+        for rock, formation in pairs:
+            if rock is None or formation is None:
+                continue
+            mask = (rock_slice == rock) & (fm_slice == formation)
+            n_cells = int(mask.sum())
+            if n_cells == 0:
+                continue
+            samples = bank.sample(
+                rock, float(depth), n=n_cells, rng=rng,
+                formation=formation,
+            )
+            xs, ys = np.where(mask)
+            cell_in_ore = ore_slice[xs, ys]
+            rock_shifts = gas_shifts.get(rock) or gas_shifts.get("default") or {}
+            for var in config.variables:
+                if var not in samples:
+                    continue
+                iid = samples[var]
+                if np.all(np.isnan(iid)):
+                    continue
+                cell = bank.cell_for(rock, float(depth), formation=formation)
+                if cell is None or var not in cell.kdes:
+                    blended = iid.astype(np.float32)
+                else:
+                    mu = cell.means.get(var, float(np.nanmean(iid)))
+                    sigma = cell.stds.get(var, float(np.nanstd(iid)))
+                    grf_values = noise_fields[var][xs, ys, z_idx]
+                    smooth_baseline = mu + sigma * grf_values
+                    alpha = config.spatial_correlation_strength
+                    blended = alpha * smooth_baseline + (1 - alpha) * iid
+                # gas-response shift in ore-body cells
+                shift = float(rock_shifts.get(var, 0.0))
+                if shift != 0.0 and cell_in_ore.any():
+                    blended = np.where(cell_in_ore, blended + shift, blended)
+                lo, hi = bank.bounds_for(var)
+                blended = np.clip(blended, lo, hi)
+                variables_out[var][xs, ys, z_idx] = blended.astype(np.float32)
 
     return {
         "rock_types": rock_types,
