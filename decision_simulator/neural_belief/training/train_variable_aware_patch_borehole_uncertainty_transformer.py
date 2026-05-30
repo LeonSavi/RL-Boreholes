@@ -287,13 +287,27 @@ def _save_uncertainty_val_plots(
 ) -> None:
     """Save 5-panel validation figures: observations / truth / prediction / error / uncertainty.
 
-    Panel layout
-    ------------
-    1. Observed boreholes (sparse ore values + drill location markers)
-    2. True ore map (ore-value space)
-    3. Predicted ore map (ore-value space)
-    4. Actual absolute error |pred - true| (ore-value space)
-    5. Predicted uncertainty (ore-value space, approx.) — shared colour scale with panel 4
+    Auto-detects sequential mode by checking for ``sequence_id`` in dataset samples,
+    mirroring the behaviour of ``_save_e2e_map_sequential_val_plots``.
+
+    Non-sequential mode
+    -------------------
+    Saves one 5-panel PNG per selected sample (evenly spaced across the dataset).
+
+    Sequential mode
+    ---------------
+    Groups samples by (map_idx, sequence_id).  For each selected sequence saves:
+    * per-step 5-panel PNGs: ``step_001.png``, ``step_003.png``, …
+    * a combined ``evolution.png`` grid (rows = steps, cols = 5) with a shared
+      colour scale across all steps.
+
+    Panel layout (both modes)
+    -------------------------
+    1. Observations  (sparse ore values + drill location markers)
+    2. True ore map  (ore-value space)
+    3. Predicted ore map  (ore-value space)
+    4. Actual absolute error |pred - true|  (ore-value space)
+    5. Predicted uncertainty  (ore-value space, approx.) — shared colour scale with panel 4
 
     The uncertainty head is trained in normalised space, but the normalisation
     (log1p) is nonlinear, so uncertainty cannot simply be inverse-transformed
@@ -305,31 +319,28 @@ def _save_uncertainty_val_plots(
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
+    is_sequential = bool(val_ds.samples and "sequence_id" in val_ds.samples[0])
+
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     out_dir = Path(plot_dir) / timestamp
     out_dir.mkdir(parents=True, exist_ok=True)
 
     model.eval()
-    indices = np.linspace(0, len(val_ds) - 1, n_plots, dtype=int)
 
-    for plot_k, idx in enumerate(indices):
-        sample = val_ds.samples[int(idx)]
-
+    def _run_sample(sample):
+        """Run one sample; return (sparse_ore, obs_mask, true_ore, pred_ore, abs_err, pred_unc_raw)."""
         bh = torch.from_numpy(sample["boreholes"]).unsqueeze(0).to(device)
         ov = torch.from_numpy(sample["ore_vals"]).unsqueeze(0).to(device)
         pos = torch.from_numpy(sample["positions"]).unsqueeze(0).to(device)
-
         with torch.no_grad():
             pred_ore_norm, pred_unc_norm = model(bh, ov, pos)
-
         pred_ore = normalizer.inverse(pred_ore_norm.squeeze().cpu().numpy())
         # Approximate ore-value-space uncertainty: delta under the nonlinear
         # (log1p) normalisation by comparing inverse(pred + unc) vs inverse(pred).
-        pred_ore_plus_unc = normalizer.inverse(
-            (pred_ore_norm + pred_unc_norm).squeeze().cpu().numpy()
+        pred_unc_raw = np.abs(
+            normalizer.inverse((pred_ore_norm + pred_unc_norm).squeeze().cpu().numpy())
+            - pred_ore
         )
-        pred_unc_raw = np.abs(pred_ore_plus_unc - pred_ore)
-
         n_x, n_y = sample["target_map"].shape
         sparse_ore = np.zeros((n_x, n_y), dtype=np.float32)
         obs_mask = np.zeros((n_x, n_y), dtype=np.float32)
@@ -338,54 +349,197 @@ def _save_uncertainty_val_plots(
             j = int(round(float(py) * (n_y - 1)))
             sparse_ore[i, j] = float(ov_val)
             obs_mask[i, j] = 1.0
-
         true_ore = normalizer.inverse(sample["target_map"])
         abs_err = np.abs(pred_ore - true_ore)
+        return sparse_ore, obs_mask, true_ore, pred_ore, abs_err, pred_unc_raw
 
-        vmax_ore = float(max(true_ore.max(), pred_ore.max(), 1e-3))
-        vmax_err = float(max(abs_err.max(), pred_unc_raw.max(), 1e-3))
+    # -------------------------------------------------------------------------
+    # Non-sequential: one 5-panel figure per selected sample
+    # -------------------------------------------------------------------------
+    if not is_sequential:
+        indices = np.linspace(0, len(val_ds) - 1, n_plots, dtype=int)
+        for plot_k, idx in enumerate(indices):
+            sample = val_ds.samples[int(idx)]
+            sparse_ore, obs_mask, true_ore, pred_ore, abs_err, pred_unc_raw = _run_sample(sample)
 
-        drill_rows, drill_cols = np.where(obs_mask > 0)
-        kw = dict(origin="lower", cmap="viridis")
+            vmax_ore = float(max(true_ore.max(), pred_ore.max(), 1e-3))
+            vmax_err = float(max(abs_err.max(), pred_unc_raw.max(), 1e-3))
+            drill_rows, drill_cols = np.where(obs_mask > 0)
+            kw = dict(origin="lower", cmap="viridis")
 
-        fig, axes = plt.subplots(1, 5, figsize=(22, 4))
-        fig.suptitle(
-            f"Val sample {plot_k}  ({sample['drill_count']} drills)",
-            fontsize=11,
-        )
+            fig, axes = plt.subplots(1, 5, figsize=(22, 4))
+            fig.suptitle(f"Val sample {plot_k}  ({sample['drill_count']} drills)", fontsize=11)
 
-        ax = axes[0]
-        ax.set_title(f"Observations ({int(obs_mask.sum())} drills)")
-        im = ax.imshow(sparse_ore.T, vmin=0, vmax=vmax_ore, **kw)
-        ax.scatter(drill_rows, drill_cols, c="red", s=10, marker="x", linewidths=0.8)
-        fig.colorbar(im, ax=ax, fraction=0.046)
+            ax = axes[0]
+            ax.set_title(f"Observations ({int(obs_mask.sum())} drills)")
+            im = ax.imshow(sparse_ore.T, vmin=0, vmax=vmax_ore, **kw)
+            ax.scatter(drill_rows, drill_cols, c="red", s=10, marker="x", linewidths=0.8)
+            fig.colorbar(im, ax=ax, fraction=0.046)
 
-        ax = axes[1]
-        ax.set_title("True ore map")
-        im = ax.imshow(true_ore.T, vmin=0, vmax=vmax_ore, **kw)
-        fig.colorbar(im, ax=ax, fraction=0.046)
+            ax = axes[1]
+            ax.set_title("True ore map")
+            im = ax.imshow(true_ore.T, vmin=0, vmax=vmax_ore, **kw)
+            fig.colorbar(im, ax=ax, fraction=0.046)
 
-        ax = axes[2]
-        ax.set_title("Predicted ore map")
-        im = ax.imshow(pred_ore.T, vmin=0, vmax=vmax_ore, **kw)
-        fig.colorbar(im, ax=ax, fraction=0.046)
+            ax = axes[2]
+            ax.set_title("Predicted ore map")
+            im = ax.imshow(pred_ore.T, vmin=0, vmax=vmax_ore, **kw)
+            fig.colorbar(im, ax=ax, fraction=0.046)
 
-        ax = axes[3]
-        ax.set_title("Absolute error")
-        im = ax.imshow(abs_err.T, origin="lower", vmin=0, vmax=vmax_err, cmap="Reds")
-        fig.colorbar(im, ax=ax, fraction=0.046)
+            ax = axes[3]
+            ax.set_title("Absolute error")
+            im = ax.imshow(abs_err.T, origin="lower", vmin=0, vmax=vmax_err, cmap="Reds")
+            fig.colorbar(im, ax=ax, fraction=0.046)
 
-        ax = axes[4]
-        ax.set_title("Predicted uncertainty (ore-value space, approx.)")
-        im = ax.imshow(pred_unc_raw.T, origin="lower", vmin=0, vmax=vmax_err, cmap="Oranges")
-        fig.colorbar(im, ax=ax, fraction=0.046)
+            ax = axes[4]
+            ax.set_title("Predicted uncertainty\n(ore-value space, approx.)")
+            im = ax.imshow(pred_unc_raw.T, origin="lower", vmin=0, vmax=vmax_err, cmap="Oranges")
+            fig.colorbar(im, ax=ax, fraction=0.046)
 
-        fig.tight_layout()
-        if timestamp:
-            fig.text(0.5, 0.01, timestamp, ha="center", va="bottom",
-                     fontsize=8, color="gray")
-        fig.savefig(out_dir / f"val_sample_{plot_k:02d}.png", dpi=100, bbox_inches="tight")
-        plt.close(fig)
+            fig.tight_layout()
+            fig.text(0.5, 0.01, timestamp, ha="center", va="bottom", fontsize=8, color="gray")
+            fig.savefig(out_dir / f"val_sample_{plot_k:02d}.png", dpi=100, bbox_inches="tight")
+            plt.close(fig)
+
+    # -------------------------------------------------------------------------
+    # Sequential: per-step PNGs + evolution.png grid (rows=steps, cols=5)
+    # -------------------------------------------------------------------------
+    else:
+        groups: dict[tuple[int, int], list[tuple[int, int]]] = defaultdict(list)
+        for idx, s in enumerate(val_ds.samples):
+            key = (int(s["map_idx"]), int(s["sequence_id"]))
+            groups[key].append((int(s["drill_count"]), idx))
+        for key in groups:
+            groups[key].sort(key=lambda x: x[0])
+
+        all_keys = list(groups.keys())
+        n_select = min(n_plots, len(all_keys))
+        sel_indices = np.linspace(0, len(all_keys) - 1, n_select, dtype=int)
+        selected_keys = [all_keys[i] for i in sel_indices]
+
+        for map_idx, seq_id in selected_keys:
+            seq_dir = out_dir / f"seq_{map_idx:04d}_{seq_id:02d}"
+            seq_dir.mkdir(parents=True, exist_ok=True)
+
+            step_pairs = groups[(map_idx, seq_id)]
+            n_steps = len(step_pairs)
+
+            # Run all steps first so global colour scales are available
+            panel_data = []  # (step, sparse_ore, obs_mask, true_ore, pred_ore, abs_err, pred_unc_raw)
+            for step, sample_idx in step_pairs:
+                arrays = _run_sample(val_ds.samples[sample_idx])
+                panel_data.append((step, *arrays))
+
+            global_vmax_ore = max(
+                max(float(t.max()), float(p.max()))
+                for _, _, _, t, p, _, _ in panel_data
+            )
+            global_vmax_ore = max(global_vmax_ore, 1e-3)
+            global_vmax_err = max(
+                max(float(e.max()), float(u.max()))
+                for _, _, _, _, _, e, u in panel_data
+            )
+            global_vmax_err = max(global_vmax_err, 1e-3)
+
+            # Per-step individual 5-panel PNGs
+            for step, sparse_ore, obs_mask, true_ore, pred_ore, abs_err, pred_unc_raw in panel_data:
+                drill_rows, drill_cols = np.where(obs_mask > 0)
+                kw_ore = dict(origin="lower", cmap="viridis", vmin=0, vmax=global_vmax_ore)
+
+                fig, axes = plt.subplots(1, 5, figsize=(22, 4))
+                fig.suptitle(
+                    f"Map {map_idx} / Seq {seq_id} / Step {step} ({step} drills)",
+                    fontsize=11,
+                )
+
+                ax = axes[0]
+                ax.set_title(f"Observations ({int(obs_mask.sum())} drills)")
+                im = ax.imshow(sparse_ore.T, **kw_ore)
+                ax.scatter(drill_rows, drill_cols, c="red", s=10, marker="x", linewidths=0.8)
+                fig.colorbar(im, ax=ax, fraction=0.046)
+
+                ax = axes[1]
+                ax.set_title("True ore map")
+                im = ax.imshow(true_ore.T, **kw_ore)
+                fig.colorbar(im, ax=ax, fraction=0.046)
+
+                ax = axes[2]
+                ax.set_title("Predicted ore map")
+                im_pred = ax.imshow(pred_ore.T, **kw_ore)
+                fig.colorbar(im_pred, ax=ax, fraction=0.046)
+
+                ax = axes[3]
+                ax.set_title("Absolute error")
+                im_err = ax.imshow(abs_err.T, origin="lower", vmin=0, vmax=global_vmax_err, cmap="Reds")
+                fig.colorbar(im_err, ax=ax, fraction=0.046)
+
+                ax = axes[4]
+                ax.set_title("Predicted uncertainty\n(ore-value space, approx.)")
+                im_unc = ax.imshow(pred_unc_raw.T, origin="lower", vmin=0, vmax=global_vmax_err, cmap="Oranges")
+                fig.colorbar(im_unc, ax=ax, fraction=0.046)
+
+                fig.tight_layout()
+                fig.text(0.5, 0.01, timestamp, ha="center", va="bottom", fontsize=8, color="gray")
+                fig.savefig(seq_dir / f"step_{step:03d}.png", dpi=100, bbox_inches="tight")
+                plt.close(fig)
+
+            # Combined evolution.png grid
+            fig, axes = plt.subplots(n_steps, 5, figsize=(26, 4 * n_steps))
+            if n_steps == 1:
+                axes = axes[np.newaxis, :]
+
+            fig.suptitle(
+                f"Belief evolution — Map {map_idx} / Seq {seq_id}"
+                f"  (ore max={global_vmax_ore:.3f}  err max={global_vmax_err:.3f})",
+                fontsize=12,
+            )
+
+            col_titles = [
+                "Observations", "True ore map", "Predicted ore map",
+                "Abs error", "Predicted uncertainty\n(ore-value space, approx.)",
+            ]
+            for col, title in enumerate(col_titles):
+                axes[0, col].set_title(title, fontsize=10)
+
+            im_pred_last = im_err_last = im_unc_last = None
+            for row_idx, (step, sparse_ore, obs_mask, true_ore, pred_ore, abs_err, pred_unc_raw) in enumerate(panel_data):
+                drill_rows, drill_cols = np.where(obs_mask > 0)
+                kw_ore = dict(origin="lower", cmap="viridis", vmin=0, vmax=global_vmax_ore)
+
+                ax = axes[row_idx, 0]
+                ax.imshow(sparse_ore.T, **kw_ore)
+                ax.scatter(drill_rows, drill_cols, c="red", s=8, marker="x", linewidths=0.6)
+                ax.set_ylabel(f"step {step}", fontsize=9)
+                ax.set_xticks([])
+                ax.set_yticks([])
+
+                ax = axes[row_idx, 1]
+                ax.imshow(true_ore.T, **kw_ore)
+                ax.set_xticks([])
+                ax.set_yticks([])
+
+                ax = axes[row_idx, 2]
+                im_pred_last = ax.imshow(pred_ore.T, **kw_ore)
+                ax.set_xticks([])
+                ax.set_yticks([])
+
+                ax = axes[row_idx, 3]
+                im_err_last = ax.imshow(abs_err.T, origin="lower", vmin=0, vmax=global_vmax_err, cmap="Reds")
+                ax.set_xlabel(f"max err = {abs_err.max():.3f}", fontsize=7)
+                ax.set_xticks([])
+                ax.set_yticks([])
+
+                ax = axes[row_idx, 4]
+                im_unc_last = ax.imshow(pred_unc_raw.T, origin="lower", vmin=0, vmax=global_vmax_err, cmap="Oranges")
+                ax.set_xticks([])
+                ax.set_yticks([])
+
+            fig.colorbar(im_pred_last, ax=axes[:, 2], shrink=0.6, label="ore value")
+            fig.colorbar(im_err_last, ax=axes[:, 3], shrink=0.6, label="abs error")
+            fig.colorbar(im_unc_last, ax=axes[:, 4], shrink=0.6, label="uncertainty")
+            fig.tight_layout()
+            fig.savefig(seq_dir / "evolution.png", dpi=100, bbox_inches="tight")
+            plt.close(fig)
 
     print(f"  uncertainty plots saved -> {out_dir}")
 
