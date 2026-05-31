@@ -65,6 +65,17 @@ from .end_to_end_helpers import (
 
 
 # ---------------------------------------------------------------------------
+# Gradient helper
+# ---------------------------------------------------------------------------
+
+
+def _ore_gradient_magnitude_np(ore_map: np.ndarray) -> np.ndarray:
+    """Gradient magnitude of a 2-D ore map via numpy finite differences."""
+    dy, dx = np.gradient(ore_map)
+    return np.sqrt(dy ** 2 + dx ** 2)
+
+
+# ---------------------------------------------------------------------------
 # Adapter: expose ore-only forward() for reusing existing validation helpers
 # ---------------------------------------------------------------------------
 
@@ -273,6 +284,222 @@ def _validate_uncertainty_e2e_map(
 
 
 # ---------------------------------------------------------------------------
+# Correlation diagnostics
+# ---------------------------------------------------------------------------
+
+
+def _compute_uncertainty_correlation_diagnostics(
+    model: VariableAwarePatchBoreholeUncertaintyEndToEndMapBeliefTransformer,
+    val_loader: DataLoader,
+    normalizer: TargetNormalizer,
+    device: str,
+) -> dict[str, float]:
+    """Pixel-level Pearson correlations between predicted uncertainty and related signals.
+
+    All quantities are in normalised space (matching the training objective):
+      - absolute error  : |pred_norm - target_norm|
+      - scaled error    : above / (|pred_norm| + |target_norm| + 1e-8)
+      - predicted ore   : pred_norm
+      - ore gradient    : ||grad(pred_norm)||
+
+    Returns
+    -------
+    {corr_unc_abs_err, corr_unc_scaled_err, corr_unc_pred_ore, corr_unc_ore_grad}
+    """
+    model.eval()
+
+    unc_buf: list[np.ndarray] = []
+    ae_buf:  list[np.ndarray] = []
+    se_buf:  list[np.ndarray] = []
+    po_buf:  list[np.ndarray] = []
+    og_buf:  list[np.ndarray] = []
+
+    with torch.no_grad():
+        for batch in val_loader:
+            bh  = batch["boreholes"].to(device)
+            ov  = batch["ore_vals"].to(device)
+            pos = batch["positions"].to(device)
+            pm  = batch["padding_mask"].to(device)
+            tgt = batch["target_map"].to(device)
+
+            pred_ore_norm, pred_unc_norm = model(bh, ov, pos, pm)
+
+            ae_norm = (pred_ore_norm - tgt).abs()
+            se_norm = ae_norm / (pred_ore_norm.abs() + tgt.abs() + 1e-8)
+
+            B = pred_ore_norm.shape[0]
+            for b in range(B):
+                p  = pred_ore_norm[b, 0].cpu().numpy()
+                u  = pred_unc_norm[b, 0].cpu().numpy()
+                ae = ae_norm[b, 0].cpu().numpy()
+                se = se_norm[b, 0].cpu().numpy()
+                og = _ore_gradient_magnitude_np(p)
+
+                unc_buf.append(u.ravel())
+                ae_buf.append(ae.ravel())
+                se_buf.append(se.ravel())
+                po_buf.append(p.ravel())
+                og_buf.append(og.ravel())
+
+    def _pearson(a: np.ndarray, b: np.ndarray) -> float:
+        if a.std() < 1e-12 or b.std() < 1e-12:
+            return float("nan")
+        return float(np.corrcoef(a, b)[0, 1])
+
+    unc = np.concatenate(unc_buf)
+    return {
+        "corr_unc_abs_err":    _pearson(unc, np.concatenate(ae_buf)),
+        "corr_unc_scaled_err": _pearson(unc, np.concatenate(se_buf)),
+        "corr_unc_pred_ore":   _pearson(unc, np.concatenate(po_buf)),
+        "corr_unc_ore_grad":   _pearson(unc, np.concatenate(og_buf)),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Drill-count uncertainty analysis
+# ---------------------------------------------------------------------------
+
+
+def _analyze_uncertainty_by_drill_count(
+    model: VariableAwarePatchBoreholeUncertaintyEndToEndMapBeliefTransformer,
+    val_ds: E2EMapDataset,
+    normalizer: TargetNormalizer,
+    device: str,
+) -> dict:
+    """Per-drill-count uncertainty statistics, split by ore / no-ore maps.
+
+    Iterates each validation sample individually, converts predicted uncertainty
+    to approximate ore-value space, and groups by drill count.
+
+    Returns
+    -------
+    {
+      "by_drill_count":        {drill_count: {n, unc_sum_mean, unc_mean_mean, unc_max_mean}},
+      "ore_by_drill_count":    same, ore-body maps only,
+      "no_ore_by_drill_count": same, no-ore maps only,
+    }
+    """
+    model.eval()
+    rows: list[dict] = []
+
+    for sample in val_ds.samples:
+        bh  = torch.from_numpy(sample["boreholes"]).unsqueeze(0).to(device)
+        ov  = torch.from_numpy(sample["ore_vals"]).unsqueeze(0).to(device)
+        pos = torch.from_numpy(sample["positions"]).unsqueeze(0).to(device)
+        with torch.no_grad():
+            pred_ore_norm, pred_unc_norm = model(bh, ov, pos)
+
+        pred_ore_np = pred_ore_norm.squeeze().cpu().numpy()
+        unc_raw = np.abs(
+            normalizer.inverse(
+                (pred_ore_norm + pred_unc_norm).squeeze().cpu().numpy()
+            )
+            - normalizer.inverse(pred_ore_np)
+        )
+
+        target_raw = normalizer.inverse(sample["target_map"])
+        is_no_ore  = float(target_raw.max()) < 1e-6
+
+        rows.append({
+            "drill_count": int(sample["drill_count"]),
+            "is_no_ore":   is_no_ore,
+            "unc_sum":     float(unc_raw.sum()),
+            "unc_mean":    float(unc_raw.mean()),
+            "unc_max":     float(unc_raw.max()),
+        })
+
+    def _aggregate(group_rows: list[dict]) -> dict:
+        if not group_rows:
+            return {}
+        by_dc: dict[int, list[dict]] = defaultdict(list)
+        for r in group_rows:
+            by_dc[r["drill_count"]].append(r)
+        return {
+            str(dc): {
+                "n":             len(dc_rows),
+                "unc_sum_mean":  float(np.mean([r["unc_sum"]  for r in dc_rows])),
+                "unc_mean_mean": float(np.mean([r["unc_mean"] for r in dc_rows])),
+                "unc_max_mean":  float(np.mean([r["unc_max"]  for r in dc_rows])),
+            }
+            for dc, dc_rows in sorted(by_dc.items())
+        }
+
+    return {
+        "by_drill_count":        _aggregate(rows),
+        "ore_by_drill_count":    _aggregate([r for r in rows if not r["is_no_ore"]]),
+        "no_ore_by_drill_count": _aggregate([r for r in rows if     r["is_no_ore"]]),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Training sample inspection
+# ---------------------------------------------------------------------------
+
+
+def _save_training_samples(
+    train_ds: E2EMapDataset,
+    normalizer: TargetNormalizer,
+    run_dir: Path,
+    n_samples: int = 5,
+) -> None:
+    """Save a handful of training samples for input inspection.
+
+    Each 3-panel figure shows: observed ore values, target ore map
+    (ore-value space), and normalised target (what the model sees).
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    out_dir = Path(run_dir) / "train_samples"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    indices = np.linspace(0, len(train_ds) - 1, n_samples, dtype=int)
+    for k, idx in enumerate(indices):
+        sample = train_ds.samples[int(idx)]
+
+        n_x, n_y = sample["target_map"].shape
+        sparse_ore = np.zeros((n_x, n_y), dtype=np.float32)
+        obs_mask   = np.zeros((n_x, n_y), dtype=np.float32)
+        for (px, py), ov_val in zip(sample["positions"], sample["ore_vals"]):
+            i = int(round(float(px) * (n_x - 1)))
+            j = int(round(float(py) * (n_y - 1)))
+            sparse_ore[i, j] = float(ov_val)
+            obs_mask[i, j]   = 1.0
+
+        target_norm = sample["target_map"]
+        target_raw  = normalizer.inverse(target_norm)
+        drill_rows, drill_cols = np.where(obs_mask > 0)
+        vmax_ore = float(max(float(target_raw.max()), 1e-3))
+
+        fig, axes = plt.subplots(1, 3, figsize=(14, 4))
+        fig.suptitle(f"Train sample {k}  ({int(obs_mask.sum())} drills)", fontsize=11)
+        kw = dict(origin="lower", cmap="viridis")
+
+        ax = axes[0]
+        ax.set_title(f"Observations ({int(obs_mask.sum())} drills)")
+        im = ax.imshow(sparse_ore.T, vmin=0, vmax=vmax_ore, **kw)
+        ax.scatter(drill_rows, drill_cols, c="red", s=10, marker="x", linewidths=0.8)
+        fig.colorbar(im, ax=ax, fraction=0.046)
+
+        ax = axes[1]
+        ax.set_title("Target ore map (ore-value space)")
+        im = ax.imshow(target_raw.T, vmin=0, vmax=vmax_ore, **kw)
+        fig.colorbar(im, ax=ax, fraction=0.046)
+
+        ax = axes[2]
+        ax.set_title("Normalised target (model input)")
+        im = ax.imshow(target_norm.T, origin="lower", cmap="plasma")
+        fig.colorbar(im, ax=ax, fraction=0.046)
+
+        fig.tight_layout()
+        fig.savefig(out_dir / f"train_sample_{k:02d}.png", dpi=100, bbox_inches="tight")
+        plt.close(fig)
+
+    print(f"  training samples -> {out_dir}")
+
+
+# ---------------------------------------------------------------------------
 # Validation plots
 # ---------------------------------------------------------------------------
 
@@ -285,35 +512,21 @@ def _save_uncertainty_val_plots(
     device: str,
     n_plots: int = 20,
 ) -> None:
-    """Save 5-panel validation figures: observations / truth / prediction / error / uncertainty.
+    """Save 7-panel validation figures.
 
-    Auto-detects sequential mode by checking for ``sequence_id`` in dataset samples,
-    mirroring the behaviour of ``_save_e2e_map_sequential_val_plots``.
+    Panels: observations / true ore / predicted ore / absolute error /
+            scaled error / predicted uncertainty / ore gradient magnitude.
 
-    Non-sequential mode
-    -------------------
-    Saves one 5-panel PNG per selected sample (evenly spaced across the dataset).
+    Auto-detects sequential mode by checking for ``sequence_id`` in dataset samples.
 
-    Sequential mode
-    ---------------
-    Groups samples by (map_idx, sequence_id).  For each selected sequence saves:
-    * per-step 5-panel PNGs: ``step_001.png``, ``step_003.png``, …
-    * a combined ``evolution.png`` grid (rows = steps, cols = 5) with a shared
-      colour scale across all steps.
+    Non-sequential: one 7-panel PNG per selected sample.
+    Sequential: per-step 7-panel PNGs + ``evolution.png`` grid (rows=steps, cols=7)
+    with global colour scales shared across all steps.
 
-    Panel layout (both modes)
-    -------------------------
-    1. Observations  (sparse ore values + drill location markers)
-    2. True ore map  (ore-value space)
-    3. Predicted ore map  (ore-value space)
-    4. Actual absolute error |pred - true|  (ore-value space)
-    5. Predicted uncertainty  (ore-value space, approx.) — shared colour scale with panel 4
-
-    The uncertainty head is trained in normalised space, but the normalisation
-    (log1p) is nonlinear, so uncertainty cannot simply be inverse-transformed
-    directly.  Instead it is converted by comparing inverse(pred_norm + unc_norm)
-    against inverse(pred_norm), which gives an approximate ore-value-scale
-    uncertainty that is directly comparable to the absolute error panel.
+    Absolute error and predicted uncertainty share the same colour scale so they
+    are directly visually comparable.  Uncertainty is converted from normalised
+    space to approximate ore-value space via
+    ``abs(inverse(pred_norm + unc_norm) - inverse(pred_norm))``.
     """
     import matplotlib
     matplotlib.use("Agg")
@@ -328,81 +541,107 @@ def _save_uncertainty_val_plots(
     model.eval()
 
     def _run_sample(sample):
-        """Run one sample; return (sparse_ore, obs_mask, true_ore, pred_ore, abs_err, pred_unc_raw)."""
-        bh = torch.from_numpy(sample["boreholes"]).unsqueeze(0).to(device)
-        ov = torch.from_numpy(sample["ore_vals"]).unsqueeze(0).to(device)
+        """Return (sparse_ore, obs_mask, true_ore, pred_ore,
+                   abs_err, scaled_err, ore_grad, pred_unc_raw)."""
+        bh  = torch.from_numpy(sample["boreholes"]).unsqueeze(0).to(device)
+        ov  = torch.from_numpy(sample["ore_vals"]).unsqueeze(0).to(device)
         pos = torch.from_numpy(sample["positions"]).unsqueeze(0).to(device)
         with torch.no_grad():
             pred_ore_norm, pred_unc_norm = model(bh, ov, pos)
         pred_ore = normalizer.inverse(pred_ore_norm.squeeze().cpu().numpy())
-        # Approximate ore-value-space uncertainty: delta under the nonlinear
-        # (log1p) normalisation by comparing inverse(pred + unc) vs inverse(pred).
+        # Approximate ore-value-space uncertainty via the nonlinear (log1p)
+        # inverse: abs(inverse(pred + unc) - inverse(pred)).
         pred_unc_raw = np.abs(
             normalizer.inverse((pred_ore_norm + pred_unc_norm).squeeze().cpu().numpy())
             - pred_ore
         )
         n_x, n_y = sample["target_map"].shape
         sparse_ore = np.zeros((n_x, n_y), dtype=np.float32)
-        obs_mask = np.zeros((n_x, n_y), dtype=np.float32)
+        obs_mask   = np.zeros((n_x, n_y), dtype=np.float32)
         for (px, py), ov_val in zip(sample["positions"], sample["ore_vals"]):
             i = int(round(float(px) * (n_x - 1)))
             j = int(round(float(py) * (n_y - 1)))
             sparse_ore[i, j] = float(ov_val)
-            obs_mask[i, j] = 1.0
-        true_ore = normalizer.inverse(sample["target_map"])
-        abs_err = np.abs(pred_ore - true_ore)
-        return sparse_ore, obs_mask, true_ore, pred_ore, abs_err, pred_unc_raw
+            obs_mask[i, j]   = 1.0
+        true_ore   = normalizer.inverse(sample["target_map"])
+        abs_err    = np.abs(pred_ore - true_ore)
+        scaled_err = abs_err / (np.abs(pred_ore) + np.abs(true_ore) + 1e-8)
+        ore_grad   = _ore_gradient_magnitude_np(pred_ore)
+        return sparse_ore, obs_mask, true_ore, pred_ore, abs_err, scaled_err, ore_grad, pred_unc_raw
+
+    def _draw_7panel(fig, axes, sparse_ore, obs_mask, true_ore, pred_ore,
+                     abs_err, scaled_err, ore_grad, pred_unc_raw,
+                     vmax_ore, vmax_err, vmax_scaled, vmax_grad,
+                     title: str = "") -> None:
+        if title:
+            fig.suptitle(title, fontsize=11)
+        drill_rows, drill_cols = np.where(obs_mask > 0)
+        kw_ore = dict(origin="lower", cmap="viridis", vmin=0, vmax=vmax_ore)
+
+        ax = axes[0]
+        ax.set_title(f"Observations ({int(obs_mask.sum())} drills)")
+        im = ax.imshow(sparse_ore.T, **kw_ore)
+        ax.scatter(drill_rows, drill_cols, c="red", s=10, marker="x", linewidths=0.8)
+        fig.colorbar(im, ax=ax, fraction=0.046)
+
+        ax = axes[1]
+        ax.set_title("True ore map")
+        im = ax.imshow(true_ore.T, **kw_ore)
+        fig.colorbar(im, ax=ax, fraction=0.046)
+
+        ax = axes[2]
+        ax.set_title("Predicted ore map")
+        im = ax.imshow(pred_ore.T, **kw_ore)
+        fig.colorbar(im, ax=ax, fraction=0.046)
+
+        ax = axes[3]
+        ax.set_title("Absolute error")
+        im = ax.imshow(abs_err.T, origin="lower", vmin=0, vmax=vmax_err, cmap="Reds")
+        fig.colorbar(im, ax=ax, fraction=0.046)
+
+        ax = axes[4]
+        ax.set_title("Scaled error\n|err|/(|pred|+|true|+ε)")
+        im = ax.imshow(scaled_err.T, origin="lower", vmin=0, vmax=vmax_scaled, cmap="YlOrRd")
+        fig.colorbar(im, ax=ax, fraction=0.046)
+
+        ax = axes[5]
+        ax.set_title("Predicted uncertainty\n(ore-value space, approx.)")
+        im = ax.imshow(pred_unc_raw.T, origin="lower", vmin=0, vmax=vmax_err, cmap="Oranges")
+        fig.colorbar(im, ax=ax, fraction=0.046)
+
+        ax = axes[6]
+        ax.set_title("Ore gradient magnitude")
+        im = ax.imshow(ore_grad.T, origin="lower", vmin=0, vmax=vmax_grad, cmap="Blues")
+        fig.colorbar(im, ax=ax, fraction=0.046)
 
     # -------------------------------------------------------------------------
-    # Non-sequential: one 5-panel figure per selected sample
+    # Non-sequential: one 7-panel figure per selected sample
     # -------------------------------------------------------------------------
     if not is_sequential:
         indices = np.linspace(0, len(val_ds) - 1, n_plots, dtype=int)
         for plot_k, idx in enumerate(indices):
             sample = val_ds.samples[int(idx)]
-            sparse_ore, obs_mask, true_ore, pred_ore, abs_err, pred_unc_raw = _run_sample(sample)
+            sparse_ore, obs_mask, true_ore, pred_ore, abs_err, scaled_err, ore_grad, pred_unc_raw = _run_sample(sample)
 
-            vmax_ore = float(max(true_ore.max(), pred_ore.max(), 1e-3))
-            vmax_err = float(max(abs_err.max(), pred_unc_raw.max(), 1e-3))
-            drill_rows, drill_cols = np.where(obs_mask > 0)
-            kw = dict(origin="lower", cmap="viridis")
+            vmax_ore    = float(max(true_ore.max(), pred_ore.max(), 1e-3))
+            vmax_err    = float(max(abs_err.max(), pred_unc_raw.max(), 1e-3))
+            vmax_scaled = float(max(scaled_err.max(), 1e-3))
+            vmax_grad   = float(max(ore_grad.max(), 1e-3))
 
-            fig, axes = plt.subplots(1, 5, figsize=(22, 4))
-            fig.suptitle(f"Val sample {plot_k}  ({sample['drill_count']} drills)", fontsize=11)
-
-            ax = axes[0]
-            ax.set_title(f"Observations ({int(obs_mask.sum())} drills)")
-            im = ax.imshow(sparse_ore.T, vmin=0, vmax=vmax_ore, **kw)
-            ax.scatter(drill_rows, drill_cols, c="red", s=10, marker="x", linewidths=0.8)
-            fig.colorbar(im, ax=ax, fraction=0.046)
-
-            ax = axes[1]
-            ax.set_title("True ore map")
-            im = ax.imshow(true_ore.T, vmin=0, vmax=vmax_ore, **kw)
-            fig.colorbar(im, ax=ax, fraction=0.046)
-
-            ax = axes[2]
-            ax.set_title("Predicted ore map")
-            im = ax.imshow(pred_ore.T, vmin=0, vmax=vmax_ore, **kw)
-            fig.colorbar(im, ax=ax, fraction=0.046)
-
-            ax = axes[3]
-            ax.set_title("Absolute error")
-            im = ax.imshow(abs_err.T, origin="lower", vmin=0, vmax=vmax_err, cmap="Reds")
-            fig.colorbar(im, ax=ax, fraction=0.046)
-
-            ax = axes[4]
-            ax.set_title("Predicted uncertainty\n(ore-value space, approx.)")
-            im = ax.imshow(pred_unc_raw.T, origin="lower", vmin=0, vmax=vmax_err, cmap="Oranges")
-            fig.colorbar(im, ax=ax, fraction=0.046)
-
+            fig, axes = plt.subplots(1, 7, figsize=(30, 4))
+            _draw_7panel(
+                fig, axes, sparse_ore, obs_mask, true_ore, pred_ore,
+                abs_err, scaled_err, ore_grad, pred_unc_raw,
+                vmax_ore, vmax_err, vmax_scaled, vmax_grad,
+                title=f"Val sample {plot_k}  ({sample['drill_count']} drills)",
+            )
             fig.tight_layout()
             fig.text(0.5, 0.01, fig_ts, ha="center", va="bottom", fontsize=8, color="gray")
             fig.savefig(out_dir / f"val_sample_{plot_k:02d}.png", dpi=100, bbox_inches="tight")
             plt.close(fig)
 
     # -------------------------------------------------------------------------
-    # Sequential: per-step PNGs + evolution.png grid (rows=steps, cols=5)
+    # Sequential: per-step PNGs + evolution.png grid (rows=steps, cols=7)
     # -------------------------------------------------------------------------
     else:
         groups: dict[tuple[int, int], list[tuple[int, int]]] = defaultdict(list)
@@ -424,67 +663,52 @@ def _save_uncertainty_val_plots(
             step_pairs = groups[(map_idx, seq_id)]
             n_steps = len(step_pairs)
 
-            # Run all steps first so global colour scales are available
-            panel_data = []  # (step, sparse_ore, obs_mask, true_ore, pred_ore, abs_err, pred_unc_raw)
+            # Run all steps first so global colour scales are available.
+            # Tuple order: (step, sparse_ore, obs_mask, true_ore, pred_ore,
+            #               abs_err, scaled_err, ore_grad, pred_unc_raw)
+            panel_data = []
             for step, sample_idx in step_pairs:
                 arrays = _run_sample(val_ds.samples[sample_idx])
                 panel_data.append((step, *arrays))
 
             global_vmax_ore = max(
                 max(float(t.max()), float(p.max()))
-                for _, _, _, t, p, _, _ in panel_data
+                for _, _, _, t, p, _, _, _, _ in panel_data
             )
             global_vmax_ore = max(global_vmax_ore, 1e-3)
+
             global_vmax_err = max(
                 max(float(e.max()), float(u.max()))
-                for _, _, _, _, _, e, u in panel_data
+                for _, _, _, _, _, e, _, _, u in panel_data
             )
             global_vmax_err = max(global_vmax_err, 1e-3)
 
-            # Per-step individual 5-panel PNGs
-            for step, sparse_ore, obs_mask, true_ore, pred_ore, abs_err, pred_unc_raw in panel_data:
-                drill_rows, drill_cols = np.where(obs_mask > 0)
-                kw_ore = dict(origin="lower", cmap="viridis", vmin=0, vmax=global_vmax_ore)
+            global_vmax_scaled = max(
+                float(se.max()) for _, _, _, _, _, _, se, _, _ in panel_data
+            )
+            global_vmax_scaled = max(global_vmax_scaled, 1e-3)
 
-                fig, axes = plt.subplots(1, 5, figsize=(22, 4))
-                fig.suptitle(
-                    f"Map {map_idx} / Seq {seq_id} / Step {step} ({step} drills)",
-                    fontsize=11,
+            global_vmax_grad = max(
+                float(g.max()) for _, _, _, _, _, _, _, g, _ in panel_data
+            )
+            global_vmax_grad = max(global_vmax_grad, 1e-3)
+
+            # Per-step individual 7-panel PNGs
+            for step, sparse_ore, obs_mask, true_ore, pred_ore, abs_err, scaled_err, ore_grad, pred_unc_raw in panel_data:
+                fig, axes = plt.subplots(1, 7, figsize=(30, 4))
+                _draw_7panel(
+                    fig, axes, sparse_ore, obs_mask, true_ore, pred_ore,
+                    abs_err, scaled_err, ore_grad, pred_unc_raw,
+                    global_vmax_ore, global_vmax_err, global_vmax_scaled, global_vmax_grad,
+                    title=f"Map {map_idx} / Seq {seq_id} / Step {step} ({step} drills)",
                 )
-
-                ax = axes[0]
-                ax.set_title(f"Observations ({int(obs_mask.sum())} drills)")
-                im = ax.imshow(sparse_ore.T, **kw_ore)
-                ax.scatter(drill_rows, drill_cols, c="red", s=10, marker="x", linewidths=0.8)
-                fig.colorbar(im, ax=ax, fraction=0.046)
-
-                ax = axes[1]
-                ax.set_title("True ore map")
-                im = ax.imshow(true_ore.T, **kw_ore)
-                fig.colorbar(im, ax=ax, fraction=0.046)
-
-                ax = axes[2]
-                ax.set_title("Predicted ore map")
-                im_pred = ax.imshow(pred_ore.T, **kw_ore)
-                fig.colorbar(im_pred, ax=ax, fraction=0.046)
-
-                ax = axes[3]
-                ax.set_title("Absolute error")
-                im_err = ax.imshow(abs_err.T, origin="lower", vmin=0, vmax=global_vmax_err, cmap="Reds")
-                fig.colorbar(im_err, ax=ax, fraction=0.046)
-
-                ax = axes[4]
-                ax.set_title("Predicted uncertainty\n(ore-value space, approx.)")
-                im_unc = ax.imshow(pred_unc_raw.T, origin="lower", vmin=0, vmax=global_vmax_err, cmap="Oranges")
-                fig.colorbar(im_unc, ax=ax, fraction=0.046)
-
                 fig.tight_layout()
                 fig.text(0.5, 0.01, fig_ts, ha="center", va="bottom", fontsize=8, color="gray")
                 fig.savefig(seq_dir / f"step_{step:03d}.png", dpi=100, bbox_inches="tight")
                 plt.close(fig)
 
-            # Combined evolution.png grid
-            fig, axes = plt.subplots(n_steps, 5, figsize=(26, 4 * n_steps))
+            # Combined evolution.png grid (n_steps × 7)
+            fig, axes = plt.subplots(n_steps, 7, figsize=(36, 4 * n_steps))
             if n_steps == 1:
                 axes = axes[np.newaxis, :]
 
@@ -496,13 +720,13 @@ def _save_uncertainty_val_plots(
 
             col_titles = [
                 "Observations", "True ore map", "Predicted ore map",
-                "Abs error", "Predicted uncertainty\n(ore-value space, approx.)",
+                "Abs error", "Scaled error", "Uncertainty\n(ore-value)", "Ore gradient",
             ]
             for col, title in enumerate(col_titles):
                 axes[0, col].set_title(title, fontsize=10)
 
-            im_pred_last = im_err_last = im_unc_last = None
-            for row_idx, (step, sparse_ore, obs_mask, true_ore, pred_ore, abs_err, pred_unc_raw) in enumerate(panel_data):
+            im_pred_last = im_err_last = im_se_last = im_unc_last = im_grad_last = None
+            for row_idx, (step, sparse_ore, obs_mask, true_ore, pred_ore, abs_err, scaled_err, ore_grad, pred_unc_raw) in enumerate(panel_data):
                 drill_rows, drill_cols = np.where(obs_mask > 0)
                 kw_ore = dict(origin="lower", cmap="viridis", vmin=0, vmax=global_vmax_ore)
 
@@ -525,18 +749,30 @@ def _save_uncertainty_val_plots(
 
                 ax = axes[row_idx, 3]
                 im_err_last = ax.imshow(abs_err.T, origin="lower", vmin=0, vmax=global_vmax_err, cmap="Reds")
-                ax.set_xlabel(f"max err = {abs_err.max():.3f}", fontsize=7)
+                ax.set_xlabel(f"max err={abs_err.max():.3f}", fontsize=7)
                 ax.set_xticks([])
                 ax.set_yticks([])
 
                 ax = axes[row_idx, 4]
+                im_se_last = ax.imshow(scaled_err.T, origin="lower", vmin=0, vmax=global_vmax_scaled, cmap="YlOrRd")
+                ax.set_xticks([])
+                ax.set_yticks([])
+
+                ax = axes[row_idx, 5]
                 im_unc_last = ax.imshow(pred_unc_raw.T, origin="lower", vmin=0, vmax=global_vmax_err, cmap="Oranges")
                 ax.set_xticks([])
                 ax.set_yticks([])
 
+                ax = axes[row_idx, 6]
+                im_grad_last = ax.imshow(ore_grad.T, origin="lower", vmin=0, vmax=global_vmax_grad, cmap="Blues")
+                ax.set_xticks([])
+                ax.set_yticks([])
+
             fig.colorbar(im_pred_last, ax=axes[:, 2], shrink=0.6, label="ore value")
-            fig.colorbar(im_err_last, ax=axes[:, 3], shrink=0.6, label="abs error")
-            fig.colorbar(im_unc_last, ax=axes[:, 4], shrink=0.6, label="uncertainty")
+            fig.colorbar(im_err_last,  ax=axes[:, 3], shrink=0.6, label="abs error")
+            fig.colorbar(im_se_last,   ax=axes[:, 4], shrink=0.6, label="scaled error")
+            fig.colorbar(im_unc_last,  ax=axes[:, 5], shrink=0.6, label="uncertainty")
+            fig.colorbar(im_grad_last, ax=axes[:, 6], shrink=0.6, label="ore gradient")
             fig.tight_layout()
             fig.savefig(seq_dir / "evolution.png", dpi=100, bbox_inches="tight")
             plt.close(fig)
@@ -853,21 +1089,40 @@ def train_variable_aware_patch_uncertainty_borehole_transformer(
     )
     save_no_ore_metrics(no_ore_metrics, checkpoint_dir, verbose=verbose)
 
-    # ---- uncertainty calibration metrics (final) -----------------------------
-    final_val = _validate_uncertainty_e2e_map(model, val_loader, device, normalizer)
+    # ---- uncertainty calibration + correlation diagnostics (final) -----------
+    final_val  = _validate_uncertainty_e2e_map(model, val_loader, device, normalizer)
+    corr_diag  = _compute_uncertainty_correlation_diagnostics(
+        model, val_loader, normalizer, device
+    )
+    all_unc_metrics = {**final_val, **corr_diag}
     unc_metrics_path = checkpoint_dir / "val_metrics_uncertainty.json"
     with open(unc_metrics_path, "w") as f:
-        json.dump(final_val, f, indent=2)
+        json.dump(all_unc_metrics, f, indent=2)
     if verbose:
         print(
             f"\nUncertainty calibration (best model, normalised space):"
-            f"\n  unc_mse        : {final_val['val_unc_mse']:.4f}"
-            f"\n  unc_mae        : {final_val['val_unc_mae']:.4f}"
-            f"\n  unc_corr       : {final_val['val_unc_corr']:.4f}"
-            f"\n  top10_ratio    : {final_val['val_unc_top10_ratio']:.4f}"
+            f"\n  unc_mse             : {final_val['val_unc_mse']:.4f}"
+            f"\n  unc_mae             : {final_val['val_unc_mae']:.4f}"
+            f"\n  unc_corr            : {final_val['val_unc_corr']:.4f}"
+            f"\n  top10_ratio         : {final_val['val_unc_top10_ratio']:.4f}"
             f"  (>1.0 = high-unc cells have higher error)"
+            f"\n  corr_unc_abs_err    : {corr_diag['corr_unc_abs_err']:.4f}"
+            f"\n  corr_unc_scaled_err : {corr_diag['corr_unc_scaled_err']:.4f}"
+            f"\n  corr_unc_pred_ore   : {corr_diag['corr_unc_pred_ore']:.4f}"
+            f"\n  corr_unc_ore_grad   : {corr_diag['corr_unc_ore_grad']:.4f}"
             f"\n  uncertainty metrics -> {unc_metrics_path}"
         )
+
+    # ---- per-drill-count uncertainty analysis --------------------------------
+    unc_by_dc = _analyze_uncertainty_by_drill_count(model, val_ds, normalizer, device)
+    dc_path = checkpoint_dir / "val_uncertainty_by_step.json"
+    with open(dc_path, "w") as f:
+        json.dump(unc_by_dc, f, indent=2)
+    if verbose:
+        print(f"  drill-count uncertainty -> {dc_path}")
+
+    # ---- training sample inspection ------------------------------------------
+    _save_training_samples(train_ds, normalizer, checkpoint_dir)
 
     # ---- optional validation plots (saved to run directory) ------------------
     if plot_dir is not None:
