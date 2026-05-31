@@ -1112,18 +1112,18 @@ def train_end_to_end_from_colab(
     )
 
     if is_var_aware_uncertainty:
-        trained_model, _ = train_variable_aware_patch_uncertainty_borehole_transformer(
+        trained_model, _, run_dir = train_variable_aware_patch_uncertainty_borehole_transformer(
             resources=resources,
             cfg=cfg,
             device=device,
             checkpoint_dir=ckpt_dir,
-            plot_dir=ckpt_dir / "plots",
+            plot_dir=ckpt_dir,
             verbose=True,
             train_ds=train_ds,
             val_ds=val_ds,
         )
         _, _, _, history = load_variable_aware_patch_uncertainty_borehole_checkpoint(
-            ckpt_dir / "variable_aware_patch_uncertainty_best.pt", device=device
+            run_dir / "variable_aware_patch_uncertainty_best.pt", device=device
         )
     elif is_var_aware:
         trained_model, _ = train_variable_aware_patch_borehole_transformer(

@@ -321,9 +321,9 @@ def _save_uncertainty_val_plots(
 
     is_sequential = bool(val_ds.samples and "sequence_id" in val_ds.samples[0])
 
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    out_dir = Path(plot_dir) / timestamp
+    out_dir = Path(plot_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    fig_ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
     model.eval()
 
@@ -397,7 +397,7 @@ def _save_uncertainty_val_plots(
             fig.colorbar(im, ax=ax, fraction=0.046)
 
             fig.tight_layout()
-            fig.text(0.5, 0.01, timestamp, ha="center", va="bottom", fontsize=8, color="gray")
+            fig.text(0.5, 0.01, fig_ts, ha="center", va="bottom", fontsize=8, color="gray")
             fig.savefig(out_dir / f"val_sample_{plot_k:02d}.png", dpi=100, bbox_inches="tight")
             plt.close(fig)
 
@@ -479,7 +479,7 @@ def _save_uncertainty_val_plots(
                 fig.colorbar(im_unc, ax=ax, fraction=0.046)
 
                 fig.tight_layout()
-                fig.text(0.5, 0.01, timestamp, ha="center", va="bottom", fontsize=8, color="gray")
+                fig.text(0.5, 0.01, fig_ts, ha="center", va="bottom", fontsize=8, color="gray")
                 fig.savefig(seq_dir / f"step_{step:03d}.png", dpi=100, bbox_inches="tight")
                 plt.close(fig)
 
@@ -561,28 +561,34 @@ def train_variable_aware_patch_uncertainty_borehole_transformer(
 ) -> tuple[
     VariableAwarePatchBoreholeUncertaintyEndToEndMapBeliefTransformer,
     TargetNormalizer,
+    Path,
 ]:
     """Train VariableAwarePatchBoreholeUncertaintyEndToEndMapBeliefTransformer.
 
-    Saves two checkpoints to checkpoint_dir:
-      variable_aware_patch_uncertainty_best.pt  — lowest validation MSE (ore-value space)
-      variable_aware_patch_uncertainty_last.pt  — final epoch
+    Creates a timestamped run directory inside checkpoint_dir and saves all
+    outputs there (checkpoints, metric JSON files, training history, plots):
+      <checkpoint_dir>/<timestamp>/variable_aware_patch_uncertainty_best.pt
+      <checkpoint_dir>/<timestamp>/variable_aware_patch_uncertainty_last.pt
+      <checkpoint_dir>/<timestamp>/training_history.csv
+      <checkpoint_dir>/<timestamp>/val_metrics_*.json
+      <checkpoint_dir>/<timestamp>/val_sample_*.png  (or seq_*/…)
 
     Parameters
     ----------
     resources        : shared resources (norm_stats for borehole standardisation)
     cfg              : training hyperparameters
     device           : torch device string
-    checkpoint_dir   : directory for saved checkpoints
-    plot_dir         : if given, save validation plots here after training
+    checkpoint_dir   : parent directory; a timestamped sub-directory is created here
+    plot_dir         : if given, validation plots are saved (to the run directory)
     verbose          : print per-epoch metrics
     train_ds/val_ds  : pre-built E2EMapDataset (required)
 
     Returns
     -------
-    (trained model with best weights, fitted TargetNormalizer)
+    (trained model with best weights, fitted TargetNormalizer, run_dir)
     """
-    checkpoint_dir = Path(checkpoint_dir)
+    run_ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    checkpoint_dir = Path(checkpoint_dir) / run_ts
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     torch.manual_seed(cfg.seed)
@@ -863,11 +869,10 @@ def train_variable_aware_patch_uncertainty_borehole_transformer(
             f"\n  uncertainty metrics -> {unc_metrics_path}"
         )
 
-    # ---- optional validation plots -------------------------------------------
+    # ---- optional validation plots (saved to run directory) ------------------
     if plot_dir is not None:
-        Path(plot_dir).mkdir(parents=True, exist_ok=True)
         _save_uncertainty_val_plots(
-            model, val_ds, normalizer, plot_dir, device, n_plots=cfg.n_val_plots
+            model, val_ds, normalizer, checkpoint_dir, device, n_plots=cfg.n_val_plots
         )
 
     if verbose:
@@ -875,9 +880,9 @@ def train_variable_aware_patch_uncertainty_borehole_transformer(
             f"\nTraining complete.  Best val MSE: {best_val_mse:.4f}"
             f"  (epoch {best_epoch}/{cfg.n_epochs})"
         )
-        print(f"  checkpoints -> {checkpoint_dir}")
+        print(f"  run directory -> {checkpoint_dir}")
 
-    return model, normalizer
+    return model, normalizer, checkpoint_dir
 
 
 # ---------------------------------------------------------------------------
