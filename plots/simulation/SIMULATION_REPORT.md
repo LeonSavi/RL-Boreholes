@@ -47,7 +47,6 @@ Total-variation distance per formation (lower = closer match to real corpus comp
 | RO | 8.2% |
 | KN | 9.0% |
 | RN | 10.3% |
-| other | 50.0% |
 
 ## 4. Vertical sequences — Markov transition matrices
 

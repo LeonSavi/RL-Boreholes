@@ -87,7 +87,12 @@ def main() -> None:
             print(f"    {r:18s}  {parts}")
 
         # ------ figure ------
-        y_slice = ny // 2
+        # pick the y-slice that contains the most in-ore cells so the
+        # cross-section actually cuts through the body (a fixed
+        # y = ny/2 misses bodies that sit off-centre and the user
+        # only sees a thin sliver of red).
+        per_y_count = in_ore.sum(axis=(0, 2))
+        y_slice = int(np.argmax(per_y_count)) if per_y_count.max() > 0 else ny // 2
         fig, axes = plt.subplots(len(GAS_VARS), 4, figsize=(17, 4 * len(GAS_VARS)),
                                  gridspec_kw={"wspace": 0.30, "hspace": 0.3})
 

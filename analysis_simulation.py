@@ -411,20 +411,45 @@ def marginal_distances(sim: dict[str, dict[str, np.ndarray]],
               .sort_values(["variable", "wasserstein"]))
 
 
+# 9 fine rock classes; any other rock label is dropped from the
+# composition chart (coarse residuals, "other", etc.).
+FINE_ROCKS_FOR_COMPOSITION = frozenset([
+    "anhydrite", "chalk", "clay",
+    "claystone_cool", "claystone_hot",
+    "dolomite", "halite_pure",
+    "sandstone_clean", "sandstone_shaly",
+])
+# 13 named formations; the catch-all "other" formation is dropped.
+NAMED_FORMATIONS_FOR_COMPOSITION = frozenset([
+    "NU", "NM", "NL", "CK", "KN", "SL", "SG",
+    "AT", "RN", "RB", "ZE", "RO", "DC",
+])
+
+
 def formation_composition_table(sim_by_fm: dict[str, Counter],
                                  real_by_fm: dict[str, Counter]
                                  ) -> pd.DataFrame:
-    """Per (formation, rock) sim fraction vs real fraction, with TVD per formation."""
+    """Per (formation, rock) sim fraction vs real fraction, with TVD per formation.
+
+    Restricted to the 13 named formations and the 9 fine rock classes;
+    catch-all `"other"` formation and any non-fine rock are dropped."""
     rows = []
-    formations = sorted(set(sim_by_fm) | set(real_by_fm))
+    formations = sorted(
+        (set(sim_by_fm) | set(real_by_fm))
+        & NAMED_FORMATIONS_FOR_COMPOSITION
+    )
     for fm in formations:
-        sim_total = sum(sim_by_fm[fm].values()) or 1
-        real_total = sum(real_by_fm[fm].values()) or 1
-        all_rocks = sorted(set(sim_by_fm[fm]) | set(real_by_fm[fm]))
+        sim_rocks = {r: n for r, n in sim_by_fm[fm].items()
+                     if r in FINE_ROCKS_FOR_COMPOSITION}
+        real_rocks = {r: n for r, n in real_by_fm[fm].items()
+                      if r in FINE_ROCKS_FOR_COMPOSITION}
+        sim_total = sum(sim_rocks.values()) or 1
+        real_total = sum(real_rocks.values()) or 1
+        all_rocks = sorted(set(sim_rocks) | set(real_rocks))
         tvd_contrib = 0.0
         for r in all_rocks:
-            sp = sim_by_fm[fm].get(r, 0) / sim_total
-            rp = real_by_fm[fm].get(r, 0) / real_total
+            sp = sim_rocks.get(r, 0) / sim_total
+            rp = real_rocks.get(r, 0) / real_total
             rows.append({
                 "formation":  fm,
                 "rock":       r,
@@ -638,12 +663,24 @@ def plot_marginal_sim_vs_real(sim: dict[str, dict[str, np.ndarray]],
 def plot_formation_composition(sim_by_fm: dict[str, Counter],
                                 real_by_fm: dict[str, Counter],
                                 out_path: Path) -> None:
-    """Per-formation grouped bars: real vs sim rock-fraction."""
+    """Per-formation grouped bars: real vs sim rock-fraction.
+
+    Restricted to the 13 named formations and the 9 fine rock
+    classes; the catch-all `"other"` formation and any non-fine
+    rock label are dropped before plotting."""
     formations = [f for f in FORMATION_ORDER
-                   if f in sim_by_fm and f in real_by_fm]
+                   if f in sim_by_fm and f in real_by_fm
+                   and f in NAMED_FORMATIONS_FOR_COMPOSITION]
+    # restrict to fine rock palette per formation
+    sim_fine = {fm: {r: n for r, n in sim_by_fm[fm].items()
+                     if r in FINE_ROCKS_FOR_COMPOSITION}
+                for fm in formations}
+    real_fine = {fm: {r: n for r, n in real_by_fm[fm].items()
+                      if r in FINE_ROCKS_FOR_COMPOSITION}
+                 for fm in formations}
     all_rocks = sorted(
         {r for fm in formations
-         for r in set(sim_by_fm[fm]) | set(real_by_fm[fm])})
+         for r in set(sim_fine[fm]) | set(real_fine[fm])})
 
     fig, ax = plt.subplots(figsize=(max(10, 1.0 * len(formations)),
                                      6))
@@ -656,10 +693,10 @@ def plot_formation_composition(sim_by_fm: dict[str, Counter],
         real_heights = []
         sim_heights = []
         for fm in formations:
-            real_total = sum(real_by_fm[fm].values()) or 1
-            sim_total = sum(sim_by_fm[fm].values()) or 1
-            real_heights.append(real_by_fm[fm].get(r, 0) / real_total)
-            sim_heights.append(sim_by_fm[fm].get(r, 0) / sim_total)
+            real_total = sum(real_fine[fm].values()) or 1
+            sim_total = sum(sim_fine[fm].values()) or 1
+            real_heights.append(real_fine[fm].get(r, 0) / real_total)
+            sim_heights.append(sim_fine[fm].get(r, 0) / sim_total)
         ax.bar(positions - width/2, real_heights, width,
                 bottom=bottom_real, color=c, alpha=0.85,
                 edgecolor="black", linewidth=0.3,
@@ -692,10 +729,13 @@ def plot_transition_matrices(transitions_by_fm: dict[str, Counter],
                               real_df: pd.DataFrame,
                               out_path: Path,
                               formations: list[str] | None = None) -> None:
-    """Side-by-side sim vs real transition heatmaps for 6 key formations.
-    `transitions_by_fm` is pre-computed by streaming_aggregate."""
+    """Side-by-side sim vs real transition heatmaps for 3 multi-rock
+    formations. `transitions_by_fm` is pre-computed by
+    streaming_aggregate."""
     if formations is None:
-        formations = ["ZE", "RO", "RB", "CK", "KN", "DC"]
+        # 3 multi-rock, geologically distinct formations: keeps the
+        # figure compact so it does not crowd the slide narrative.
+        formations = ["ZE", "RO", "KN"]
     n = len(formations)
     fig, axes = plt.subplots(n, 2, figsize=(11, 3.2 * n))
     for i, fm in enumerate(formations):
