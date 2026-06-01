@@ -18,11 +18,11 @@ Compared **500 synthetic maps** against `data/clean/samples.parquet` across four
 
 | rock | variable | KS | Wasserstein | sim p50 | real p50 |
 |---|---|---|---|---|---|
-| other | dt_us_ft | 0.9033 | 66.0582 | 88.8388 | 171.0438 |
-| other | rhob | 0.8449 | 0.4774 | 2.3678 | 1.943 |
 | clay | dt_us_ft | 0.3105 | 21.887 | 127.9042 | 158.298 |
 | halite_pure | rhob | 0.3072 | 0.1248 | 2.1923 | 2.0767 |
 | anhydrite | rhob | 0.2759 | 0.1402 | 2.35 | 2.1212 |
+| claystone_hot | dt_us_ft | 0.2697 | 6.7861 | 69.2049 | 73.3392 |
+| halite_pure | dt_us_ft | 0.2643 | 2.4542 | 66.1543 | 67.978 |
 
 (KS < 0.10 = excellent fit, < 0.30 = good, > 0.40 = systematic mismatch worth investigating.)
 

@@ -1116,12 +1116,20 @@ def main() -> None:
 
     print("\nstreaming aggregation over maps (single pass) ...")
     agg = streaming_aggregate(maps, TARGET_VARS)
-    sim_per_rock      = agg["sim_values"]
+    sim_per_rock      = {r: vd for r, vd in agg["sim_values"].items()
+                         if r in FINE_ROCKS_FOR_COMPOSITION}
     sim_by_fm         = agg["sim_by_fm"]
     transitions_by_fm = agg["transitions_by_fm"]
-    sim_runs          = agg["run_lengths"]
+    sim_runs          = {r: rs for r, rs in agg["run_lengths"].items()
+                         if r in FINE_ROCKS_FOR_COMPOSITION}
     first_map         = agg["first_map"]
-    print(f"  {len(sim_per_rock)} rock types; "
+    dropped_marg = set(agg["sim_values"]) - set(sim_per_rock)
+    dropped_runs = set(agg["run_lengths"]) - set(sim_runs)
+    if dropped_marg or dropped_runs:
+        print(f"  dropped non-fine rock labels from charts: "
+              f"marginals={sorted(dropped_marg)}, "
+              f"run-lengths={sorted(dropped_runs)}")
+    print(f"  {len(sim_per_rock)} fine rock types; "
           f"{len(sim_by_fm)} formations seen; "
           f"{sum(len(v) for v in sim_runs.values())} run-length samples")
     del maps  # release the streaming-list reference

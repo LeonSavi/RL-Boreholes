@@ -31,6 +31,16 @@ from simulator.visualize import ROCK_COLOURS
 
 OUT = Path("plots/formation_column_grf.png")
 
+# 9 fine rock classes only; non-fine residuals (e.g. "other") are
+# painted gray and excluded from the legend.
+FINE_ROCKS = frozenset([
+    "anhydrite", "chalk", "clay",
+    "claystone_cool", "claystone_hot",
+    "dolomite", "halite_pure",
+    "sandstone_clean", "sandstone_shaly",
+])
+NON_FINE_COLOUR = "#dddddd"
+
 
 def _rock_image(arr: np.ndarray) -> tuple[np.ndarray, list, ListedColormap]:
     unique = sorted(set(arr.ravel().tolist()))
@@ -61,12 +71,22 @@ def main() -> None:
     z_axis_m = m["depth_axis"]
 
     # --- colours: shared across both panels ------------------------------
-    all_rocks = sorted(set(list(base_rocks) + cross.ravel().tolist()))
+    # Restrict the legend to the 9 fine rock classes; any non-fine residual
+    # (e.g. "other" from the catch-all formation) is painted as a neutral
+    # background colour and dropped from the legend.
+    observed = set(list(base_rocks) + cross.ravel().tolist())
+    all_rocks = sorted(r for r in observed if r in FINE_ROCKS)
     rock_idx = {r: i for i, r in enumerate(all_rocks)}
-    cmap = ListedColormap([ROCK_COLOURS.get(r, "#888888") for r in all_rocks])
+    palette = [ROCK_COLOURS.get(r, "#888888") for r in all_rocks]
+    palette.append(NON_FINE_COLOUR)
+    non_fine_idx = len(all_rocks)
+    cmap = ListedColormap(palette)
 
-    base_int = np.vectorize(rock_idx.get)(base_rocks)
-    cross_int = np.vectorize(rock_idx.get)(cross)
+    def _to_idx(arr):
+        return np.vectorize(lambda r: rock_idx.get(r, non_fine_idx))(arr)
+
+    base_int = _to_idx(base_rocks)
+    cross_int = _to_idx(cross)
 
     fig, (axL, axR) = plt.subplots(1, 2, figsize=(11, 5.5),
                                    gridspec_kw={"width_ratios": [1, 4]})
