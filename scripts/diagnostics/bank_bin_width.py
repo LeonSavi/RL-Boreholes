@@ -37,7 +37,7 @@ OUT_CSV      = Path("plots/analysis/bank_bin_width_summary.csv")
 VARIABLES = ["rhob", "gr_api", "dt_us_ft", "nphi", "res_deep_log"]
 DEPTH_MAX = 4400.0     # encoder window — bins past this never used
 MIN_SAMPLES = 30       # matches DistributionBank.fit default
-WIDTHS_M = [10, 20, 25, 50, 100, 200, 400]
+WIDTHS_M = [1, 2, 5, 10, 20, 25, 50, 100, 200, 400]
 
 
 def load_wide() -> pd.DataFrame:

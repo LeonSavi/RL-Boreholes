@@ -328,6 +328,109 @@ def test_gas_response_shift(bank, geom, prior):
         os.unlink(table_path)
 
 
+def test_conditional_copula_recovery():
+    """When a cell is missing some KDEs, the bank should recover them
+    from a donor cell of the same rock using the donor's stored
+    Spearman correlations, not by drawing independently.
+
+    Setup: build a tiny custom bank with one rock 'test_rock' and
+    two formations F1, F2:
+      - primary cell  (test_rock, F1, bin 0): only `rhob` + `gr_api`
+        KDEs.  Its corr_matrix is 2x2 identity (no internal correlation
+        to seed).
+      - donor cell    (test_rock, F2, bin 5): all 5 KDEs, with a
+        strongly NEGATIVE Spearman correlation between rhob and nphi
+        and a strongly POSITIVE one between gr_api and nphi.
+
+    Sample N=5000 from the primary cell.  Verify that the recovered
+    `nphi` is correlated with `rhob` (Spearman < -0.4) and with
+    `gr_api` (Spearman > +0.3) -- i.e. the donor's joint structure
+    flowed through.  An independent fallback would give Spearman ~ 0.
+    """
+    print("\n[unit] conditional-copula recovery of missing KDEs")
+    from scipy.stats import gaussian_kde, spearmanr
+
+    rng = np.random.default_rng(123)
+    variables = ["rhob", "gr_api", "dt_us_ft", "nphi", "res_deep_log"]
+    bins = list(range(0, 4401, 10))
+    bank = DistributionBank(variables, bins)
+    bank.rock_types = ["test_rock"]
+    bank.formations = ["F1", "F2"]
+
+    # ---- primary cell: 2 of 5 KDEs (rhob, gr_api) ----
+    primary = CellDistribution(
+        rock_type="test_rock", depth_lo=0.0, depth_hi=10.0,
+        variables=variables, n_samples=200, formation="F1",
+    )
+    rhob_pri  = rng.normal(2.50, 0.10, 200)
+    gr_pri    = rng.normal(20.0, 5.0, 200)
+    primary.kdes["rhob"] = gaussian_kde(rhob_pri)
+    primary.kdes["gr_api"] = gaussian_kde(gr_pri)
+    primary.corr_matrix = np.eye(2)
+    primary.corr_variables = ["rhob", "gr_api"]
+    primary.bounds = {v: (-1e6, 1e6) for v in variables}
+    bank.cells[("test_rock", "F1", 0)] = primary
+
+    # ---- donor cell: all 5 KDEs, with strong rho(rhob, nphi)<0 and
+    #                                          rho(gr_api, nphi)>0 ----
+    donor = CellDistribution(
+        rock_type="test_rock", depth_lo=50.0, depth_hi=60.0,
+        variables=variables, n_samples=500, formation="F2",
+    )
+    # build correlated samples via a Gaussian copula directly
+    target_corr = np.array([
+        # rhob  gr_api dt    nphi  res
+        [ 1.0,  0.0,   0.0, -0.8,  0.0],
+        [ 0.0,  1.0,   0.0,  0.6,  0.0],
+        [ 0.0,  0.0,   1.0,  0.0,  0.0],
+        [-0.8,  0.6,   0.0,  1.0,  0.0],
+        [ 0.0,  0.0,   0.0,  0.0,  1.0],
+    ])
+    z = rng.multivariate_normal(np.zeros(5), target_corr, size=500)
+    # apply different marginal transforms per variable
+    donor_data = {
+        "rhob":         2.5 + 0.10 * z[:, 0],
+        "gr_api":       20.0 + 5.0 * z[:, 1],
+        "dt_us_ft":     80.0 + 8.0 * z[:, 2],
+        "nphi":         0.15 + 0.05 * z[:, 3],
+        "res_deep_log": 1.5 + 0.3 * z[:, 4],
+    }
+    for v, arr in donor_data.items():
+        donor.kdes[v] = gaussian_kde(arr)
+    donor.corr_matrix = target_corr
+    donor.corr_variables = list(variables)
+    donor.bounds = {v: (-1e6, 1e6) for v in variables}
+    bank.cells[("test_rock", "F2", 5)] = donor
+
+    # ---- sample from the primary cell + verify cross-correlations ----
+    N = 5000
+    out = bank.sample("test_rock", depth=5.0, n=N, rng=rng,
+                       formation="F1", interpolate=False)
+
+    # 1. shape + finiteness
+    for v in variables:
+        assert v in out, f"missing variable {v} in output"
+        assert len(out[v]) == N, f"{v} length {len(out[v])} != {N}"
+        assert np.isfinite(out[v]).all(), f"NaN/Inf in {v}"
+
+    # 2. cross-correlations: nphi should track the donor's joint structure
+    rho_rhob_nphi, _ = spearmanr(out["rhob"], out["nphi"])
+    rho_gr_nphi, _   = spearmanr(out["gr_api"], out["nphi"])
+    print(f"  recovered Spearman(rhob, nphi) = {rho_rhob_nphi:+.3f}  "
+          f"(target ~ -0.8, threshold < -0.4)")
+    print(f"  recovered Spearman(gr_api, nphi) = {rho_gr_nphi:+.3f}  "
+          f"(target ~ +0.6, threshold > +0.3)")
+    assert rho_rhob_nphi < -0.4, (
+        f"recovered nphi is independent of rhob (rho={rho_rhob_nphi:.3f}); "
+        "conditional copula not applied")
+    assert rho_gr_nphi > 0.3, (
+        f"recovered nphi is independent of gr_api (rho={rho_gr_nphi:.3f}); "
+        "conditional copula not applied")
+
+    # 3. PSD: any sample succeeded means the extended R was PSD
+    print(f"  N={N} samples, extended correlation matrix was PSD: OK")
+
+
 def main():
     print("=" * 60)
     print("smoke test: building fake bank + prior + geometry")
@@ -402,6 +505,7 @@ def main():
     test_bank_sample_with_formation(bank)
     test_max_ore_bodies_cap(bank, geom, prior)
     test_gas_response_shift(bank, geom, prior)
+    test_conditional_copula_recovery()
 
     print("=" * 60)
     print("all stages work + unit tests pass. ready for real data.")

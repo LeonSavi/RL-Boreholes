@@ -508,6 +508,15 @@ class DistributionBank:
         n: int,
         rng: np.random.Generator,
     ) -> dict[str, np.ndarray]:
+        # Find missing variables for this cell.
+        missing = [v for v in self.variables if v not in cell.kdes]
+
+        # Fast path: cell already has all KDEs.  Defer to the cell's
+        # own Gaussian copula sampler.
+        if not missing:
+            return cell.sample(n, rng)
+
+        # Locate this cell's (bin_idx, formation) to drive donor lookup.
         bin_idx = 0
         formation: str | None = None
         for (r, f, b), c in self.cells.items():
@@ -516,18 +525,105 @@ class DistributionBank:
                 formation = f
                 break
 
-        donors = {}
-        for v in self.variables:
-            if v in cell.kdes:
-                continue
+        # For each missing variable, find a donor cell of the same rock
+        # that DOES have that variable's KDE (prefers same formation).
+        donors: dict[str, CellDistribution] = {}
+        for v in missing:
             donor = self._nearest_cell_with_variable(
                 rock_type, bin_idx, v, formation=formation)
             if donor is not None:
                 donors[v] = donor
 
+        # No donor available for any missing variable -> defer to cell.sample,
+        # which will produce NaN for the missing ones (preserves prior
+        # behaviour at the worst-case path).
         if not donors:
             return cell.sample(n, rng)
 
+        # Build an extended (K+M)x(K+M) Spearman correlation matrix that
+        # carries:
+        #   - top-left K×K block: the cell's own pairwise correlations
+        #     among present variables
+        #   - cross block (present <-> recovered): each donor's stored
+        #     correlation between its donated variable and any present
+        #     variable that is ALSO in the donor's corr_matrix
+        #   - recovered <-> recovered: filled from shared donors only
+        #     (otherwise stays at 0 / independent)
+        # Then PSD-floor the matrix and draw the FULL (K+M)-d Gaussian
+        # copula in one go.  Marginals come from the primary cell's KDEs
+        # for present variables and from each donor's KDE for the
+        # recovered variable.  This couples the recovered variables to
+        # the present ones instead of drawing them independently.
+        present_vars = (list(cell.corr_variables)
+                        if cell.corr_variables else list(cell.kdes.keys()))
+        recovered_vars = [v for v in missing if v in donors]
+        all_vars = present_vars + recovered_vars
+        K, M = len(present_vars), len(recovered_vars)
+        D = K + M
+        if D < 2:
+            # only one variable in total — copula is identity; fall back to
+            # marginal draws.
+            return self._sample_independent_fallback(cell, donors, n, rng)
+
+        R = np.eye(D)
+        if K >= 2 and cell.corr_matrix is not None \
+                and cell.corr_matrix.shape == (K, K):
+            R[:K, :K] = cell.corr_matrix
+
+        for i, v in enumerate(recovered_vars):
+            donor = donors[v]
+            dcorr, dvars = donor.corr_matrix, donor.corr_variables
+            if dcorr is None or not dvars or v not in dvars:
+                continue
+            v_idx = dvars.index(v)
+            # cross block: present <-> recovered
+            for j, u in enumerate(present_vars):
+                if u in dvars:
+                    u_idx = dvars.index(u)
+                    rho = float(dcorr[v_idx, u_idx])
+                    if np.isfinite(rho):
+                        R[K + i, j] = rho
+                        R[j, K + i] = rho
+            # recovered <-> recovered (only when same donor has the pair)
+            for k, w in enumerate(recovered_vars):
+                if k <= i or w not in dvars:
+                    continue
+                if donors[w] is not donor:
+                    continue
+                w_idx = dvars.index(w)
+                rho = float(dcorr[v_idx, w_idx])
+                if np.isfinite(rho):
+                    R[K + i, K + k] = rho
+                    R[K + k, K + i] = rho
+
+        R = _nearest_psd(R)
+        mvn = rng.multivariate_normal(np.zeros(D), R, size=n)
+        from scipy.stats import norm
+        u = norm.cdf(mvn)
+
+        out: dict[str, np.ndarray] = {}
+        # present variables: use primary cell's KDE for the inverse CDF
+        for i, v in enumerate(present_vars):
+            out[v] = cell._inverse_cdf(v, u[:, i], rng)
+        # recovered variables: use donor cell's KDE for the inverse CDF
+        # but driven by the JOINT u_i drawn from the extended copula
+        for i, v in enumerate(recovered_vars):
+            out[v] = donors[v]._inverse_cdf(v, u[:, K + i], rng)
+        # any variable still missing (no KDE in cell, no donor found)
+        for v in self.variables:
+            if v not in out:
+                out[v] = np.full(n, np.nan)
+        return out
+
+    def _sample_independent_fallback(
+        self,
+        cell: CellDistribution,
+        donors: dict[str, "CellDistribution"],
+        n: int,
+        rng: np.random.Generator,
+    ) -> dict[str, np.ndarray]:
+        """Used only when the extended copula is degenerate (D < 2).
+        Draws each variable marginally from its source cell."""
         out = cell.sample(n, rng)
         for v, donor in donors.items():
             kde = donor.kdes.get(v)

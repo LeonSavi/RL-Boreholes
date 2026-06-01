@@ -21,6 +21,7 @@ data/dataset/
 *.xlsx
 *.xlsx:mshield
 *.xlsx:Zone.Identifier
+*:Zone.Identifier
 
 !boreholes.xlsx
 !data/nlog/boreholes.xlsx
@@ -38,6 +39,18 @@ data/clean/*.parquet
 test.py
 
 *.npy
+
+# backup pickles / parquets / checkpoints (large, not source of truth)
+*.bak*
+
+# runtime logs
+logs/
+*.log
+!boreholes.xlsx
+
+# raw external dataset (downloadable from Garzon Zenodo DOI; analysis
+# outputs live under plots/garcon/ and plots/analysis/)
+data/garcon/
 
 .claude/
 .tex/

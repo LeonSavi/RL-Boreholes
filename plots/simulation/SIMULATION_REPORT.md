@@ -1,6 +1,6 @@
 # Simulator validation report
 
-Compared **50 synthetic maps** against `data/clean/samples.parquet` across four axes: petrophysical marginals, formation composition, vertical sequence statistics, and spatial structure.
+Compared **500 synthetic maps** against `data/clean/samples.parquet` across four axes: petrophysical marginals, formation composition, vertical sequence statistics, and spatial structure.
 
 ## 1. DistributionBank — what the simulator draws from
 
@@ -18,11 +18,11 @@ Compared **50 synthetic maps** against `data/clean/samples.parquet` across four 
 
 | rock | variable | KS | Wasserstein | sim p50 | real p50 |
 |---|---|---|---|---|---|
-| clay | dt_us_ft | 0.3169 | 23.149 | 127.4083 | 158.298 |
-| halite_pure | rhob | 0.2829 | 0.1234 | 2.1743 | 2.0761 |
-| other | rhob | 0.279 | 0.2098 | 2.5907 | 2.395 |
-| anhydrite | rhob | 0.2749 | 0.1545 | 2.3251 | 2.1137 |
-| claystone_hot | dt_us_ft | 0.268 | 6.521 | 68.9669 | 73.4411 |
+| other | dt_us_ft | 0.9033 | 66.0582 | 88.8388 | 171.0438 |
+| other | rhob | 0.8449 | 0.4774 | 2.3678 | 1.943 |
+| clay | dt_us_ft | 0.3105 | 21.887 | 127.9042 | 158.298 |
+| halite_pure | rhob | 0.3072 | 0.1248 | 2.1923 | 2.0767 |
+| anhydrite | rhob | 0.2759 | 0.1402 | 2.35 | 2.1212 |
 
 (KS < 0.10 = excellent fit, < 0.30 = good, > 0.40 = systematic mismatch worth investigating.)
 
@@ -35,19 +35,18 @@ Total-variation distance per formation (lower = closer match to real corpus comp
 | formation | TVD (%) |
 |---|---|
 | CK | 0.0% |
-| NU | 0.0% |
+| DC | 0.0% |
 | NM | 0.0% |
 | NL | 0.0% |
-| SL | 1.3% |
-| RO | 1.9% |
-| RB | 4.5% |
-| ZE | 4.8% |
-| DC | 7.2% |
-| AT | 7.6% |
-| RN | 10.7% |
-| SG | 20.8% |
-| KN | 23.4% |
-| SK | 50.0% |
+| NU | 0.0% |
+| SL | 0.0% |
+| SG | 0.0% |
+| ZE | 0.9% |
+| RB | 6.8% |
+| AT | 8.1% |
+| RO | 8.2% |
+| KN | 9.0% |
+| RN | 10.3% |
 | other | 50.0% |
 
 ## 4. Vertical sequences — Markov transition matrices
@@ -61,14 +60,14 @@ Frobenius distance between sim and real transition matrices per formation (align
 | formation | Frobenius | n rocks |
 |---|---|---|
 | CK | 0.0 | 1 |
-| SL | 0.0791 | 2 |
-| DC | 0.1421 | 2 |
-| AT | 0.1534 | 3 |
-| KN | 0.1585 | 3 |
-| RN | 0.1604 | 3 |
-| ZE | 0.2336 | 6 |
-| RB | 0.9667 | 4 |
-| RO | 0.9906 | 3 |
+| DC | 0.0 | 1 |
+| SL | 0.0 | 1 |
+| RB | 0.0915 | 3 |
+| AT | 0.0933 | 2 |
+| RN | 0.1006 | 2 |
+| ZE | 0.1012 | 4 |
+| RO | 0.1064 | 2 |
+| KN | 0.1441 | 2 |
 
 ## 5. Spatial structure
 

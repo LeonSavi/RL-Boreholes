@@ -32,6 +32,15 @@ Run:
 """
 from __future__ import annotations
 
+import os
+
+# WSL memory pressure: keep BLAS single-threaded so peak RSS stays bounded.
+# Must be set before numpy/scipy import.
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+
 import argparse
 import pickle
 from collections import Counter, defaultdict
@@ -56,7 +65,7 @@ DEFAULT_GEOM    = Path("data/clean/formation_geometry.pkl")
 DEFAULT_PRIOR   = Path("data/clean/discovery_prior.pkl")
 DEFAULT_DATASET = Path("data/dataset")
 DEFAULT_OUT     = Path("plots/simulation")
-DEFAULT_N_MAPS  = 250
+DEFAULT_N_MAPS  = 500
 DEFAULT_SEED    = 42
 
 TARGET_VARS = ["rhob", "gr_api", "dt_us_ft", "nphi", "res_deep_log"]
@@ -110,110 +119,249 @@ def dataset_has_labels(dataset_dir: Path) -> bool:
     return any(dataset_dir.glob("labels_*.npz"))
 
 
-def load_sim_maps_from_disk(dataset_dir: Path,
-                             n_maps: int,
-                             variables: list[str],
-                             ) -> list[dict]:
-    """Load the first `n_maps` saved maps from disk and reform them into the
-    dict shape MapGenerator yields ({rock_types, formations, variables,
-    depth_axis}).
+class _StreamingMapList:
+    """Lazy, list-like view over saved boreholes_*.npy maps.
 
-    Saved files:
-      labels_vocab.pkl        — {"rocks": {str→int}, "formations": {str→int}}
-      stats.pkl               — standardisation stats {var → (mean, std)}
-      boreholes_NNNNN.npy     — (1024, V, D) float16, standardised
-      labels_NNNNN.npz        — rocks (1024, D) int8, formations (1024, D) int8
+    Each __iter__ / __getitem__ call re-reads ONE map from disk and
+    decodes it into the dict shape MapGenerator yields. Memory peak is
+    bounded to one map at a time, which keeps WSL stable when n_maps is
+    large (~thousands).
 
-    Returns a list of map-dicts.  Variable arrays are un-standardised back
-    to raw units for direct comparison with the real corpus.
+    Drop-in for the consumers that just iterate or index `maps`:
+        for m in maps: ...        # streams one map at a time
+        m0 = maps[0]               # single map for the cross-section plot
+        len(maps)                  # number of maps
     """
-    with open(dataset_dir / "labels_vocab.pkl", "rb") as f:
-        vocabs = pickle.load(f)
-    rocks_vocab = vocabs["rocks"]
-    fms_vocab = vocabs["formations"]
-    inv_rocks = {i: r for r, i in rocks_vocab.items()}
-    inv_fms = {i: f for f, i in fms_vocab.items()}
 
-    with open(dataset_dir / "stats.pkl", "rb") as f:
-        stats = pickle.load(f)
-    with open(dataset_dir / "config.pkl", "rb") as f:
-        cfg = pickle.load(f)
-    saved_vars = list(cfg["variables"])
+    def __init__(self, dataset_dir: Path, n_maps: int,
+                 variables: list[str]) -> None:
+        with open(dataset_dir / "labels_vocab.pkl", "rb") as f:
+            vocabs = pickle.load(f)
+        self._inv_rocks = {i: r for r, i in vocabs["rocks"].items()}
+        self._inv_fms = {i: f for f, i in vocabs["formations"].items()}
 
-    bh_files = sorted(dataset_dir.glob("boreholes_*.npy"))[:n_maps]
-    if not bh_files:
-        raise RuntimeError(f"no boreholes_*.npy in {dataset_dir}")
+        with open(dataset_dir / "stats.pkl", "rb") as f:
+            self._stats = pickle.load(f)
+        with open(dataset_dir / "config.pkl", "rb") as f:
+            cfg = pickle.load(f)
+        self._saved_vars = list(cfg["variables"])
+        self._variables = list(variables)
 
-    depth_axis = np.arange(N_DEPTH, dtype=np.float64) * 10.0 + 5.0
+        all_bh = sorted(dataset_dir.glob("boreholes_*.npy"))
+        bh_files: list[Path] = []
+        for p in all_bh[:n_maps]:
+            idx = int(p.stem.split("_")[-1])
+            if (dataset_dir / f"labels_{idx:05d}.npz").exists():
+                bh_files.append(p)
+        if not bh_files:
+            raise RuntimeError(f"no boreholes_*.npy in {dataset_dir}")
+        self._bh_files = bh_files
+        self._dataset_dir = dataset_dir
+        self._depth_axis = np.arange(N_DEPTH, dtype=np.float64) * 10.0 + 5.0
 
-    out: list[dict] = []
-    for bh_path in bh_files:
+    def __len__(self) -> int:
+        return len(self._bh_files)
+
+    def __iter__(self):
+        for bh_path in self._bh_files:
+            yield self._decode(bh_path)
+
+    def __getitem__(self, idx: int) -> dict:
+        return self._decode(self._bh_files[idx])
+
+    def __bool__(self) -> bool:
+        return len(self._bh_files) > 0
+
+    def _decode(self, bh_path: Path) -> dict:
         idx = int(bh_path.stem.split("_")[-1])
-        lbl_path = dataset_dir / f"labels_{idx:05d}.npz"
-        if not lbl_path.exists():
-            continue
-
+        lbl_path = self._dataset_dir / f"labels_{idx:05d}.npz"
         bh = np.load(bh_path).astype(np.float32)          # (1024, V, D)
         with np.load(lbl_path) as z:
-            rocks_int = z["rocks"]                          # (1024, D) int8
-            forms_int = z["formations"]                     # (1024, D) int8
+            rocks_int = z["rocks"]
+            forms_int = z["formations"]
 
-        # un-standardise per variable so values are back in physical units
         var_arrays: dict[str, np.ndarray] = {}
-        for i, v in enumerate(saved_vars):
-            if v not in variables:
+        for i, v in enumerate(self._saved_vars):
+            if v not in self._variables:
                 continue
-            mean, std = stats[v]
+            mean, std = self._stats[v]
             raw = bh[:, i, :] * std + mean
             var_arrays[v] = raw.reshape(N_X, N_Y, N_DEPTH)
+        del bh
 
-        # rocks_int and forms_int are (1024, D); reshape to (N_X, N_Y, D)
-        rock_str = np.vectorize(inv_rocks.get)(rocks_int).reshape(
+        rock_str = np.vectorize(self._inv_rocks.get)(rocks_int).reshape(
             N_X, N_Y, N_DEPTH)
-        fm_str = np.vectorize(inv_fms.get)(forms_int).reshape(
+        fm_str = np.vectorize(self._inv_fms.get)(forms_int).reshape(
             N_X, N_Y, N_DEPTH)
 
-        out.append({
+        return {
             "rock_types": rock_str,
             "formations": fm_str,
             "variables":  var_arrays,
-            "depth_axis": depth_axis,
-        })
-    print(f"    loaded {len(out)} maps from {dataset_dir}")
-    return out
+            "depth_axis": self._depth_axis,
+        }
 
 
-def pool_sim_values(maps: list[dict], variables: list[str]
-                    ) -> dict[str, dict[str, np.ndarray]]:
-    """Flatten map cells into {rock_type_fine: {variable: array}}."""
-    bag: dict[str, dict[str, list]] = defaultdict(lambda: defaultdict(list))
+def load_sim_maps_from_disk(dataset_dir: Path,
+                             n_maps: int,
+                             variables: list[str],
+                             ):
+    """Streaming, list-like view over `n_maps` saved maps in `dataset_dir`.
+
+    Returns a `_StreamingMapList` that decodes one map per iteration so
+    memory peak stays bounded.  Each yielded map matches the dict shape
+    MapGenerator emits ({rock_types, formations, variables, depth_axis});
+    variable arrays are un-standardised back to raw units.
+    """
+    maps = _StreamingMapList(dataset_dir, n_maps, variables)
+    print(f"    streaming {len(maps)} maps from {dataset_dir} "
+          f"(one map in RAM at a time)")
+    return maps
+
+
+def streaming_aggregate(maps,
+                         variables: list[str],
+                         max_samples_per_rock_var: int = 50_000,
+                         rng_seed: int = 17,
+                         ) -> dict:
+    """ONE pass over maps. Accumulates everything downstream needs without
+    ever holding more than one map's arrays in RAM at a time.
+
+    Returns a dict with:
+      - sim_values:        {rock: {var: np.ndarray}}  reservoir-sampled
+                           to <= max_samples_per_rock_var per (rock, var).
+      - sim_by_fm:         {formation: Counter({rock: n})}
+      - transitions_by_fm: {formation: Counter({(rock_a, rock_b): n})}
+      - run_lengths:       {rock: [int, int, ...]}
+      - first_map:         the first decoded map (for cross-section plots)
+      - n_maps:            int, how many maps were aggregated
+
+    The per-map work mirrors what pool_sim_values / pool_sim_formation_rock /
+    transition_matrix_from_maps / plot_run_lengths used to do separately, but
+    in one disk-pass instead of 4+ (which was catastrophic under the
+    streaming map loader). Reservoir sampling keeps marginal-distance memory
+    bounded; small Counter accumulators handle the rest.
+    """
+    rng = np.random.default_rng(rng_seed)
+    sim_values: dict[str, dict[str, list]] = defaultdict(
+        lambda: defaultdict(list))
+    seen_counts: dict[tuple[str, str], int] = defaultdict(int)
+    sim_by_fm: dict[str, Counter] = defaultdict(Counter)
+    transitions_by_fm: dict[str, Counter] = defaultdict(Counter)
+    run_lengths: dict[str, list] = defaultdict(list)
+    first_map = None
+    n_maps = 0
+
     for m in maps:
-        rt = np.asarray(m["rock_types"]).astype(object)
+        n_maps += 1
+        if first_map is None:
+            first_map = m
+
+        rt_obj = np.asarray(m["rock_types"]).astype(object)   # (X, Y, D)
+        fm_obj = np.asarray(m["formations"]).astype(object)
+
+        # ---- marginals: reservoir-sample per (rock, var) -----------------
+        rt_flat = rt_obj.ravel()
+        rt_str = np.where(rt_flat == None, "", rt_flat.astype(str))  # noqa: E711
         for v in variables:
-            if v not in m["variables"]:
+            arr = m["variables"].get(v)
+            if arr is None:
                 continue
-            arr = np.asarray(m["variables"][v]).astype(np.float32)
-            rt_f = rt.ravel()
-            v_f = arr.ravel()
-            mask = np.isfinite(v_f) & np.array([r is not None for r in rt_f])
-            for r, val in zip(rt_f[mask], v_f[mask]):
-                bag[str(r)][v].append(float(val))
-    return {r: {v: np.asarray(vs) for v, vs in vd.items()}
-            for r, vd in bag.items()}
+            v_flat = np.asarray(arr, dtype=np.float32).ravel()
+            finite = np.isfinite(v_flat)
+            valid = finite & (rt_str != "")
+            if not valid.any():
+                continue
+            r_arr = rt_str[valid]
+            x_arr = v_flat[valid]
+            for rock in np.unique(r_arr):
+                rock_mask = r_arr == rock
+                xs = x_arr[rock_mask]
+                if xs.size == 0:
+                    continue
+                # Algorithm R reservoir per (rock, v)
+                key = (str(rock), v)
+                bag = sim_values[str(rock)][v]
+                cap = max_samples_per_rock_var
+                seen_before = seen_counts[key]
+                if seen_before < cap:
+                    take = min(cap - seen_before, xs.size)
+                    bag.extend(xs[:take].tolist())
+                    seen_before += take
+                    remaining = xs[take:]
+                else:
+                    remaining = xs
+                if remaining.size:
+                    # for each leftover sample, replace a random slot with
+                    # prob cap / (seen_before + i)
+                    idxs = seen_before + np.arange(remaining.size)
+                    seen_before += remaining.size
+                    probs = cap / (idxs + 1)
+                    flips = rng.random(remaining.size) < probs
+                    chosen = remaining[flips]
+                    if chosen.size:
+                        slots = rng.integers(0, cap, size=chosen.size)
+                        for slot, val in zip(slots, chosen):
+                            bag[int(slot)] = float(val)
+                seen_counts[key] = seen_before
+
+        # ---- composition: per-formation rock counts ----------------------
+        rt_str_obj = rt_obj.astype(str)
+        fm_str_obj = fm_obj.astype(str)
+        rt_f = rt_str_obj.ravel()
+        fm_f = fm_str_obj.ravel()
+        valid_fm = (rt_f != "None") & (fm_f != "None")
+        for r, f in zip(rt_f[valid_fm], fm_f[valid_fm]):
+            sim_by_fm[f][r] += 1
+
+        # ---- transitions + run lengths (column by column) ----------------
+        # Iterating numpy axes-0,1 in Python is unavoidable here because the
+        # state machine is per-column; but each column is ~440 ints, cheap.
+        nx, ny, nz = rt_obj.shape
+        for x in range(nx):
+            for y in range(ny):
+                col_r = rt_str_obj[x, y]    # (D,)
+                col_f = fm_str_obj[x, y]
+                cur_r = col_r[0]
+                run = 1
+                for k in range(1, nz):
+                    r_prev = col_r[k - 1]
+                    r_now = col_r[k]
+                    f_prev = col_f[k - 1]
+                    f_now = col_f[k]
+                    # transitions (only within same formation)
+                    if (r_prev != "None" and r_now != "None"
+                            and f_prev == f_now and f_prev != "None"):
+                        transitions_by_fm[f_prev][(r_prev, r_now)] += 1
+                    # run lengths
+                    if r_now == cur_r:
+                        run += 1
+                    else:
+                        if cur_r != "None":
+                            run_lengths[cur_r].append(run)
+                        cur_r = r_now
+                        run = 1
+                if cur_r != "None":
+                    run_lengths[cur_r].append(run)
+
+        if n_maps % 25 == 0:
+            print(f"    aggregated {n_maps} maps")
+
+    print(f"    aggregated {n_maps} maps (single pass)")
+    return {
+        "sim_values": {r: {v: np.asarray(vs, dtype=np.float32)
+                            for v, vs in vd.items()}
+                        for r, vd in sim_values.items()},
+        "sim_by_fm": sim_by_fm,
+        "transitions_by_fm": transitions_by_fm,
+        "run_lengths": run_lengths,
+        "first_map": first_map,
+        "n_maps": n_maps,
+    }
 
 
-def pool_sim_formation_rock(maps: list[dict]
-                            ) -> dict[str, Counter]:
-    """Count {formation: Counter({rock: n})} across sim maps."""
-    by_fm: dict[str, Counter] = defaultdict(Counter)
-    for m in maps:
-        rt = np.asarray(m["rock_types"]).astype(object).ravel()
-        fm = np.asarray(m["formations"]).astype(object).ravel()
-        for r, f in zip(rt, fm):
-            if r is None or f is None:
-                continue
-            by_fm[str(f)][str(r)] += 1
-    return by_fm
+# Note: pool_sim_values and pool_sim_formation_rock are removed -- their
+# per-map work is now folded into streaming_aggregate (single pass).
 
 
 def pool_real_formation_rock(real_df: pd.DataFrame) -> dict[str, Counter]:
@@ -293,28 +441,15 @@ def formation_composition_table(sim_by_fm: dict[str, Counter],
     return pd.DataFrame(rows)
 
 
-def transition_matrix_from_maps(maps: list[dict],
-                                 formation: str) -> tuple[list[str], np.ndarray]:
-    """Build a transition matrix for one formation across all sim maps."""
-    pairs = Counter()
-    rocks_seen = set()
-    for m in maps:
-        rt = np.asarray(m["rock_types"]).astype(object)
-        fm = np.asarray(m["formations"]).astype(object)
-        nx, ny, nz = rt.shape
-        for x in range(nx):
-            for y in range(ny):
-                col_rt = rt[x, y]
-                col_fm = fm[x, y]
-                # collapse to in-formation segment
-                for k in range(nz - 1):
-                    if col_fm[k] != formation or col_fm[k+1] != formation:
-                        continue
-                    a, b = col_rt[k], col_rt[k+1]
-                    if a is None or b is None:
-                        continue
-                    pairs[(str(a), str(b))] += 1
-                    rocks_seen.add(str(a)); rocks_seen.add(str(b))
+def transition_matrix_from_counts(pairs: Counter) -> tuple[list[str], np.ndarray]:
+    """Row-normalise a Counter({(a, b): n}) into a transition matrix.
+
+    Replaces `transition_matrix_from_maps`: the per-map iteration is now
+    done once inside streaming_aggregate, which yields the same Counter."""
+    rocks_seen: set[str] = set()
+    for a, b in pairs.keys():
+        rocks_seen.add(a)
+        rocks_seen.add(b)
     rocks = sorted(rocks_seen)
     n = len(rocks)
     M = np.zeros((n, n), dtype=np.float64)
@@ -361,14 +496,19 @@ def transition_matrix_from_real(real_df: pd.DataFrame,
     return rocks, M_norm
 
 
-def transition_distance_table(maps: list[dict],
+def transition_distance_table(transitions_by_fm: dict[str, Counter],
                               real_df: pd.DataFrame,
                               formations: list[str]) -> pd.DataFrame:
     """Per formation: Frobenius distance between sim and real transition
-    matrices (aligned on the union of rocks observed in either)."""
+    matrices (aligned on the union of rocks observed in either).
+
+    `transitions_by_fm` is pre-computed by streaming_aggregate."""
     rows = []
     for fm in formations:
-        s_rocks, S = transition_matrix_from_maps(maps, fm)
+        sim_pairs = transitions_by_fm.get(fm, Counter())
+        if not sim_pairs:
+            continue
+        s_rocks, S = transition_matrix_from_counts(sim_pairs)
         r_rocks, R = transition_matrix_from_real(real_df, fm)
         if S.size == 0 or R.size == 0:
             continue
@@ -383,11 +523,11 @@ def transition_distance_table(maps: list[dict],
                 if a in r_rocks and b in r_rocks:
                     R_full[i, j] = R[r_rocks.index(a), r_rocks.index(b)]
         rows.append({
-            "formation":         fm,
-            "n_rocks":           n,
-            "frobenius":         round(float(np.linalg.norm(S_full - R_full)),
-                                        4),
-            "n_sim_transitions": int(S.sum() * 1),  # approx
+            "formation":          fm,
+            "n_rocks":            n,
+            "frobenius":          round(float(np.linalg.norm(S_full - R_full)),
+                                         4),
+            "n_sim_transitions":  int(sum(sim_pairs.values())),
             "n_real_transitions": int(R.sum() * 1),
         })
     return pd.DataFrame(rows).sort_values("frobenius")
@@ -548,17 +688,22 @@ def plot_formation_composition(sim_by_fm: dict[str, Counter],
     print(f"  wrote {out_path}")
 
 
-def plot_transition_matrices(maps: list[dict],
+def plot_transition_matrices(transitions_by_fm: dict[str, Counter],
                               real_df: pd.DataFrame,
                               out_path: Path,
                               formations: list[str] | None = None) -> None:
-    """Side-by-side sim vs real transition heatmaps for 6 key formations."""
+    """Side-by-side sim vs real transition heatmaps for 6 key formations.
+    `transitions_by_fm` is pre-computed by streaming_aggregate."""
     if formations is None:
         formations = ["ZE", "RO", "RB", "CK", "KN", "DC"]
     n = len(formations)
     fig, axes = plt.subplots(n, 2, figsize=(11, 3.2 * n))
     for i, fm in enumerate(formations):
-        s_rocks, S = transition_matrix_from_maps(maps, fm)
+        sim_pairs = transitions_by_fm.get(fm, Counter())
+        if not sim_pairs:
+            s_rocks, S = [], np.zeros((0, 0))
+        else:
+            s_rocks, S = transition_matrix_from_counts(sim_pairs)
         r_rocks, R = transition_matrix_from_real(real_df, fm)
         union = sorted(set(s_rocks) | set(r_rocks))
         if not union:
@@ -591,33 +736,15 @@ def plot_transition_matrices(maps: list[dict],
     print(f"  wrote {out_path}")
 
 
-def plot_run_lengths(maps: list[dict],
+def plot_run_lengths(sim_runs: dict[str, list],
                       real_df: pd.DataFrame,
                       out_path: Path,
                       target_rocks: list[str] | None = None) -> None:
-    """Sim vs real run-length histograms per rock (top 6 rocks)."""
+    """Sim vs real run-length histograms per rock (top 6 rocks).
+    `sim_runs` is pre-computed by streaming_aggregate."""
     if target_rocks is None:
         target_rocks = ["claystone_hot", "sandstone_clean",
                          "halite_pure", "chalk", "anhydrite", "dolomite"]
-
-    # sim run lengths (10 m cells)
-    sim_runs = defaultdict(list)
-    for m in maps:
-        rt = np.asarray(m["rock_types"]).astype(object)
-        nx, ny, nz = rt.shape
-        for x in range(nx):
-            for y in range(ny):
-                col = rt[x, y]
-                cur = col[0]; run = 1
-                for k in range(1, nz):
-                    if col[k] == cur:
-                        run += 1
-                    else:
-                        if cur is not None:
-                            sim_runs[str(cur)].append(run)
-                        cur = col[k]; run = 1
-                if cur is not None:
-                    sim_runs[str(cur)].append(run)
 
     # real run lengths (per well, 10m-binned)
     nlog = real_df[real_df["dataset"] == "NLOG"].drop_duplicates(
@@ -947,10 +1074,17 @@ def main() -> None:
     real_df = real_df.drop_duplicates(["borehole", "depth", "measurement"])
     print(f"  {len(real_df):,} real rows")
 
-    print("\npooling simulator values per rock × variable ...")
-    sim_per_rock = pool_sim_values(maps, TARGET_VARS)
-    print(f"  pooled {sum(len(vd) for vd in sim_per_rock.values())} "
-          f"(rock × variable) slots across {len(sim_per_rock)} rock types")
+    print("\nstreaming aggregation over maps (single pass) ...")
+    agg = streaming_aggregate(maps, TARGET_VARS)
+    sim_per_rock      = agg["sim_values"]
+    sim_by_fm         = agg["sim_by_fm"]
+    transitions_by_fm = agg["transitions_by_fm"]
+    sim_runs          = agg["run_lengths"]
+    first_map         = agg["first_map"]
+    print(f"  {len(sim_per_rock)} rock types; "
+          f"{len(sim_by_fm)} formations seen; "
+          f"{sum(len(v) for v in sim_runs.values())} run-length samples")
+    del maps  # release the streaming-list reference
 
     print("\ncomputing per-marginal distances ...")
     marginal = marginal_distances(sim_per_rock, real_df, TARGET_VARS)
@@ -958,7 +1092,6 @@ def main() -> None:
     print(f"  wrote per_rock_marginal_distances.csv  ({len(marginal)} rows)")
 
     print("\ncomputing per-formation composition ...")
-    sim_by_fm = pool_sim_formation_rock(maps)
     real_by_fm = pool_real_formation_rock(real_df)
     composition = formation_composition_table(sim_by_fm, real_by_fm)
     composition.to_csv(args.out / "per_formation_composition.csv", index=False)
@@ -966,7 +1099,8 @@ def main() -> None:
 
     print("\ncomputing transition-matrix distances ...")
     target_fms = ["ZE", "RO", "RB", "CK", "KN", "DC", "AT", "SL", "RN"]
-    transitions = transition_distance_table(maps, real_df, target_fms)
+    transitions = transition_distance_table(transitions_by_fm, real_df,
+                                              target_fms)
     transitions.to_csv(args.out
                         / "per_formation_transition_distance.csv", index=False)
     print(f"  wrote per_formation_transition_distance.csv  "
@@ -981,13 +1115,14 @@ def main() -> None:
                                 p / "03_marginal_sim_vs_real_gr.png")
     plot_formation_composition(sim_by_fm, real_by_fm,
                                 p / "04_formation_composition.png")
-    plot_transition_matrices(maps, real_df,
+    plot_transition_matrices(transitions_by_fm, real_df,
                               p / "05_transition_matrices.png")
-    plot_run_lengths(maps, real_df,
+    plot_run_lengths(sim_runs, real_df,
                       p / "06_run_length_distributions.png")
-    plot_sample_map_cross_section(maps,
+    first_map_list = [first_map] if first_map is not None else []
+    plot_sample_map_cross_section(first_map_list,
                                     p / "07_sample_map_cross_section.png")
-    plot_lateral_coherence(maps,
+    plot_lateral_coherence(first_map_list,
                             p / "08_lateral_coherence.png")
     plot_metric_summary(marginal, transitions,
                          p / "09_metric_summary.png")
