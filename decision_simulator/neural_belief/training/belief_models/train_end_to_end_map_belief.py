@@ -52,13 +52,13 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 
 from decision_simulator.resources import DecisionSimulationResources
-from ..map_cache import NpzMap
-from ..models.borehole_encoders.autoencoder import standardise
-from ..models.end_to_end.end_to_end_map_belief_transformer import (
+from ...map_cache import NpzMap
+from ...models.belief_models.borehole_encoders.autoencoder import standardise
+from ...models.belief_models.end_to_end.end_to_end_map_belief_transformer import (
     EndToEndMapBeliefTransformer,
 )
-from ..utils import TargetNormalizer
-from ..training_utils import (
+from ...utils import TargetNormalizer
+from ...training_utils import (
     DRILL_BINS,
     export_history,
     false_positive_loss,
@@ -463,7 +463,7 @@ def _save_e2e_map_val_plots(
     import matplotlib
     matplotlib.use("Agg")
 
-    from ..visualize import plot_belief_sample
+    from ...visualize import plot_belief_sample
 
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     out_dir = Path(plot_dir) / timestamp
@@ -537,7 +537,7 @@ def _save_e2e_map_sequential_val_plots(
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    from ..visualize import plot_belief_sample
+    from ...visualize import plot_belief_sample
 
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     base_dir = Path(plot_dir) / timestamp

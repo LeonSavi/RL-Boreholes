@@ -1,9 +1,4 @@
-from .models.map_encoders.unet_belief import UNetBelief
-from .models.map_encoders.map_belief_transformer import (
-    MapBeliefConfig,
-    MapBeliefTransformer,
-    MapBeliefModel,  # backward-compat alias
-)
+from .models import UNetBelief, MapBeliefConfig, MapBeliefTransformer, MapBeliefModel
 from .datasets import (
     BeliefDatasetConfig,
     GeologicalBeliefDataset,

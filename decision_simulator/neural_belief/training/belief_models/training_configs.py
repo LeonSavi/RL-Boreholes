@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from ..models.map_encoders.map_belief_transformer import MapBeliefConfig
-from ..models.end_to_end.end_to_end_map_belief_transformer import EndToEndMapBeliefConfig
+from ...models.belief_models.map_encoders.map_belief_transformer import MapBeliefConfig
+from ...models.belief_models.end_to_end.end_to_end_map_belief_transformer import EndToEndMapBeliefConfig
 
 
 @dataclass

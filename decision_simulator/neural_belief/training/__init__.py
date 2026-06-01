@@ -37,42 +37,42 @@ paths and the original ``decision_simulator.neural_belief.training.*`` paths
 continue to work without modification.
 """
 
-from .training_configs import (
+from .belief_models.training_configs import (
     NeuralBeliefTrainingConfig,
     MapBeliefTrainingConfig,
     E2EMapBeliefTrainingConfig,
 )
-from .train_unet_belief import (
+from .belief_models.train_unet_belief import (
     train_neural_belief,
     load_belief_checkpoint,
 )
-from .train_map_belief import (
+from .belief_models.train_map_belief import (
     train_map_belief,
     load_map_belief_checkpoint,
 )
-from .train_raw_borehole_belief import train_raw_borehole_belief
-from .train_end_to_end_map_belief import (
+from .belief_models.train_raw_borehole_belief import train_raw_borehole_belief
+from .belief_models.train_end_to_end_map_belief import (
     E2EMapDataset,
     collate_e2e_map,
     train_end_to_end_map_belief,
     load_e2e_map_belief_checkpoint,
 )
-from .train_patch_borehole_transformer import (
+from .belief_models.train_patch_borehole_transformer import (
     PatchBoreholeE2ETrainingConfig,
     train_patch_borehole_transformer,
     load_patch_borehole_checkpoint,
 )
-from .train_patch_borehole_cls_transformer import (
+from .belief_models.train_patch_borehole_cls_transformer import (
     PatchBoreholeCLSE2ETrainingConfig,
     train_patch_borehole_cls_transformer,
     load_patch_borehole_cls_checkpoint,
 )
-from .train_variable_aware_patch_borehole_transformer import (
+from .belief_models.train_variable_aware_patch_borehole_transformer import (
     VariableAwarePatchBoreholeE2ETrainingConfig,
     train_variable_aware_patch_borehole_transformer,
     load_variable_aware_patch_borehole_checkpoint,
 )
-from .train_variable_aware_patch_borehole_uncertainty_transformer import (
+from .belief_models.train_variable_aware_patch_borehole_uncertainty_transformer import (
     VariableAwarePatchBoreholeUncertaintyE2ETrainingConfig,
     train_variable_aware_patch_uncertainty_borehole_transformer,
     load_variable_aware_patch_uncertainty_borehole_checkpoint,

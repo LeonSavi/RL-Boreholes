@@ -27,10 +27,10 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
-from ..datasets import GeologicalBeliefDataset
-from ..utils import TargetNormalizer
-from ..baselines import evaluate_baselines
-from ..training_utils import (
+from ...datasets import GeologicalBeliefDataset
+from ...utils import TargetNormalizer
+from ...baselines import evaluate_baselines
+from ...training_utils import (
     DRILL_BINS,
     validate_by_drill_bins,
     validate,
@@ -42,7 +42,7 @@ from ..training_utils import (
     load_model_encoder_checkpoint,
     save_checkpoint_model,
 )
-from ..models.map_encoders.map_belief_transformer import MapBeliefTransformer
+from ...models.belief_models.map_encoders.map_belief_transformer import MapBeliefTransformer
 from .training_configs import MapBeliefTrainingConfig
 
 # ---------------------------------------------------------------------------
@@ -230,7 +230,7 @@ def train_map_belief(
     # ---- optional validation plots ----------------------------------------------
     if plot_dir is not None:
         if cfg.use_sequential_dataset:
-            from ..sequential_eval import save_sequential_val_plots
+            from ...sequential_eval import save_sequential_val_plots
 
             save_sequential_val_plots(
                 model,
@@ -280,7 +280,7 @@ def train_map_belief(
 
     # ---- sequential step metrics -----------------------------------------------
     if cfg.use_sequential_dataset:
-        from ..sequential_eval import validate_by_step
+        from ...sequential_eval import validate_by_step
 
         step_metrics = validate_by_step(model, val_ds, normalizer, device)
         if step_metrics:
@@ -309,7 +309,7 @@ def train_map_belief(
     save_no_ore_metrics(no_ore_metrics, checkpoint_dir, verbose=verbose)
 
     if cfg.use_sequential_dataset:
-        from ..sequential_eval import validate_no_ore_by_step
+        from ...sequential_eval import validate_no_ore_by_step
 
         no_ore_step = validate_no_ore_by_step(
             model,

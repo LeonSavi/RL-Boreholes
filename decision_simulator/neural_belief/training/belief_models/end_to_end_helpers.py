@@ -18,8 +18,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
-from ..utils import TargetNormalizer
-from ..training_utils import DRILL_BINS, pearson_correlation
+from ...utils import TargetNormalizer
+from ...training_utils import DRILL_BINS, pearson_correlation
 
 
 # ---------------------------------------------------------------------------
@@ -228,7 +228,7 @@ def _save_e2e_map_val_plots(
     import matplotlib
     matplotlib.use("Agg")
 
-    from ..visualize import plot_belief_sample
+    from ...visualize import plot_belief_sample
 
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     out_dir = Path(plot_dir) / timestamp
@@ -297,7 +297,7 @@ def _save_e2e_map_sequential_val_plots(
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    from ..visualize import plot_belief_sample
+    from ...visualize import plot_belief_sample
 
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     base_dir = Path(plot_dir) / timestamp

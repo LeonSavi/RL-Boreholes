@@ -1,4 +1,4 @@
-"""In-memory map container and drill-pattern helpers for neural-belief training.
+"""In-memory map container for neural-belief training.
 
 The :class:`NpzMap` dataclass holds a loaded batch of maps and provides
 encoding and dataset-construction helpers consumed by the training pipeline.
@@ -13,26 +13,10 @@ import numpy as np
 import torch
 
 from .datasets import BeliefDatasetConfig, GeologicalBeliefDataset
-from .models.borehole_encoders.autoencoder import standardise
+from .models import standardise
 from decision_simulator.resources import DecisionSimulationResources
 
-# Drill pattern helper
-# ---------------------------------------------------------------------------
-
 _DEFAULT_PREFIX_STEPS = [1, 2, 3, 5, 8, 10, 15]
-
-
-def _unpack_drill_patterns(
-    locs: np.ndarray,
-    vals: np.ndarray,
-    counts: np.ndarray,
-) -> list[tuple[list[tuple[int, int]], list[float]]]:
-    samples = []
-    for i, k in enumerate(counts):
-        drill_locs = [(int(locs[i, j, 0]), int(locs[i, j, 1])) for j in range(k)]
-        ore_vals = [float(vals[i, j]) for j in range(k)]
-        samples.append((drill_locs, ore_vals))
-    return samples
 
 
 # ---------------------------------------------------------------------------

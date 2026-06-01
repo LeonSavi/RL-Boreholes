@@ -31,7 +31,20 @@ import h5py
 import numpy as np
 
 from .datasets import BeliefDatasetConfig
-from .map_cache import NpzMap, _unpack_drill_patterns
+from .map_cache import NpzMap
+
+
+def unpack_drill_patterns(
+    locs: np.ndarray,
+    vals: np.ndarray,
+    counts: np.ndarray,
+) -> list[tuple[list[tuple[int, int]], list[float]]]:
+    samples = []
+    for i, k in enumerate(counts):
+        drill_locs = [(int(locs[i, j, 0]), int(locs[i, j, 1])) for j in range(k)]
+        ore_vals = [float(vals[i, j]) for j in range(k)]
+        samples.append((drill_locs, ore_vals))
+    return samples
 
 
 class HDF5MapStore:
@@ -78,7 +91,7 @@ class HDF5MapStore:
                 borehole_arrays.append(hf["boreholes"][pos].astype(np.float32))
                 targets.append(hf["yield_target"][pos].astype(np.float32))
                 drill_patterns.append(
-                    _unpack_drill_patterns(
+                    unpack_drill_patterns(
                         hf["drill_locs"][pos],
                         hf["drill_ore_vals"][pos],
                         hf["drill_counts"][pos],
