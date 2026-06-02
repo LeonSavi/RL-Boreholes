@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 from pathlib import Path
 from typing import Literal
@@ -45,7 +46,12 @@ from .training import (
     VariableAwarePatchBoreholeUncertaintyE2ETrainingConfig,
     train_variable_aware_patch_uncertainty_borehole_transformer,
     load_variable_aware_patch_uncertainty_borehole_checkpoint,
+    GuidedExplorationConfig,
+    GuidedE2EMapDataset,
+    train_guided_exploration_belief,
+    load_guided_belief_checkpoint,
 )
+from .training.belief_models.train_guided_exploration_belief import _load_guide_model
 
 _DEBUG_UNET: dict = {
     "n_train_maps": 2,
@@ -918,6 +924,8 @@ def train_end_to_end_from_colab(
     n_sequences_per_map: int = 3,
     prefix_steps: list[int] | None = None,
     bh_encoder_model: Literal["cnn", "patch", "cls", "variable_aware", "variable_aware_uncertainty"] = "cnn",
+    guided_training: bool = False,
+    guide_ckpt_path: str | Path | None = None,
     **overrides,
 ) -> tuple[object, list[dict]]:
     """Train the end-to-end map belief transformer from a Colab notebook.
@@ -1087,6 +1095,35 @@ def train_end_to_end_from_colab(
     cfg.n_x = train_cache.n_x
     cfg.n_y = train_cache.n_y
 
+    # ---- guided-exploration curriculum ----------------------------------------
+    resolved_guide_path: str | None = None
+    if guided_training and guide_ckpt_path is not None:
+        _gp = Path(guide_ckpt_path)
+        if not _gp.is_absolute():
+            _gp = root / _gp
+        resolved_guide_path = str(_gp)
+
+    guided_cfg: GuidedExplorationConfig | None = None
+    if guided_training:
+        # Build a GuidedExplorationConfig for curriculum parameters.
+        # Filter overrides to only fields known to GuidedExplorationConfig so
+        # that model-specific keys (e.g. bh_patch_size) do not raise errors.
+        _guided_valid = {f.name for f in dataclasses.fields(GuidedExplorationConfig)}
+        _guided_overrides = {
+            k: v for k, v in {**overrides, **seq_overrides}.items()
+            if k in _guided_valid
+        }
+        guided_cfg = build_training_config(
+            GuidedExplorationConfig,
+            {
+                **(_DEBUG_E2E if debug else {}),
+                **_guided_overrides,
+                **({"guide_ckpt_path": resolved_guide_path} if resolved_guide_path else {}),
+            },
+        )
+        guided_cfg.n_x = train_cache.n_x
+        guided_cfg.n_y = train_cache.n_y
+
     print(f"\nnorm_stats_from  : {norm_stats_from}")
     print(f"bh_encoder_model : {bh_encoder_model}")
     if is_patch or is_cls or is_var_aware or is_var_aware_uncertainty:
@@ -1100,16 +1137,52 @@ def train_end_to_end_from_colab(
     if cfg.use_sequential_dataset:
         print(f"n_sequences      : {cfg.n_sequences_per_map}")
         print(f"prefix_steps     : {cfg.prefix_steps}")
+    if guided_training:
+        print("guided_training  : True")
+        print(f"p_guided         : {guided_cfg.p_guided:.0%}")
+        print(f"mode split       : A={guided_cfg.p_mode_a:.0%}  AB={guided_cfg.p_mode_ab:.0%}  AC={guided_cfg.p_mode_ac:.0%}")
+        print(f"phase1_drills    : {guided_cfg.phase1_drills}")
+        print(f"guide model      : {resolved_guide_path or 'heuristic (distance-from-drills)'}")
     print(f"Training config  :\n{cfg}\n")
 
-    print("Building training dataset ...")
-    train_ds = E2EMapDataset.from_cache(
-        train_cache, resources, cfg, verbose=True, is_val=False
-    )
-    print("Building validation dataset ...")
-    val_ds = E2EMapDataset.from_cache(
-        val_cache, resources, cfg, verbose=True, is_val=True
-    )
+    is_cnn = not (is_patch or is_cls or is_var_aware or is_var_aware_uncertainty)
+
+    if guided_training and is_cnn:
+        # train_guided_exploration_belief builds datasets internally from the caches,
+        # so we skip the pre-build step here.
+        train_ds = val_ds = None
+    elif guided_training:
+        # For non-CNN models build guided datasets externally and pass them in.
+        # Load the guide model from checkpoint if one was given; otherwise fall
+        # back to the distance-from-drills heuristic (guide_model=None).
+        _guide_model = (
+            _load_guide_model(resolved_guide_path, device)
+            if resolved_guide_path is not None
+            else None
+        )
+        if _guide_model is not None:
+            print(f"  guide model loaded from {resolved_guide_path}")
+        print("Building guided training dataset ...")
+        train_ds = GuidedE2EMapDataset.from_cache_guided(
+            train_cache, resources, guided_cfg,
+            guide_model=_guide_model, normalizer=None,
+            device=device, verbose=True, is_val=False,
+        )
+        print("Building guided validation dataset (random sequences) ...")
+        val_ds = GuidedE2EMapDataset.from_cache_guided(
+            val_cache, resources, guided_cfg,
+            guide_model=_guide_model, normalizer=None,
+            device=device, verbose=True, is_val=True,
+        )
+    else:
+        print("Building training dataset ...")
+        train_ds = E2EMapDataset.from_cache(
+            train_cache, resources, cfg, verbose=True, is_val=False
+        )
+        print("Building validation dataset ...")
+        val_ds = E2EMapDataset.from_cache(
+            val_cache, resources, cfg, verbose=True, is_val=True
+        )
 
     if is_var_aware_uncertainty:
         trained_model, _, run_dir = train_variable_aware_patch_uncertainty_borehole_transformer(
@@ -1168,22 +1241,38 @@ def train_end_to_end_from_colab(
             ckpt_dir / "patch_borehole_best.pt", device=device
         )
     else:
-        trained_model, _ = train_end_to_end_map_belief(
-            resources=resources,
-            cfg=cfg,
-            device=device,
-            checkpoint_dir=ckpt_dir,
-            plot_dir=ckpt_dir / "plots",
-            verbose=True,
-            train_ds=train_ds,
-            val_ds=val_ds,
-        )
-        _, _, _, history = load_e2e_map_belief_checkpoint(
-            ckpt_dir / "e2e_map_belief_best.pt", device=device
-        )
+        if guided_training:
+            trained_model, _ = train_guided_exploration_belief(
+                resources=resources,
+                cfg=guided_cfg,
+                device=device,
+                checkpoint_dir=ckpt_dir,
+                train_cache=train_cache,
+                val_cache=val_cache,
+                plot_dir=ckpt_dir / "plots",
+                verbose=True,
+            )
+            _, _, _, history = load_guided_belief_checkpoint(
+                ckpt_dir / "guided_belief_best.pt", device=device
+            )
+        else:
+            trained_model, _ = train_end_to_end_map_belief(
+                resources=resources,
+                cfg=cfg,
+                device=device,
+                checkpoint_dir=ckpt_dir,
+                plot_dir=ckpt_dir / "plots",
+                verbose=True,
+                train_ds=train_ds,
+                val_ds=val_ds,
+            )
+            _, _, _, history = load_e2e_map_belief_checkpoint(
+                ckpt_dir / "e2e_map_belief_best.pt", device=device
+            )
 
     print(
         f"\nSmoke test passed: checkpoint loaded with {len(history)} epoch(s) of history."
     )
 
     return trained_model, history
+

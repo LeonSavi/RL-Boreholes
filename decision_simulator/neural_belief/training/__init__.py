@@ -77,6 +77,13 @@ from .belief_models.train_variable_aware_patch_borehole_uncertainty_transformer 
     train_variable_aware_patch_uncertainty_borehole_transformer,
     load_variable_aware_patch_uncertainty_borehole_checkpoint,
 )
+from .belief_models.train_guided_exploration_belief import (
+    GuidedExplorationConfig,
+    GuidedE2EMapDataset,
+    GuidedTrainingStats,
+    train_guided_exploration_belief,
+    load_guided_belief_checkpoint,
+)
 
 # Shared validation utilities re-exported here for callers that previously
 # imported validate_by_drill_bins from decision_simulator.neural_belief.training
@@ -125,6 +132,12 @@ __all__ = [
     "VariableAwarePatchBoreholeUncertaintyE2ETrainingConfig",
     "train_variable_aware_patch_uncertainty_borehole_transformer",
     "load_variable_aware_patch_uncertainty_borehole_checkpoint",
+    # Guided-exploration curriculum
+    "GuidedExplorationConfig",
+    "GuidedE2EMapDataset",
+    "GuidedTrainingStats",
+    "train_guided_exploration_belief",
+    "load_guided_belief_checkpoint",
     # Placeholder
     "train_raw_borehole_belief",
     # Shared utilities
