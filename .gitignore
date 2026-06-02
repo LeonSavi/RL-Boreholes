@@ -36,3 +36,5 @@ test.py
 *.npy
 
 .claude/
+
+decision_simulator/plots

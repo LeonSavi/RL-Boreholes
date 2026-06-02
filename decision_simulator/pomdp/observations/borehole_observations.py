@@ -246,3 +246,134 @@ def run_initial_random_drills(
         drilled.add(tuple(loc))
     unvisited = [c for c in all_candidate_borehole_coords if tuple(c) not in drilled]
     return observations, unvisited
+
+
+# ---------------------------------------------------------------------------
+# POMDP observation state
+# ---------------------------------------------------------------------------
+
+
+class BoreholeObservationState:
+    """Tracks drilled borehole observations for the POMDP belief model.
+
+    Responsibilities
+    ----------------
+    - Store drilled positions, standardised borehole profiles, and raw ore values.
+    - Prevent duplicate drilling.
+    - Build model-ready input tensors via to_model_inputs().
+
+    Design note
+    -----------
+    Ore values are stored raw (in ore-value space). The NeuralBeliefUpdater
+    applies target normalisation before passing them to the belief model.
+    Borehole profiles are stored already standardised (z-scored per variable)
+    as returned by DrillingEnvironment.drill().
+    """
+
+    def __init__(self, n_x: int, n_y: int) -> None:
+        self.n_x = n_x
+        self.n_y = n_y
+        self._positions: list[tuple[int, int]] = []
+        self._boreholes: list[np.ndarray] = []  # each (V, D), standardised
+        self._ore_values: list[float] = []
+        self._observed: set[tuple[int, int]] = set()
+
+    def add_observation(
+        self,
+        i: int,
+        j: int,
+        borehole: np.ndarray,
+        ore_value: float,
+    ) -> None:
+        """Record a new drilled borehole observation.
+
+        Parameters
+        ----------
+        i, j      : grid coordinates of the drilled cell
+        borehole  : (V, D) float32 standardised borehole profile
+        ore_value : raw peak ore yield at this location
+
+        Raises
+        ------
+        ValueError if (i, j) has already been observed.
+        """
+        if (i, j) in self._observed:
+            raise ValueError(
+                f"Location ({i}, {j}) has already been drilled. "
+                "Duplicate observations are not allowed."
+            )
+        self._positions.append((i, j))
+        self._boreholes.append(borehole)
+        self._ore_values.append(float(ore_value))
+        self._observed.add((i, j))
+
+    def is_observed(self, i: int, j: int) -> bool:
+        """Return True if cell (i, j) has already been drilled."""
+        return (i, j) in self._observed
+
+    def get_observed_mask(self) -> np.ndarray:
+        """Return a (n_x, n_y) bool array; True where a cell has been drilled."""
+        mask = np.zeros((self.n_x, self.n_y), dtype=bool)
+        for i, j in self._positions:
+            mask[i, j] = True
+        return mask
+
+    def to_model_inputs(self) -> dict:
+        """Build model-ready input arrays from current observations.
+
+        Returns
+        -------
+        dict with keys:
+            boreholes    : (K, V, D) float32 — standardised borehole profiles
+            ore_vals     : (K,)      float32 — raw ore values (caller normalises)
+            positions    : (K, 2)    float32 — normalised [0, 1] grid coordinates;
+                           positions[k] = [i / (n_x - 1), j / (n_y - 1)]
+            padding_mask : (K,)      bool    — all False (no padding at inference)
+
+        Raises
+        ------
+        ValueError if no observations have been recorded yet.
+        """
+        K = len(self._positions)
+        if K == 0:
+            raise ValueError(
+                "to_model_inputs() called with no observations. "
+                "Drill at least one borehole first."
+            )
+
+        boreholes = np.stack(self._boreholes, axis=0)  # (K, V, D)
+        ore_vals = np.array(self._ore_values, dtype=np.float32)  # (K,)
+
+        positions = np.zeros((K, 2), dtype=np.float32)
+        for k, (i, j) in enumerate(self._positions):
+            positions[k, 0] = i / (self.n_x - 1)
+            positions[k, 1] = j / (self.n_y - 1)
+
+        padding_mask = np.zeros(K, dtype=bool)  # no padding at single-sample inference
+
+        return {
+            "boreholes": boreholes,
+            "ore_vals": ore_vals,
+            "positions": positions,
+            "padding_mask": padding_mask,
+        }
+
+    def get_sparse_ore_map(self) -> np.ndarray:
+        """Return a (n_x, n_y) float32 array with raw ore values at drilled cells.
+
+        Undrilled cells are zero. Useful as the first panel of per-step plots.
+        """
+        sparse = np.zeros((self.n_x, self.n_y), dtype=np.float32)
+        for (i, j), ore in zip(self._positions, self._ore_values):
+            sparse[i, j] = ore
+        return sparse
+
+    @property
+    def observed_ore_values(self) -> list[float]:
+        """Raw ore values at all drilled locations, in drill order."""
+        return list(self._ore_values)
+
+    @property
+    def n_drills(self) -> int:
+        """Number of boreholes drilled so far."""
+        return len(self._positions)
