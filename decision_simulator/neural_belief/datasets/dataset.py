@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import torch
 from torch.utils.data import Dataset
 
-from ..utils import (
+from ..training_utils import (
     TargetNormalizer,
     make_coordinate_grid,
 )

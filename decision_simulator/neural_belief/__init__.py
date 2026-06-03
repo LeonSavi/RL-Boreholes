@@ -4,7 +4,7 @@ from .datasets import (
     GeologicalBeliefDataset,
 )
 from .map_cache import NpzMap
-from .utils import TargetNormalizer
+from .training_utils import TargetNormalizer
 from .training import (
     NeuralBeliefTrainingConfig,
     train_neural_belief,
@@ -20,7 +20,7 @@ from .inference import (
     build_ore_map_from_observations,
 )
 from .baselines import evaluate_baselines
-from .visualize import plot_belief_sample
+from decision_simulator.utils.plotting import plot_belief_sample
 from .colab import (
     train_belief_from_colab,
     compare_belief_encoders_from_colab,

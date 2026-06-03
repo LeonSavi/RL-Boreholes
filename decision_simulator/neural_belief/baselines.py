@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 from torch.utils.data import DataLoader
 
-from .utils import TargetNormalizer
+from .training_utils import TargetNormalizer
 
 
 def _mean_predict(sparse_ore: np.ndarray, mask: np.ndarray) -> np.ndarray:

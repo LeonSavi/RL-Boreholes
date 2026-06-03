@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-from decision_simulator.neural_belief.utils import TargetNormalizer
+from decision_simulator.neural_belief.training_utils import TargetNormalizer
 from decision_simulator.pomdp.beliefs.belief_state import BeliefState
 from decision_simulator.pomdp.observations.borehole_observations import (
     BoreholeObservationState,

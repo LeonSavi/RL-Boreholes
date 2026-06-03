@@ -28,7 +28,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from ...datasets import GeologicalBeliefDataset
-from ...utils import TargetNormalizer
+from ...training_utils import TargetNormalizer
 from ...baselines import evaluate_baselines
 from ...training_utils import (
     DRILL_BINS,

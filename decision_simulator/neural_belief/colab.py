@@ -18,7 +18,7 @@ from decision_simulator.resources import (
 from .datasets import GeologicalBeliefDataset
 from .map_hdf5 import HDF5MapDirectory, HDF5MapStore
 from .models import UNetBelief
-from .utils import TargetNormalizer
+from .training_utils import TargetNormalizer
 
 from .training import (
     NeuralBeliefTrainingConfig,

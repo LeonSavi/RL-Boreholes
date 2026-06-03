@@ -20,7 +20,7 @@ from torch.utils.data import DataLoader
 
 from ...datasets import GeologicalBeliefDataset
 from ...models.belief_models.map_encoders.unet_belief import UNetBelief
-from ...utils import TargetNormalizer
+from ...training_utils import TargetNormalizer
 from ...baselines import evaluate_baselines
 from ...training_utils import (
     DRILL_BINS,

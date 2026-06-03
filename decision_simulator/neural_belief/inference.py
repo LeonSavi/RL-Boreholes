@@ -4,7 +4,7 @@ import numpy as np
 import torch
 
 from .models import UNetBelief
-from .utils import TargetNormalizer
+from .training_utils import TargetNormalizer
 
 
 def predict_ore_map(

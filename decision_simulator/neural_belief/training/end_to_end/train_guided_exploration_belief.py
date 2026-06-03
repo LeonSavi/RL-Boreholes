@@ -61,7 +61,7 @@ from ...models.belief_models.borehole_encoders.autoencoder import standardise
 from ...models.belief_models.end_to_end.end_to_end_map_belief_transformer import (
     EndToEndMapBeliefTransformer,
 )
-from ...utils import TargetNormalizer
+from ...training_utils import TargetNormalizer
 from ...training_utils import (
     false_positive_loss,
     load_model_encoder_checkpoint,

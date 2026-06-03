@@ -39,7 +39,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from decision_simulator.resources import DecisionSimulationResources
-from ...utils import TargetNormalizer
+from ...training_utils import TargetNormalizer
 from ...training_utils import (
     DRILL_BINS,
     export_history,
