@@ -23,8 +23,8 @@ from .utils import TargetNormalizer
 from .training import (
     NeuralBeliefTrainingConfig,
     MapBeliefTrainingConfig,
-    E2EMapBeliefTrainingConfig,
-    PatchBoreholeE2ETrainingConfig,
+    E2EMapBeliefConfig,
+    PatchBoreholeConfig,
     E2EMapDataset,
     build_training_config,
     export_history,
@@ -37,13 +37,13 @@ from .training import (
     load_e2e_map_belief_checkpoint,
     train_patch_borehole_transformer,
     load_patch_borehole_checkpoint,
-    PatchBoreholeCLSE2ETrainingConfig,
+    PatchBoreholeCLSConfig,
     train_patch_borehole_cls_transformer,
     load_patch_borehole_cls_checkpoint,
-    VariableAwarePatchBoreholeE2ETrainingConfig,
+    VariableAwarePatchBoreholeConfig,
     train_variable_aware_patch_borehole_transformer,
     load_variable_aware_patch_borehole_checkpoint,
-    VariableAwarePatchBoreholeUncertaintyE2ETrainingConfig,
+    VariableAwarePatchBoreholeUncertaintyConfig,
     train_variable_aware_patch_uncertainty_borehole_transformer,
     load_variable_aware_patch_uncertainty_borehole_checkpoint,
     GuidedExplorationConfig,
@@ -1061,19 +1061,19 @@ def train_end_to_end_from_colab(
     is_var_aware = bh_encoder_model == "variable_aware"
     is_var_aware_uncertainty = bh_encoder_model == "variable_aware_uncertainty"
     if is_var_aware_uncertainty:
-        cfg_class = VariableAwarePatchBoreholeUncertaintyE2ETrainingConfig
+        cfg_class = VariableAwarePatchBoreholeUncertaintyConfig
         debug_defaults = _DEBUG_VAR_AWARE_UNCERTAINTY if debug else {}
     elif is_var_aware:
-        cfg_class = VariableAwarePatchBoreholeE2ETrainingConfig
+        cfg_class = VariableAwarePatchBoreholeConfig
         debug_defaults = _DEBUG_VAR_AWARE if debug else {}
     elif is_cls:
-        cfg_class = PatchBoreholeCLSE2ETrainingConfig
+        cfg_class = PatchBoreholeCLSConfig
         debug_defaults = _DEBUG_CLS if debug else {}
     elif is_patch:
-        cfg_class = PatchBoreholeE2ETrainingConfig
+        cfg_class = PatchBoreholeConfig
         debug_defaults = _DEBUG_PATCH if debug else {}
     else:
-        cfg_class = E2EMapBeliefTrainingConfig
+        cfg_class = E2EMapBeliefConfig
         debug_defaults = _DEBUG_E2E if debug else {}
 
     cfg = build_training_config(

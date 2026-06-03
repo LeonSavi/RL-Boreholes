@@ -61,7 +61,7 @@ from ...training_utils import (
     load_model_encoder_checkpoint,
     save_checkpoint_model,
 )
-from .training_configs import E2EMapBeliefTrainingConfig
+from .training_configs import E2EMapBeliefConfig
 from .helpers import validate_e2e_map, model_validation, collate_e2e_map
 
 
@@ -113,7 +113,7 @@ class E2EMapDataset(Dataset):
         cls,
         cache: NpzMap,
         resources: DecisionSimulationResources,
-        cfg: E2EMapBeliefTrainingConfig,
+        cfg: E2EMapBeliefConfig,
         verbose: bool = True,
         is_val: bool = False,
     ) -> "E2EMapDataset":
@@ -209,7 +209,7 @@ class E2EMapDataset(Dataset):
 
 def train_end_to_end_map_belief(
     resources: DecisionSimulationResources,
-    cfg: E2EMapBeliefTrainingConfig,
+    cfg: E2EMapBeliefConfig,
     device: str,
     checkpoint_dir: Path,
     plot_dir: Path | None = None,
@@ -407,7 +407,7 @@ def train_end_to_end_map_belief(
 def load_e2e_map_belief_checkpoint(
     path: Path,
     device: str = "cpu",
-) -> tuple[EndToEndMapBeliefTransformer, E2EMapBeliefTrainingConfig, TargetNormalizer, list[dict]]:
+) -> tuple[EndToEndMapBeliefTransformer, E2EMapBeliefConfig, TargetNormalizer, list[dict]]:
     """Load an EndToEndMapBeliefTransformer checkpoint.
 
     Returns
@@ -420,5 +420,5 @@ def load_e2e_map_belief_checkpoint(
         return EndToEndMapBeliefTransformer(ckpt["cfg"].to_model_config())
 
     return load_model_encoder_checkpoint(
-        path, _model_fn, E2EMapBeliefTrainingConfig, device
+        path, _model_fn, E2EMapBeliefConfig, device
     )

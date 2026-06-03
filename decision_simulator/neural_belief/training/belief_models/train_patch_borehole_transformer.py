@@ -17,7 +17,6 @@ patch_borehole_last.pt  — final epoch
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -34,117 +33,11 @@ from ...training_utils import (
     save_checkpoint_model,
 )
 from ...models.belief_models.end_to_end.patch_borehole_transformer import (
-    PatchBoreholeEndToEndConfig,
     PatchBoreholeEndToEndMapBeliefTransformer,
 )
 from .train_end_to_end_map_belief import E2EMapDataset
 from .helpers import validate_e2e_map, model_validation, collate_e2e_map
-
-
-# ---------------------------------------------------------------------------
-# Training configuration
-# ---------------------------------------------------------------------------
-
-@dataclass
-class PatchBoreholeE2ETrainingConfig:
-    """Training hyperparameters for PatchBoreholeEndToEndMapBeliefTransformer.
-
-    Identical to E2EMapBeliefTrainingConfig except that ``bh_channels`` is
-    replaced by ``bh_patch_size`` for the patch-based borehole encoder.
-    """
-
-    # Dataset
-    n_train_maps: int = 50
-    samples_per_map: int = 20
-    n_val_maps: int = 10
-    val_samples_per_map: int = 10
-    min_drills: int = 1
-    max_drills: int = 15
-
-    # Sequential dataset mode: ordered drill sequences at fixed prefix lengths
-    use_sequential_dataset: bool = False
-    n_sequences_per_map: int = 3
-    prefix_steps: list[int] = field(default_factory=lambda: [1, 2, 3, 5, 8, 10, 15])
-
-    # Borehole dimensions — resolved from resources at training time
-    n_variables: int = 5
-    n_depth: int = 440
-
-    # Borehole encoder: depth patch size
-    bh_patch_size: int = 20
-
-    # Borehole encoder: transformer over patch tokens
-    bh_d_model: int = 128
-    bh_n_heads: int = 4
-    bh_n_layers: int = 2
-
-    # Borehole embedding output dimension
-    latent_dim: int = 128
-
-    # Spatial grid — set automatically from cache in train_patch_borehole_transformer()
-    n_x: int = 32
-    n_y: int = 32
-
-    # Map belief transformer architecture
-    d_model: int = 256
-    n_heads: int = 8
-    n_encoder_layers: int = 4
-    d_ff: int = 1024
-    dropout: float = 0.20
-    head_hidden_dim: int = 128
-    pe_max_freq: float = 10000.0
-
-    # Target normalisation
-    norm_mode: str = "log1p"  # "log1p" | "zscore" | "none"
-
-    # Optimisation
-    batch_size: int = 8
-    lr: float = 1e-4
-    weight_decay: float = 1e-4
-    n_epochs: int = 50
-    grad_clip_norm: float = 1.0  # 0.0 = disabled
-
-    # Early stopping
-    early_stopping: bool = True
-    patience: int = 10
-    min_delta: float = 0.0
-
-    # False-positive penalty
-    use_false_positive_penalty: bool = False
-    false_positive_weight: float = 0.1
-    false_positive_threshold: float = 0.05
-
-    # Misc
-    seed: int = 42
-    borehole_encoder: str = "patch_borehole"
-    n_val_plots: int = 20
-
-    def __post_init__(self) -> None:
-        if self.d_model % self.n_heads != 0:
-            raise ValueError(
-                f"d_model={self.d_model} must be divisible by n_heads={self.n_heads}"
-            )
-
-    def to_model_config(self) -> PatchBoreholeEndToEndConfig:
-        """Build a PatchBoreholeEndToEndConfig for model construction."""
-        return PatchBoreholeEndToEndConfig(
-            n_variables=self.n_variables,
-            n_depth=self.n_depth,
-            bh_patch_size=self.bh_patch_size,
-            bh_d_model=self.bh_d_model,
-            bh_n_heads=self.bh_n_heads,
-            bh_n_layers=self.bh_n_layers,
-            latent_dim=self.latent_dim,
-            n_x=self.n_x,
-            n_y=self.n_y,
-            d_model=self.d_model,
-            n_heads=self.n_heads,
-            n_encoder_layers=self.n_encoder_layers,
-            d_ff=self.d_ff,
-            dropout=self.dropout,
-            head_hidden_dim=self.head_hidden_dim,
-            pe_max_freq=self.pe_max_freq,
-        )
+from .training_configs import PatchBoreholeConfig
 
 
 # ---------------------------------------------------------------------------
@@ -153,7 +46,7 @@ class PatchBoreholeE2ETrainingConfig:
 
 def train_patch_borehole_transformer(
     resources: DecisionSimulationResources,
-    cfg: PatchBoreholeE2ETrainingConfig,
+    cfg: PatchBoreholeConfig,
     device: str,
     checkpoint_dir: Path,
     plot_dir: Path | None = None,
@@ -357,7 +250,7 @@ def train_patch_borehole_transformer(
 def load_patch_borehole_checkpoint(
     path: Path,
     device: str = "cpu",
-) -> tuple[PatchBoreholeEndToEndMapBeliefTransformer, PatchBoreholeE2ETrainingConfig, TargetNormalizer, list[dict]]:
+) -> tuple[PatchBoreholeEndToEndMapBeliefTransformer, PatchBoreholeConfig, TargetNormalizer, list[dict]]:
     """Load a PatchBoreholeEndToEndMapBeliefTransformer checkpoint.
 
     Returns
@@ -370,5 +263,5 @@ def load_patch_borehole_checkpoint(
         return PatchBoreholeEndToEndMapBeliefTransformer(ckpt["cfg"].to_model_config())
 
     return load_model_encoder_checkpoint(
-        path, _model_fn, PatchBoreholeE2ETrainingConfig, device
+        path, _model_fn, PatchBoreholeConfig, device
     )

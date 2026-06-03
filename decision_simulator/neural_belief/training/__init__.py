@@ -9,16 +9,16 @@ train_map_belief(resources, cfg, device, checkpoint_dir, ...)
     Train MapBeliefTransformer. Config: MapBeliefTrainingConfig.
 
 train_end_to_end_map_belief(resources, cfg, device, checkpoint_dir, ...)
-    Train EndToEndMapBeliefTransformer. Config: E2EMapBeliefTrainingConfig.
+    Train EndToEndMapBeliefTransformer. Config: E2EMapBeliefConfig.
 
 train_patch_borehole_transformer(resources, cfg, device, checkpoint_dir, ...)
-    Train PatchBoreholeEndToEndMapBeliefTransformer. Config: PatchBoreholeE2ETrainingConfig.
+    Train PatchBoreholeEndToEndMapBeliefTransformer. Config: PatchBoreholeConfig.
 
 train_patch_borehole_cls_transformer(resources, cfg, device, checkpoint_dir, ...)
-    Train PatchBoreholeCLSEndToEndMapBeliefTransformer. Config: PatchBoreholeCLSE2ETrainingConfig.
+    Train PatchBoreholeCLSEndToEndMapBeliefTransformer. Config: PatchBoreholeCLSConfig.
 
 train_variable_aware_patch_borehole_transformer(resources, cfg, device, checkpoint_dir, ...)
-    Train VariableAwarePatchBoreholeEndToEndMapBeliefTransformer. Config: VariableAwarePatchBoreholeE2ETrainingConfig.
+    Train VariableAwarePatchBoreholeEndToEndMapBeliefTransformer. Config: VariableAwarePatchBoreholeConfig.
 
 train_raw_borehole_belief(...)
     Planned future training pipeline. Raises NotImplementedError.
@@ -40,7 +40,12 @@ continue to work without modification.
 from .belief_models.training_configs import (
     NeuralBeliefTrainingConfig,
     MapBeliefTrainingConfig,
-    E2EMapBeliefTrainingConfig,
+    BaseE2ETrainingConfig,
+    E2EMapBeliefConfig,
+    PatchBoreholeConfig,
+    PatchBoreholeCLSConfig,
+    VariableAwarePatchBoreholeConfig,
+    VariableAwarePatchBoreholeUncertaintyConfig,
 )
 from .belief_models.train_unet_belief import (
     train_neural_belief,
@@ -58,22 +63,18 @@ from .belief_models.train_end_to_end_map_belief import (
     load_e2e_map_belief_checkpoint,
 )
 from .belief_models.train_patch_borehole_transformer import (
-    PatchBoreholeE2ETrainingConfig,
     train_patch_borehole_transformer,
     load_patch_borehole_checkpoint,
 )
 from .belief_models.train_patch_borehole_cls_transformer import (
-    PatchBoreholeCLSE2ETrainingConfig,
     train_patch_borehole_cls_transformer,
     load_patch_borehole_cls_checkpoint,
 )
 from .belief_models.train_variable_aware_patch_borehole_transformer import (
-    VariableAwarePatchBoreholeE2ETrainingConfig,
     train_variable_aware_patch_borehole_transformer,
     load_variable_aware_patch_borehole_checkpoint,
 )
 from .belief_models.train_variable_aware_patch_borehole_uncertainty_transformer import (
-    VariableAwarePatchBoreholeUncertaintyE2ETrainingConfig,
     train_variable_aware_patch_uncertainty_borehole_transformer,
     load_variable_aware_patch_uncertainty_borehole_checkpoint,
 )
@@ -110,26 +111,28 @@ __all__ = [
     "MapBeliefTrainingConfig",
     "train_map_belief",
     "load_map_belief_checkpoint",
+    # E2E config base
+    "BaseE2ETrainingConfig",
     # End-to-end map belief
-    "E2EMapBeliefTrainingConfig",
+    "E2EMapBeliefConfig",
     "E2EMapDataset",
     "collate_e2e_map",
     "train_end_to_end_map_belief",
     "load_e2e_map_belief_checkpoint",
     # Patch borehole experiment (mean pooling)
-    "PatchBoreholeE2ETrainingConfig",
+    "PatchBoreholeConfig",
     "train_patch_borehole_transformer",
     "load_patch_borehole_checkpoint",
     # Patch borehole experiment (CLS token)
-    "PatchBoreholeCLSE2ETrainingConfig",
+    "PatchBoreholeCLSConfig",
     "train_patch_borehole_cls_transformer",
     "load_patch_borehole_cls_checkpoint",
     # Variable-aware patch borehole experiment
-    "VariableAwarePatchBoreholeE2ETrainingConfig",
+    "VariableAwarePatchBoreholeConfig",
     "train_variable_aware_patch_borehole_transformer",
     "load_variable_aware_patch_borehole_checkpoint",
     # Variable-aware patch borehole + uncertainty head
-    "VariableAwarePatchBoreholeUncertaintyE2ETrainingConfig",
+    "VariableAwarePatchBoreholeUncertaintyConfig",
     "train_variable_aware_patch_uncertainty_borehole_transformer",
     "load_variable_aware_patch_uncertainty_borehole_checkpoint",
     # Guided-exploration curriculum

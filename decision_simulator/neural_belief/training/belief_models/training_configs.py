@@ -6,6 +6,9 @@ from dataclasses import dataclass, field
 
 from ...models.belief_models.map_encoders.map_belief_transformer import MapBeliefConfig
 from ...models.belief_models.end_to_end.end_to_end_map_belief_transformer import EndToEndMapBeliefConfig
+from ...models.belief_models.end_to_end.patch_borehole_transformer import PatchBoreholeEndToEndConfig
+from ...models.belief_models.end_to_end.patch_borehole_cls_transformer import PatchBoreholeCLSEndToEndConfig
+from ...models.belief_models.end_to_end.variable_aware_patch_borehole_transformer import VariableAwarePatchBoreholeEndToEndConfig
 
 
 @dataclass
@@ -164,14 +167,8 @@ class MapBeliefTrainingConfig:
 
 
 @dataclass
-class E2EMapBeliefTrainingConfig:
-    """Hyperparameters for training EndToEndMapBeliefTransformer.
-
-    Combines the raw-borehole dataset fields from E2ETrainingConfig with the
-    map-reconstruction objective and transformer architecture from
-    MapBeliefTrainingConfig.  The model is trained end-to-end to reconstruct
-    the full ore map, not a single candidate value.
-    """
+class BaseE2ETrainingConfig:
+    """Common hyperparameters shared by all end-to-end map-belief training configs."""
 
     # Dataset
     n_train_maps: int = 50
@@ -190,18 +187,19 @@ class E2EMapBeliefTrainingConfig:
     n_variables: int = 5
     n_depth: int = 440
 
-    # Borehole encoder architecture (mirrors E2EConfig)
-    bh_channels: tuple[int, ...] = field(default_factory=lambda: (32, 64, 128, 256))
+    # Borehole encoder: transformer hyperparameters (shared across all encoder styles)
     bh_d_model: int = 128
     bh_n_heads: int = 4
     bh_n_layers: int = 2
+
+    # Borehole embedding output dimension
     latent_dim: int = 128
 
-    # Spatial grid — set automatically from cache in train_end_to_end_map_belief()
+    # Spatial grid — set automatically from dataset at training time
     n_x: int = 32
     n_y: int = 32
 
-    # Map belief transformer architecture (mirrors MapBeliefConfig)
+    # Map belief transformer architecture
     d_model: int = 256
     n_heads: int = 8
     n_encoder_layers: int = 4
@@ -213,7 +211,7 @@ class E2EMapBeliefTrainingConfig:
     # Target normalisation
     norm_mode: str = "log1p"  # "log1p" | "zscore" | "none"
 
-    # Optimisation — smaller batch than E2E because the map transformer is memory-heavy
+    # Optimisation
     batch_size: int = 8
     lr: float = 1e-4
     weight_decay: float = 1e-4
@@ -241,6 +239,16 @@ class E2EMapBeliefTrainingConfig:
                 f"d_model={self.d_model} must be divisible by n_heads={self.n_heads}"
             )
 
+
+@dataclass
+class E2EMapBeliefConfig(BaseE2ETrainingConfig):
+    """Hyperparameters for training EndToEndMapBeliefTransformer (CNN borehole encoder)."""
+
+    # CNN borehole encoder channel progression
+    bh_channels: tuple[int, ...] = field(default_factory=lambda: (32, 64, 128, 256))
+
+    borehole_encoder: str = "end_to_end"
+
     def to_model_config(self) -> EndToEndMapBeliefConfig:
         """Build an EndToEndMapBeliefConfig from the architectural fields."""
         return EndToEndMapBeliefConfig(
@@ -261,3 +269,173 @@ class E2EMapBeliefTrainingConfig:
             head_hidden_dim=self.head_hidden_dim,
             pe_max_freq=self.pe_max_freq,
         )
+
+
+@dataclass
+class PatchBoreholeConfig(BaseE2ETrainingConfig):
+    """Training hyperparameters for PatchBoreholeEndToEndMapBeliefTransformer."""
+
+    # Depth patch size for the patch-based borehole encoder
+    bh_patch_size: int = 20
+
+    borehole_encoder: str = "patch_borehole"
+
+    def to_model_config(self) -> PatchBoreholeEndToEndConfig:
+        """Build a PatchBoreholeEndToEndConfig for model construction."""
+        return PatchBoreholeEndToEndConfig(
+            n_variables=self.n_variables,
+            n_depth=self.n_depth,
+            bh_patch_size=self.bh_patch_size,
+            bh_d_model=self.bh_d_model,
+            bh_n_heads=self.bh_n_heads,
+            bh_n_layers=self.bh_n_layers,
+            latent_dim=self.latent_dim,
+            n_x=self.n_x,
+            n_y=self.n_y,
+            d_model=self.d_model,
+            n_heads=self.n_heads,
+            n_encoder_layers=self.n_encoder_layers,
+            d_ff=self.d_ff,
+            dropout=self.dropout,
+            head_hidden_dim=self.head_hidden_dim,
+            pe_max_freq=self.pe_max_freq,
+        )
+
+
+@dataclass
+class PatchBoreholeCLSConfig(BaseE2ETrainingConfig):
+    """Training hyperparameters for PatchBoreholeCLSEndToEndMapBeliefTransformer."""
+
+    # Depth patch size for the CLS-token patch borehole encoder
+    bh_patch_size: int = 20
+
+    borehole_encoder: str = "patch_borehole_cls"
+
+    def to_model_config(self) -> PatchBoreholeCLSEndToEndConfig:
+        """Build a PatchBoreholeCLSEndToEndConfig for model construction."""
+        return PatchBoreholeCLSEndToEndConfig(
+            n_variables=self.n_variables,
+            n_depth=self.n_depth,
+            bh_patch_size=self.bh_patch_size,
+            bh_d_model=self.bh_d_model,
+            bh_n_heads=self.bh_n_heads,
+            bh_n_layers=self.bh_n_layers,
+            latent_dim=self.latent_dim,
+            n_x=self.n_x,
+            n_y=self.n_y,
+            d_model=self.d_model,
+            n_heads=self.n_heads,
+            n_encoder_layers=self.n_encoder_layers,
+            d_ff=self.d_ff,
+            dropout=self.dropout,
+            head_hidden_dim=self.head_hidden_dim,
+            pe_max_freq=self.pe_max_freq,
+        )
+
+
+@dataclass
+class VariableAwarePatchBoreholeConfig(BaseE2ETrainingConfig):
+    """Training hyperparameters for VariableAwarePatchBoreholeEndToEndMapBeliefTransformer."""
+
+    # Depth patch size; encoder creates one token per (variable, patch) pair
+    bh_patch_size: int = 20
+
+    borehole_encoder: str = "variable_aware_patch"
+
+    def to_model_config(self) -> VariableAwarePatchBoreholeEndToEndConfig:
+        """Build a VariableAwarePatchBoreholeEndToEndConfig for model construction."""
+        return VariableAwarePatchBoreholeEndToEndConfig(
+            n_variables=self.n_variables,
+            n_depth=self.n_depth,
+            bh_patch_size=self.bh_patch_size,
+            bh_d_model=self.bh_d_model,
+            bh_n_heads=self.bh_n_heads,
+            bh_n_layers=self.bh_n_layers,
+            latent_dim=self.latent_dim,
+            n_x=self.n_x,
+            n_y=self.n_y,
+            d_model=self.d_model,
+            n_heads=self.n_heads,
+            n_encoder_layers=self.n_encoder_layers,
+            d_ff=self.d_ff,
+            dropout=self.dropout,
+            head_hidden_dim=self.head_hidden_dim,
+            pe_max_freq=self.pe_max_freq,
+        )
+
+
+@dataclass
+class VariableAwarePatchBoreholeUncertaintyConfig(BaseE2ETrainingConfig):
+    """Training hyperparameters for the uncertainty-head variant of VariableAwarePatchBorehole."""
+
+    # Depth patch size; encoder creates one token per (variable, patch) pair
+    bh_patch_size: int = 20
+
+    # Uncertainty head
+    use_uncertainty_head: bool = True
+    uncertainty_weight: float = 0.1
+
+    borehole_encoder: str = "variable_aware_patch_uncertainty"
+
+    def to_model_config(self) -> VariableAwarePatchBoreholeEndToEndConfig:
+        """Build a VariableAwarePatchBoreholeEndToEndConfig for model construction."""
+        return VariableAwarePatchBoreholeEndToEndConfig(
+            n_variables=self.n_variables,
+            n_depth=self.n_depth,
+            bh_patch_size=self.bh_patch_size,
+            bh_d_model=self.bh_d_model,
+            bh_n_heads=self.bh_n_heads,
+            bh_n_layers=self.bh_n_layers,
+            latent_dim=self.latent_dim,
+            n_x=self.n_x,
+            n_y=self.n_y,
+            d_model=self.d_model,
+            n_heads=self.n_heads,
+            n_encoder_layers=self.n_encoder_layers,
+            d_ff=self.d_ff,
+            dropout=self.dropout,
+            head_hidden_dim=self.head_hidden_dim,
+            pe_max_freq=self.pe_max_freq,
+        )
+
+
+@dataclass
+class GuidedExplorationConfig(E2EMapBeliefConfig):
+    """Extends E2EMapBeliefConfig with guided-curriculum knobs."""
+
+    # --- mixing ---
+    p_guided: float = 0.25          # fraction of sequences generated with guided drilling
+
+    # --- within-guided mode split (must sum to 1.0) ---
+    p_mode_a: float = 0.50          # Mode A: uncertainty-only
+    p_mode_ab: float = 0.25         # Mode AB: uncertainty + ore-assisted
+    p_mode_ac: float = 0.25         # Mode AC: uncertainty + boundary-assisted
+
+    # --- phase transition ---
+    phase1_drills: int = 1          # random drills before guided phase begins
+
+    # --- oracle feature thresholds ---
+    ore_top_pct: float = 0.10       # top-10% ore cells used for ore-assisted selection
+    boundary_ore_pct: float = 0.50  # percentile of nonzero ore used as boundary threshold
+
+    # --- guide model for Mode A ---
+    # Path to a checkpoint produced by train_variable_aware_patch_borehole_uncertainty_transformer.py
+    # or any model whose forward() returns (pred_ore, pred_uncertainty) or just pred_ore.
+    # Leave None to use the distance-from-drills heuristic instead.
+    guide_ckpt_path: str | None = None
+
+    # 0 = static guide (never refreshed); N = reload guide from lagged training ckpt every N epochs.
+    # Lagged update only works when guide_ckpt_path is None and the trained model has the
+    # same architecture as a model that can produce uncertainty (e.g. same EndToEndMapBeliefTransformer).
+    guide_update_interval: int = 0
+
+    # --- visualisation ---
+    n_viz_maps: int = 5             # training maps for which trajectory PNGs are saved
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        total = self.p_mode_a + self.p_mode_ab + self.p_mode_ac
+        if abs(total - 1.0) > 1e-6:
+            raise ValueError(
+                f"p_mode_a + p_mode_ab + p_mode_ac must sum to 1.0, got {total}"
+            )

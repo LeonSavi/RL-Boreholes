@@ -41,11 +41,10 @@ contains only the fields that the existing training loop produces: ``boreholes``
 
 from __future__ import annotations
 
-import dataclasses
 import datetime
 import json
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple
 
@@ -68,56 +67,9 @@ from ...training_utils import (
     load_model_encoder_checkpoint,
     save_checkpoint_model,
 )
-from .training_configs import E2EMapBeliefTrainingConfig
+from .training_configs import GuidedExplorationConfig
 from .train_end_to_end_map_belief import E2EMapDataset
 from .helpers import validate_e2e_map, model_validation, collate_e2e_map
-
-
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class GuidedExplorationConfig(E2EMapBeliefTrainingConfig):
-    """Extends E2EMapBeliefTrainingConfig with guided-curriculum knobs."""
-
-    # --- mixing ---
-    p_guided: float = 0.25          # fraction of sequences generated with guided drilling
-
-    # --- within-guided mode split (must sum to 1.0) ---
-    p_mode_a: float = 0.50          # Mode A: uncertainty-only
-    p_mode_ab: float = 0.25         # Mode AB: uncertainty + ore-assisted
-    p_mode_ac: float = 0.25         # Mode AC: uncertainty + boundary-assisted
-
-    # --- phase transition ---
-    phase1_drills: int = 1          # random drills before guided phase begins
-
-    # --- oracle feature thresholds ---
-    ore_top_pct: float = 0.10       # top-10% ore cells used for ore-assisted selection
-    boundary_ore_pct: float = 0.50  # percentile of nonzero ore used as boundary threshold
-
-    # --- guide model for Mode A ---
-    # Path to a checkpoint produced by train_variable_aware_patch_borehole_uncertainty_transformer.py
-    # or any model whose forward() returns (pred_ore, pred_uncertainty) or just pred_ore.
-    # Leave None to use the distance-from-drills heuristic instead.
-    guide_ckpt_path: str | None = None
-
-    # 0 = static guide (never refreshed); N = reload guide from lagged training ckpt every N epochs.
-    # Lagged update only works when guide_ckpt_path is None and the trained model has the
-    # same architecture as a model that can produce uncertainty (e.g. same EndToEndMapBeliefTransformer).
-    guide_update_interval: int = 0
-
-    # --- visualisation ---
-    n_viz_maps: int = 5             # training maps for which trajectory PNGs are saved
-
-    def __post_init__(self) -> None:
-        super().__post_init__()
-        total = self.p_mode_a + self.p_mode_ab + self.p_mode_ac
-        if abs(total - 1.0) > 1e-6:
-            raise ValueError(
-                f"p_mode_a + p_mode_ab + p_mode_ac must sum to 1.0, got {total}"
-            )
 
 
 # ---------------------------------------------------------------------------
