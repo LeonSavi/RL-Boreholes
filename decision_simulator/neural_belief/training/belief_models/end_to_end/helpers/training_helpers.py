@@ -8,8 +8,8 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 
-from ....training_utils import TargetNormalizer
-from ....training_utils import DRILL_BINS, export_history, save_no_ore_metrics
+from .....training_utils import TargetNormalizer
+from .....training_utils import DRILL_BINS, export_history, save_no_ore_metrics
 from .validation_helpers import (
     validate_e2e_map_by_drill_bins,
     validate_e2e_map_by_step,

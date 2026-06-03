@@ -182,7 +182,7 @@ if __name__ == "__main__":
 
     from simulator.map_generator import MapGenerator, SimConfig
     from decision_simulator.resources import load_decision_resources
-    from decision_simulator.neural_belief.training.end_to_end.train_variable_aware_patch_borehole_uncertainty_transformer import (
+    from decision_simulator.neural_belief.training.belief_models.end_to_end.train_variable_aware_patch_borehole_uncertainty_transformer import (
         load_variable_aware_patch_uncertainty_borehole_checkpoint,
     )
     from decision_simulator.utils.plotting import (

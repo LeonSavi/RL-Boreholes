@@ -50,18 +50,18 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 
 from decision_simulator.resources import DecisionSimulationResources
-from ...map_cache import NpzMap
-from ...models.belief_models.borehole_encoders.autoencoder import standardise
-from ...models.belief_models.end_to_end.end_to_end_map_belief_transformer import (
+from ....map_cache import NpzMap
+from ....models.belief_models.borehole_encoders.autoencoder import standardise
+from ....models.belief_models.end_to_end.end_to_end_map_belief_transformer import (
     EndToEndMapBeliefTransformer,
 )
-from ...training_utils import TargetNormalizer
-from ...training_utils import (
+from ....training_utils import TargetNormalizer
+from ....training_utils import (
     false_positive_loss,
     load_model_encoder_checkpoint,
     save_checkpoint_model,
 )
-from ..belief_models.training_configs import E2EMapBeliefConfig
+from ..training_configs import E2EMapBeliefConfig
 from .helpers import validate_e2e_map, model_validation, collate_e2e_map
 
 
@@ -369,9 +369,6 @@ def train_end_to_end_map_belief(
                 history,
                 normalizer,
                 model_cfg=model_cfg,
-                n_x=cfg.n_x,
-                n_y=cfg.n_y,
-                latent_dim=cfg.latent_dim,
             )
         else:
             patience_counter += 1

@@ -29,18 +29,18 @@ ore_map : (B, 1, n_x, n_y)  full reconstructed ore map (normalised space)
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from ..map_encoders.map_belief_transformer import (
-    MapBeliefConfig,
     MapBeliefEncoder,
     OreReconstructionHead,
     SpatialTokenEmbedding,
 )
+from ..model_configs import PatchBoreholeEndToEndConfig  # noqa: F401
 from .end_to_end_helpers import sinusoidal_pe_1d
 
 # ---------------------------------------------------------------------------
@@ -184,99 +184,6 @@ class PatchBoreholeTransformerEncoder(nn.Module):
 
         pooled = feat.mean(dim=1)  # (B, bh_d_model)
         return self.out_proj(pooled)  # (B, latent_dim)
-
-
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class PatchBoreholeEndToEndConfig:
-    """Hyperparameters for PatchBoreholeEndToEndMapBeliefTransformer.
-
-    Combines borehole patch encoder settings with map transformer settings so
-    the full model can be reconstructed from a checkpoint without an external
-    training config.
-    """
-
-    # Borehole dimensions
-    n_variables: int = 5
-    n_depth: int = 440
-
-    # Borehole encoder: depth patch size
-    bh_patch_size: int = 20
-
-    # Borehole encoder: transformer over patch tokens
-    bh_d_model: int = 128
-    bh_n_heads: int = 4
-    bh_n_layers: int = 2
-
-    # Borehole embedding output dimension
-    latent_dim: int = 128
-
-    # Spatial grid
-    n_x: int = 32
-    n_y: int = 32
-
-    # Map belief transformer
-    d_model: int = 256
-    n_heads: int = 8
-    n_encoder_layers: int = 4
-    d_ff: int = 1024
-    dropout: float = 0.1
-    head_hidden_dim: int = 128
-    pe_max_freq: float = 10000.0
-
-    def __post_init__(self) -> None:
-        if self.d_model % self.n_heads != 0:
-            raise ValueError(
-                f"d_model={self.d_model} must be divisible by n_heads={self.n_heads}"
-            )
-        if self.bh_n_layers > 0 and self.bh_d_model % self.bh_n_heads != 0:
-            raise ValueError(
-                f"bh_d_model={self.bh_d_model} must be divisible by "
-                f"bh_n_heads={self.bh_n_heads}"
-            )
-        if self.d_model % 2 != 0:
-            raise ValueError(
-                "d_model must be even for 2D sinusoidal positional encoding "
-                "(d_model/2 dims for x-axis, d_model/2 dims for y-axis)"
-            )
-
-    def to_patch_config(self) -> PatchBoreholeConfig:
-        """Build a PatchBoreholeConfig to construct PatchBoreholeTransformerEncoder."""
-        return PatchBoreholeConfig(
-            n_variables=self.n_variables,
-            n_depth=self.n_depth,
-            bh_patch_size=self.bh_patch_size,
-            bh_d_model=self.bh_d_model,
-            bh_n_heads=self.bh_n_heads,
-            bh_n_layers=self.bh_n_layers,
-            latent_dim=self.latent_dim,
-            dropout=self.dropout,
-            d_model=self.d_model,
-            n_heads=self.n_heads,
-            n_layers=self.n_encoder_layers,
-            d_ff=self.d_ff,
-            head_hidden_dim=self.head_hidden_dim,
-            pe_max_freq=self.pe_max_freq,
-        )
-
-    def to_map_belief_config(self) -> MapBeliefConfig:
-        """Build a MapBeliefConfig for the map encoder components."""
-        return MapBeliefConfig(
-            latent_dim=self.latent_dim,
-            n_x=self.n_x,
-            n_y=self.n_y,
-            d_model=self.d_model,
-            n_heads=self.n_heads,
-            n_encoder_layers=self.n_encoder_layers,
-            d_ff=self.d_ff,
-            dropout=self.dropout,
-            head_hidden_dim=self.head_hidden_dim,
-            pe_max_freq=self.pe_max_freq,
-        )
 
 
 # ---------------------------------------------------------------------------

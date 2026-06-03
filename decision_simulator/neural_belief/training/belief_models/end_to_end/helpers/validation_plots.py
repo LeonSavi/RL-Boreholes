@@ -13,7 +13,7 @@ import torch
 import torch.nn as nn
 
 from decision_simulator.utils.plotting import plot_belief_sample
-from ....training_utils import TargetNormalizer
+from .....training_utils import TargetNormalizer
 
 
 # ---------------------------------------------------------------------------

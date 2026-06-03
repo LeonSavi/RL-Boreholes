@@ -1,23 +1,22 @@
-"""Training pipeline for VariableAwarePatchBoreholeEndToEndMapBeliefTransformer.
+"""Training pipeline for PatchBoreholeEndToEndMapBeliefTransformer.
 
-Variable-aware patch experiment: identical training setup to the CLS-token patch
-experiment (train_patch_borehole_cls_transformer.py) but the borehole encoder
-creates one token per (variable, depth patch) instead of one flattened token per
-depth patch.  A learned variable embedding is added to each token so the
-transformer can explicitly model cross-variable interactions.
+Patch-based experiment: replaces the CNN front-end of EndToEndMapBeliefTransformer
+with a pure depth-patch tokeniser.  The depth axis is split into fixed-size
+intervals; each patch is linearly projected to a token and passed to a
+transformer.  All downstream map components are identical to the CNN baseline.
 
-This file is intentionally parallel to train_patch_borehole_cls_transformer.py.
-Dataset, collate, validation, and loss logic are fully reused.
+This file is intentionally parallel to train_end_to_end_map_belief.py.
+Dataset, collate, and loss logic are reused directly; only the model class and
+its config differ.
 
 Checkpoints
 -----------
-variable_aware_patch_best.pt  — lowest validation MSE (ore-value space)
-variable_aware_patch_last.pt  — final epoch
+patch_borehole_best.pt  — lowest validation MSE (ore-value space)
+patch_borehole_last.pt  — final epoch
 """
 
 from __future__ import annotations
 
-import math
 from pathlib import Path
 
 import numpy as np
@@ -27,39 +26,39 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from decision_simulator.resources import DecisionSimulationResources
-from ...training_utils import TargetNormalizer
-from ...training_utils import (
+from ....training_utils import TargetNormalizer
+from ....training_utils import (
     false_positive_loss,
     load_model_encoder_checkpoint,
     save_checkpoint_model,
 )
-from ...models.belief_models.end_to_end.variable_aware_patch_borehole_transformer import (
-    VariableAwarePatchBoreholeEndToEndMapBeliefTransformer,
+from ....models.belief_models.end_to_end.patch_borehole_transformer import (
+    PatchBoreholeEndToEndMapBeliefTransformer,
 )
 from .train_end_to_end_map_belief import E2EMapDataset
 from .helpers import validate_e2e_map, model_validation, collate_e2e_map
-from ..belief_models.training_configs import VariableAwarePatchBoreholeConfig
+from ..training_configs import PatchBoreholeConfig
 
 
 # ---------------------------------------------------------------------------
 # Main training function
 # ---------------------------------------------------------------------------
 
-def train_variable_aware_patch_borehole_transformer(
+def train_patch_borehole_transformer(
     resources: DecisionSimulationResources,
-    cfg: VariableAwarePatchBoreholeConfig,
+    cfg: PatchBoreholeConfig,
     device: str,
     checkpoint_dir: Path,
     plot_dir: Path | None = None,
     verbose: bool = True,
     train_ds: E2EMapDataset | None = None,
     val_ds: E2EMapDataset | None = None,
-) -> tuple[VariableAwarePatchBoreholeEndToEndMapBeliefTransformer, TargetNormalizer]:
-    """Train VariableAwarePatchBoreholeEndToEndMapBeliefTransformer.
+) -> tuple[PatchBoreholeEndToEndMapBeliefTransformer, TargetNormalizer]:
+    """Train PatchBoreholeEndToEndMapBeliefTransformer with a full-map reconstruction objective.
 
     Saves two checkpoints to checkpoint_dir:
-      variable_aware_patch_best.pt  — lowest validation MSE (ore-value space)
-      variable_aware_patch_last.pt  — final epoch
+      patch_borehole_best.pt  — lowest validation MSE (ore-value space)
+      patch_borehole_last.pt  — final epoch
 
     Parameters
     ----------
@@ -73,7 +72,7 @@ def train_variable_aware_patch_borehole_transformer(
 
     Returns
     -------
-    (trained model with best weights, fitted TargetNormalizer)
+    (trained PatchBoreholeEndToEndMapBeliefTransformer with best weights, fitted TargetNormalizer)
     """
     checkpoint_dir = Path(checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -128,21 +127,18 @@ def train_variable_aware_patch_borehole_transformer(
 
     # ---- model ---------------------------------------------------------------
     model_cfg = cfg.to_model_config()
-    model = VariableAwarePatchBoreholeEndToEndMapBeliefTransformer(model_cfg).to(device)
+    model = PatchBoreholeEndToEndMapBeliefTransformer(model_cfg).to(device)
     optimiser = torch.optim.AdamW(
         model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay
     )
 
     if verbose:
         n_params = sum(p.numel() for p in model.parameters())
-        n_patches = math.ceil(cfg.n_depth / cfg.bh_patch_size)
-        n_bh_tokens = cfg.n_variables * n_patches
         print(f"  model params  : {n_params:,}")
-        print(f"  variable_aware: True")
-        print(f"  n_variables   : {cfg.n_variables}")
         print(f"  patch_size    : {cfg.bh_patch_size}")
+        import math
+        n_patches = math.ceil(cfg.n_depth / cfg.bh_patch_size)
         print(f"  n_patches     : {n_patches}")
-        print(f"  bh_tokens/bh  : {n_bh_tokens} + 1 CLS = {n_bh_tokens + 1}")
         print(f"  bh_d_model    : {cfg.bh_d_model}")
         print(f"  bh_n_layers   : {cfg.bh_n_layers}")
         print(f"  d_model       : {cfg.d_model}")
@@ -209,16 +205,13 @@ def train_variable_aware_patch_borehole_transformer(
             best_epoch = epoch
             patience_counter = 0
             save_checkpoint_model(
-                checkpoint_dir / "variable_aware_patch_best.pt",
+                checkpoint_dir / "patch_borehole_best.pt",
                 model,
                 cfg,
                 epoch,
                 history,
                 normalizer,
                 model_cfg=model_cfg,
-                n_x=cfg.n_x,
-                n_y=cfg.n_y,
-                latent_dim=cfg.latent_dim,
             )
         else:
             patience_counter += 1
@@ -232,7 +225,7 @@ def train_variable_aware_patch_borehole_transformer(
             break
 
     model_validation(
-        model, checkpoint_dir, "variable_aware_patch_best.pt", history,
+        model, checkpoint_dir, "patch_borehole_best.pt", history,
         val_loader, device, normalizer,
         false_positive_threshold=cfg.false_positive_threshold,
         use_sequential_dataset=cfg.use_sequential_dataset,
@@ -251,28 +244,21 @@ def train_variable_aware_patch_borehole_transformer(
 # Checkpoint loading
 # ---------------------------------------------------------------------------
 
-def load_variable_aware_patch_borehole_checkpoint(
+def load_patch_borehole_checkpoint(
     path: Path,
     device: str = "cpu",
-) -> tuple[
-    VariableAwarePatchBoreholeEndToEndMapBeliefTransformer,
-    VariableAwarePatchBoreholeConfig,
-    TargetNormalizer,
-    list[dict],
-]:
-    """Load a VariableAwarePatchBoreholeEndToEndMapBeliefTransformer checkpoint.
+) -> tuple[PatchBoreholeEndToEndMapBeliefTransformer, PatchBoreholeConfig, TargetNormalizer, list[dict]]:
+    """Load a PatchBoreholeEndToEndMapBeliefTransformer checkpoint.
 
     Returns
     -------
     (model, training_cfg, normalizer, history)
     """
-    def _model_fn(ckpt: dict) -> VariableAwarePatchBoreholeEndToEndMapBeliefTransformer:
+    def _model_fn(ckpt: dict) -> PatchBoreholeEndToEndMapBeliefTransformer:
         if "model_cfg" in ckpt:
-            return VariableAwarePatchBoreholeEndToEndMapBeliefTransformer(ckpt["model_cfg"])
-        return VariableAwarePatchBoreholeEndToEndMapBeliefTransformer(
-            ckpt["cfg"].to_model_config()
-        )
+            return PatchBoreholeEndToEndMapBeliefTransformer(ckpt["model_cfg"])
+        return PatchBoreholeEndToEndMapBeliefTransformer(ckpt["cfg"].to_model_config())
 
     return load_model_encoder_checkpoint(
-        path, _model_fn, VariableAwarePatchBoreholeConfig, device
+        path, _model_fn, PatchBoreholeConfig, device
     )

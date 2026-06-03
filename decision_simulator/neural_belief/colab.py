@@ -51,7 +51,7 @@ from .training import (
     train_guided_exploration_belief,
     load_guided_belief_checkpoint,
 )
-from .training.end_to_end.train_guided_exploration_belief import _load_guide_model
+from .training.belief_models.end_to_end.train_guided_exploration_belief import _load_guide_model
 
 _DEBUG_UNET: dict = {
     "n_train_maps": 2,

@@ -52,71 +52,13 @@ Input format (same as UNetBelief / GeologicalBeliefDataset)
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
 
 import numpy as np
 import torch
 import torch.nn as nn
 
 from ....training_utils import make_coordinate_grid
-
-
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
-
-@dataclass
-class MapBeliefConfig:
-    """Hyperparameters for the MapBeliefTransformer.
-
-    All architectural dimensions live here so that the model can be
-    reconstructed from a saved checkpoint without relying on external
-    training configuration.
-    """
-
-    # Input
-    latent_dim: int = 128       # borehole encoder output dimension
-    n_x: int = 32               # spatial grid rows
-    n_y: int = 32               # spatial grid columns
-
-    # Transformer
-    d_model: int = 256          # token embedding dim; also the map latent dim
-    n_heads: int = 8            # attention heads (must divide d_model)
-    n_encoder_layers: int = 4   # number of transformer encoder layers
-    d_ff: int = 1024            # feedforward dim inside each layer (4 × d_model)
-    dropout: float = 0.1
-
-    # Reconstruction head
-    head_hidden_dim: int = 128  # hidden dim of the per-cell ore prediction MLP
-
-    # Positional encoding
-    pe_max_freq: float = 10000.0  # denominator base for sinusoidal frequencies
-
-    def __post_init__(self) -> None:
-        if self.d_model % self.n_heads != 0:
-            raise ValueError(
-                f"d_model={self.d_model} must be divisible by n_heads={self.n_heads}"
-            )
-        if self.d_model % 2 != 0:
-            raise ValueError(
-                f"d_model={self.d_model} must be even for 2-D sinusoidal PE "
-                f"(d_model/2 dims for x-axis, d_model/2 dims for y-axis)"
-            )
-
-    @property
-    def in_channels(self) -> int:
-        """Total input channels: ore + mask + latent."""
-        return 2 + self.latent_dim
-
-    @property
-    def raw_token_dim(self) -> int:
-        """Per-cell feature dimension before projection: x, y, mask, ore, latent."""
-        return 4 + self.latent_dim  # = 132 at default latent_dim=128
-
-    @property
-    def n_tokens(self) -> int:
-        """Number of spatial tokens (= grid cells)."""
-        return self.n_x * self.n_y
+from ..model_configs import MapBeliefConfig  # noqa: F401 — re-exported for existing importers
 
 
 # ---------------------------------------------------------------------------

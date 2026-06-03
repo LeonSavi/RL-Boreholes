@@ -39,8 +39,8 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from decision_simulator.resources import DecisionSimulationResources
-from ...training_utils import TargetNormalizer
-from ...training_utils import (
+from ....training_utils import TargetNormalizer
+from ....training_utils import (
     DRILL_BINS,
     export_history,
     false_positive_loss,
@@ -49,7 +49,7 @@ from ...training_utils import (
     save_checkpoint_model,
     save_no_ore_metrics,
 )
-from ...models.belief_models.end_to_end.variable_aware_patch_borehole_uncertainty_transformer import (
+from ....models.belief_models.end_to_end.variable_aware_patch_borehole_uncertainty_transformer import (
     VariableAwarePatchBoreholeUncertaintyEndToEndMapBeliefTransformer,
 )
 from .train_end_to_end_map_belief import E2EMapDataset
@@ -59,7 +59,7 @@ from .helpers import (
     validate_no_ore_e2e_map,
     collate_e2e_map,
 )
-from ..belief_models.training_configs import VariableAwarePatchBoreholeUncertaintyConfig
+from ..training_configs import VariableAwarePatchBoreholeUncertaintyConfig
 
 
 # ---------------------------------------------------------------------------
@@ -879,9 +879,6 @@ def train_variable_aware_patch_uncertainty_borehole_transformer(
                 history,
                 normalizer,
                 model_cfg=model_cfg,
-                n_x=cfg.n_x,
-                n_y=cfg.n_y,
-                latent_dim=cfg.latent_dim,
             )
         else:
             patience_counter += 1
@@ -902,9 +899,6 @@ def train_variable_aware_patch_uncertainty_borehole_transformer(
         history,
         normalizer,
         model_cfg=model_cfg,
-        n_x=cfg.n_x,
-        n_y=cfg.n_y,
-        latent_dim=cfg.latent_dim,
     )
     export_history(history, checkpoint_dir)
 

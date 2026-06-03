@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass, field
 
-from ...models.belief_models.map_encoders.map_belief_transformer import MapBeliefConfig
-from ...models.belief_models.end_to_end.end_to_end_map_belief_transformer import EndToEndMapBeliefConfig
-from ...models.belief_models.end_to_end.patch_borehole_transformer import PatchBoreholeEndToEndConfig
-from ...models.belief_models.end_to_end.patch_borehole_cls_transformer import PatchBoreholeCLSEndToEndConfig
-from ...models.belief_models.end_to_end.variable_aware_patch_borehole_transformer import VariableAwarePatchBoreholeEndToEndConfig
+from ...models.belief_models.model_configs import (
+    BaseE2EArchConfig,
+    BaseMapArchConfig,
+    EndToEndMapBeliefConfig,
+    MapBeliefConfig,
+    PatchBoreholeCLSEndToEndConfig,
+    PatchBoreholeEndToEndConfig,
+    VariableAwarePatchBoreholeEndToEndConfig,
+)
 
 
 @dataclass
@@ -78,15 +83,16 @@ class NeuralBeliefTrainingConfig:
 
 
 @dataclass
-class MapBeliefTrainingConfig:
+class MapBeliefTrainingConfig(BaseMapArchConfig):
     """Hyperparameters for training the MapBeliefTransformer.
 
-    Dataset and normalisation fields are identical to NeuralBeliefTrainingConfig
-    so the two training functions can be called with the same preparation code.
-    Architectural fields replace the UNet-specific ``in_channels`` / ``base_channels``.
+    Architectural fields (latent_dim, n_x, n_y, d_model, n_heads,
+    n_encoder_layers, d_ff, dropout, head_hidden_dim, pe_max_freq) are
+    inherited from BaseMapArchConfig and shared with MapBeliefConfig so that
+    each field is declared exactly once.
     """
 
-    # --- Dataset (same as NeuralBeliefTrainingConfig) ---
+    # --- Dataset ---
     n_train_maps: int = 50
     samples_per_map: int = 20
     n_val_maps: int = 10
@@ -94,20 +100,7 @@ class MapBeliefTrainingConfig:
     min_drills: int = 1
     max_drills: int = 15
 
-    # --- Input / grid ---
-    latent_dim: int = 128  # borehole encoder latent dim (sets in_channels)
-    n_x: int = 32
-    n_y: int = 32
-
-    # --- Model architecture ---
-    d_model: int = 256
-    n_heads: int = 8
-    n_encoder_layers: int = 4
-    d_ff: int = 1024  # feedforward dim (4 × d_model)
-    dropout: float = 0.1
-    head_hidden_dim: int = 128
-
-    # --- Target normalisation (same as NeuralBeliefTrainingConfig) ---
+    # --- Target normalisation ---
     norm_mode: str = "log1p"  # "log1p" | "zscore" | "none"
 
     # --- Optimisation ---
@@ -140,12 +133,6 @@ class MapBeliefTrainingConfig:
     borehole_encoder: str = "unknown"
     n_val_plots: int = 20
 
-    def __post_init__(self) -> None:
-        if self.d_model % self.n_heads != 0:
-            raise ValueError(
-                f"d_model={self.d_model} must be divisible by n_heads={self.n_heads}"
-            )
-
     @property
     def in_channels(self) -> int:
         """Total input channels: ore + mask + latent."""
@@ -154,21 +141,20 @@ class MapBeliefTrainingConfig:
     def to_model_config(self) -> MapBeliefConfig:
         """Construct a MapBeliefConfig from the architectural fields of this dataclass."""
         return MapBeliefConfig(
-            latent_dim=self.latent_dim,
-            n_x=self.n_x,
-            n_y=self.n_y,
-            d_model=self.d_model,
-            n_heads=self.n_heads,
-            n_encoder_layers=self.n_encoder_layers,
-            d_ff=self.d_ff,
-            dropout=self.dropout,
-            head_hidden_dim=self.head_hidden_dim,
+            **{f.name: getattr(self, f.name) for f in dataclasses.fields(MapBeliefConfig)}
         )
 
 
 @dataclass
-class BaseE2ETrainingConfig:
-    """Common hyperparameters shared by all end-to-end map-belief training configs."""
+class BaseE2ETrainingConfig(BaseE2EArchConfig):
+    """Common hyperparameters shared by all end-to-end map-belief training configs.
+
+    Architectural fields (n_variables, n_depth, bh_d_model, bh_n_heads,
+    bh_n_layers, latent_dim, n_x, n_y, d_model, n_heads, n_encoder_layers,
+    d_ff, dropout, head_hidden_dim, pe_max_freq) are inherited from
+    BaseE2EArchConfig and shared with the model-side ``*EndToEndConfig``
+    classes so that each field is declared exactly once.
+    """
 
     # Dataset
     n_train_maps: int = 50
@@ -182,31 +168,6 @@ class BaseE2ETrainingConfig:
     use_sequential_dataset: bool = False
     n_sequences_per_map: int = 3
     prefix_steps: list[int] = field(default_factory=lambda: [1, 2, 3, 5, 8, 10, 15])
-
-    # Borehole dimensions — resolved from resources at training time
-    n_variables: int = 5
-    n_depth: int = 440
-
-    # Borehole encoder: transformer hyperparameters (shared across all encoder styles)
-    bh_d_model: int = 128
-    bh_n_heads: int = 4
-    bh_n_layers: int = 2
-
-    # Borehole embedding output dimension
-    latent_dim: int = 128
-
-    # Spatial grid — set automatically from dataset at training time
-    n_x: int = 32
-    n_y: int = 32
-
-    # Map belief transformer architecture
-    d_model: int = 256
-    n_heads: int = 8
-    n_encoder_layers: int = 4
-    d_ff: int = 1024
-    dropout: float = 0.20
-    head_hidden_dim: int = 128
-    pe_max_freq: float = 10000.0
 
     # Target normalisation
     norm_mode: str = "log1p"  # "log1p" | "zscore" | "none"
@@ -233,12 +194,6 @@ class BaseE2ETrainingConfig:
     borehole_encoder: str = "end_to_end"
     n_val_plots: int = 20
 
-    def __post_init__(self) -> None:
-        if self.d_model % self.n_heads != 0:
-            raise ValueError(
-                f"d_model={self.d_model} must be divisible by n_heads={self.n_heads}"
-            )
-
 
 @dataclass
 class E2EMapBeliefConfig(BaseE2ETrainingConfig):
@@ -252,22 +207,7 @@ class E2EMapBeliefConfig(BaseE2ETrainingConfig):
     def to_model_config(self) -> EndToEndMapBeliefConfig:
         """Build an EndToEndMapBeliefConfig from the architectural fields."""
         return EndToEndMapBeliefConfig(
-            n_variables=self.n_variables,
-            n_depth=self.n_depth,
-            bh_channels=self.bh_channels,
-            bh_d_model=self.bh_d_model,
-            bh_n_heads=self.bh_n_heads,
-            bh_n_layers=self.bh_n_layers,
-            latent_dim=self.latent_dim,
-            n_x=self.n_x,
-            n_y=self.n_y,
-            d_model=self.d_model,
-            n_heads=self.n_heads,
-            n_encoder_layers=self.n_encoder_layers,
-            d_ff=self.d_ff,
-            dropout=self.dropout,
-            head_hidden_dim=self.head_hidden_dim,
-            pe_max_freq=self.pe_max_freq,
+            **{f.name: getattr(self, f.name) for f in dataclasses.fields(EndToEndMapBeliefConfig)}
         )
 
 
@@ -283,22 +223,7 @@ class PatchBoreholeConfig(BaseE2ETrainingConfig):
     def to_model_config(self) -> PatchBoreholeEndToEndConfig:
         """Build a PatchBoreholeEndToEndConfig for model construction."""
         return PatchBoreholeEndToEndConfig(
-            n_variables=self.n_variables,
-            n_depth=self.n_depth,
-            bh_patch_size=self.bh_patch_size,
-            bh_d_model=self.bh_d_model,
-            bh_n_heads=self.bh_n_heads,
-            bh_n_layers=self.bh_n_layers,
-            latent_dim=self.latent_dim,
-            n_x=self.n_x,
-            n_y=self.n_y,
-            d_model=self.d_model,
-            n_heads=self.n_heads,
-            n_encoder_layers=self.n_encoder_layers,
-            d_ff=self.d_ff,
-            dropout=self.dropout,
-            head_hidden_dim=self.head_hidden_dim,
-            pe_max_freq=self.pe_max_freq,
+            **{f.name: getattr(self, f.name) for f in dataclasses.fields(PatchBoreholeEndToEndConfig)}
         )
 
 
@@ -314,22 +239,7 @@ class PatchBoreholeCLSConfig(BaseE2ETrainingConfig):
     def to_model_config(self) -> PatchBoreholeCLSEndToEndConfig:
         """Build a PatchBoreholeCLSEndToEndConfig for model construction."""
         return PatchBoreholeCLSEndToEndConfig(
-            n_variables=self.n_variables,
-            n_depth=self.n_depth,
-            bh_patch_size=self.bh_patch_size,
-            bh_d_model=self.bh_d_model,
-            bh_n_heads=self.bh_n_heads,
-            bh_n_layers=self.bh_n_layers,
-            latent_dim=self.latent_dim,
-            n_x=self.n_x,
-            n_y=self.n_y,
-            d_model=self.d_model,
-            n_heads=self.n_heads,
-            n_encoder_layers=self.n_encoder_layers,
-            d_ff=self.d_ff,
-            dropout=self.dropout,
-            head_hidden_dim=self.head_hidden_dim,
-            pe_max_freq=self.pe_max_freq,
+            **{f.name: getattr(self, f.name) for f in dataclasses.fields(PatchBoreholeCLSEndToEndConfig)}
         )
 
 
@@ -345,22 +255,7 @@ class VariableAwarePatchBoreholeConfig(BaseE2ETrainingConfig):
     def to_model_config(self) -> VariableAwarePatchBoreholeEndToEndConfig:
         """Build a VariableAwarePatchBoreholeEndToEndConfig for model construction."""
         return VariableAwarePatchBoreholeEndToEndConfig(
-            n_variables=self.n_variables,
-            n_depth=self.n_depth,
-            bh_patch_size=self.bh_patch_size,
-            bh_d_model=self.bh_d_model,
-            bh_n_heads=self.bh_n_heads,
-            bh_n_layers=self.bh_n_layers,
-            latent_dim=self.latent_dim,
-            n_x=self.n_x,
-            n_y=self.n_y,
-            d_model=self.d_model,
-            n_heads=self.n_heads,
-            n_encoder_layers=self.n_encoder_layers,
-            d_ff=self.d_ff,
-            dropout=self.dropout,
-            head_hidden_dim=self.head_hidden_dim,
-            pe_max_freq=self.pe_max_freq,
+            **{f.name: getattr(self, f.name) for f in dataclasses.fields(VariableAwarePatchBoreholeEndToEndConfig)}
         )
 
 
@@ -380,22 +275,7 @@ class VariableAwarePatchBoreholeUncertaintyConfig(BaseE2ETrainingConfig):
     def to_model_config(self) -> VariableAwarePatchBoreholeEndToEndConfig:
         """Build a VariableAwarePatchBoreholeEndToEndConfig for model construction."""
         return VariableAwarePatchBoreholeEndToEndConfig(
-            n_variables=self.n_variables,
-            n_depth=self.n_depth,
-            bh_patch_size=self.bh_patch_size,
-            bh_d_model=self.bh_d_model,
-            bh_n_heads=self.bh_n_heads,
-            bh_n_layers=self.bh_n_layers,
-            latent_dim=self.latent_dim,
-            n_x=self.n_x,
-            n_y=self.n_y,
-            d_model=self.d_model,
-            n_heads=self.n_heads,
-            n_encoder_layers=self.n_encoder_layers,
-            d_ff=self.d_ff,
-            dropout=self.dropout,
-            head_hidden_dim=self.head_hidden_dim,
-            pe_max_freq=self.pe_max_freq,
+            **{f.name: getattr(self, f.name) for f in dataclasses.fields(VariableAwarePatchBoreholeEndToEndConfig)}
         )
 
 

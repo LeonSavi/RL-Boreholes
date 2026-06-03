@@ -43,37 +43,37 @@ from .belief_models.training_configs import (
     VariableAwarePatchBoreholeConfig,
     VariableAwarePatchBoreholeUncertaintyConfig,
 )
-from .map_encoders.train_unet_belief import (
+from .belief_models.map_encoders.train_unet_belief import (
     train_neural_belief,
     load_belief_checkpoint,
 )
-from .map_encoders.train_map_belief import (
+from .belief_models.map_encoders.train_map_belief import (
     train_map_belief,
     load_map_belief_checkpoint,
 )
-from .end_to_end.train_end_to_end_map_belief import (
+from .belief_models.end_to_end.train_end_to_end_map_belief import (
     E2EMapDataset,
     collate_e2e_map,
     train_end_to_end_map_belief,
     load_e2e_map_belief_checkpoint,
 )
-from .end_to_end.train_patch_borehole_transformer import (
+from .belief_models.end_to_end.train_patch_borehole_transformer import (
     train_patch_borehole_transformer,
     load_patch_borehole_checkpoint,
 )
-from .end_to_end.train_patch_borehole_cls_transformer import (
+from .belief_models.end_to_end.train_patch_borehole_cls_transformer import (
     train_patch_borehole_cls_transformer,
     load_patch_borehole_cls_checkpoint,
 )
-from .end_to_end.train_variable_aware_patch_borehole_transformer import (
+from .belief_models.end_to_end.train_variable_aware_patch_borehole_transformer import (
     train_variable_aware_patch_borehole_transformer,
     load_variable_aware_patch_borehole_checkpoint,
 )
-from .end_to_end.train_variable_aware_patch_borehole_uncertainty_transformer import (
+from .belief_models.end_to_end.train_variable_aware_patch_borehole_uncertainty_transformer import (
     train_variable_aware_patch_uncertainty_borehole_transformer,
     load_variable_aware_patch_uncertainty_borehole_checkpoint,
 )
-from .end_to_end.train_guided_exploration_belief import (
+from .belief_models.end_to_end.train_guided_exploration_belief import (
     GuidedExplorationConfig,
     GuidedE2EMapDataset,
     GuidedTrainingStats,
@@ -93,7 +93,7 @@ from ..training_utils import (
     load_model_encoder_checkpoint,
     save_checkpoint_model,
 )
-from .end_to_end.helpers import validate_by_step, save_sequential_val_plots
+from .belief_models.end_to_end.helpers import validate_by_step, save_sequential_val_plots
 
 __all__ = [
     # UNet pipeline
