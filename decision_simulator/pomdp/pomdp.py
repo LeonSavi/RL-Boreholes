@@ -185,8 +185,9 @@ if __name__ == "__main__":
     from decision_simulator.neural_belief.training.belief_models.train_variable_aware_patch_borehole_uncertainty_transformer import (
         load_variable_aware_patch_uncertainty_borehole_checkpoint,
     )
-    from decision_simulator.neural_belief.visualize import (
-        plot_belief_step_with_uncertainty,
+    from decision_simulator.utils.plotting import (
+        plot_belief_sample,
+        plot_step_belief_grid,
         plot_policy_evolution,
         plot_policy_map_evolution,
     )
@@ -195,7 +196,7 @@ if __name__ == "__main__":
     from decision_simulator.pomdp.policies.uncertainty_policy import UncertaintyPolicy
     from decision_simulator.pomdp.policies.hybrid_policy import HybridPolicy
 
-    CHECKPOINT = Path(__file__).parent / "beliefs" / "variable_aware_patch_uncertainty_best.pt"
+    CHECKPOINT = Path(__file__).parent / "beliefs" / "variable_aware_patch_uncertainty_guided.pt"
     DEVICE = "cuda"
     DRILLING_BUDGET = 11  # 1 initial + 10 policy steps
     SELECTED_STEPS = [1, 2, 3, 5, 8, 10]  # Fibonacci-like steps + final
@@ -234,6 +235,9 @@ if __name__ == "__main__":
         print(f"  n_ore_bodies: {n_ore_bodies}  Initial drill: center cell {center}")
 
         map_results: dict[str, dict] = {}
+        # step_beliefs[policy_name][n_drills] = BeliefState computed from n_drills observations
+        step_beliefs: dict[str, dict[int, BeliefState]] = {}
+        CAPTURE_DRILLS = {2, 3}
 
         policy_list = [
             ("random",       RandomPolicy(seed=42)),
@@ -245,16 +249,24 @@ if __name__ == "__main__":
         for policy_name, policy in policy_list:
             print(f"\n  Policy: {policy_name}")
 
+            captured: dict[int, BeliefState] = {}
+            step_beliefs[policy_name] = captured
+
             # Capture loop variables for the closure
-            def make_step_callback(name: str, m_idx: int, t_ore: np.ndarray) -> StepCallback:
+            def make_step_callback(
+                name: str,
+                m_idx: int,
+                t_ore: np.ndarray,
+                store: dict,
+            ) -> StepCallback:
                 def callback(step: int, belief_state: BeliefState, obs_state: BoreholeObservationState) -> None:
                     save_path = (
                         PLOT_DIR / name / timestamp
                         / f"map_{m_idx:02d}_step_{step:02d}.png"
                     )
-                    plot_belief_step_with_uncertainty(
+                    plot_belief_sample(
                         sparse_ore_map=obs_state.get_sparse_ore_map(),
-                        observation_mask=belief_state.observed_mask,
+                        observation_mask=obs_state.get_observed_mask(),
                         true_ore_map=t_ore,
                         predicted_ore_map=belief_state.predicted_ore_map,
                         predicted_uncertainty_map=belief_state.predicted_uncertainty_map,
@@ -262,6 +274,10 @@ if __name__ == "__main__":
                         title=f"{name} | Map {m_idx:02d} | Step {step:02d}",
                         timestamp=timestamp,
                     )
+                    # belief_state at step k was computed from k observations
+                    n_drills = int(belief_state.observed_mask.sum())
+                    if n_drills in CAPTURE_DRILLS:
+                        store[n_drills] = belief_state
                 return callback
 
             result = run_fixed_budget_episode(
@@ -270,7 +286,7 @@ if __name__ == "__main__":
                 policy=policy,
                 drilling_budget=DRILLING_BUDGET,
                 initial_locations=[center],
-                step_callback=make_step_callback(policy_name, map_idx, true_ore_map),
+                step_callback=make_step_callback(policy_name, map_idx, true_ore_map, captured),
             )
             map_results[policy_name] = result
 
@@ -302,7 +318,17 @@ if __name__ == "__main__":
             )
             print(f"    Evolution grid saved -> {evo_grid_path}")
 
+        # 4×4 grid: rows=policies, cols=ore@2drills|unc@2drills|ore@3drills|unc@3drills
+        step_grid_path = (
+            PLOT_DIR / "step_belief_grid" / timestamp / f"map_{map_idx:02d}_step_grid.png"
+        )
+        plot_step_belief_grid(
+            step_beliefs, map_idx, drill_counts=(2, 3),
+            timestamp=timestamp, save_path=step_grid_path,
+        )
+        print(f"\n  Step belief grid saved -> {step_grid_path}")
+
         # Line plot: predicted vs true total ore over steps for all policies
         evo_path = PLOT_DIR / "evolution" / timestamp / f"map_{map_idx:02d}_evolution.png"
         plot_policy_evolution(map_results, map_idx, save_path=evo_path)
-        print(f"\n  Policy comparison plot saved -> {evo_path}")
+        print(f"  Policy comparison plot saved -> {evo_path}")

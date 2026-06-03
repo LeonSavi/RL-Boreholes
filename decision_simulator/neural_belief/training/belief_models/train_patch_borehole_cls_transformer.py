@@ -15,7 +15,6 @@ patch_borehole_cls_last.pt  — final epoch
 
 from __future__ import annotations
 
-import json
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -29,26 +28,16 @@ from torch.utils.data import DataLoader
 from decision_simulator.resources import DecisionSimulationResources
 from ...utils import TargetNormalizer
 from ...training_utils import (
-    DRILL_BINS,
-    export_history,
     false_positive_loss,
     load_model_encoder_checkpoint,
     save_checkpoint_model,
-    save_no_ore_metrics,
 )
 from ...models.belief_models.end_to_end.patch_borehole_cls_transformer import (
     PatchBoreholeCLSEndToEndConfig,
     PatchBoreholeCLSEndToEndMapBeliefTransformer,
 )
-from .train_end_to_end_map_belief import E2EMapDataset, collate_e2e_map
-from .end_to_end_helpers import (
-    _validate_e2e_map,
-    _validate_e2e_map_by_drill_bins,
-    _validate_no_ore_e2e_map,
-    _validate_e2e_map_by_step,
-    _save_e2e_map_val_plots,
-    _save_e2e_map_sequential_val_plots,
-)
+from .train_end_to_end_map_belief import E2EMapDataset
+from .helpers import validate_e2e_map, model_validation, collate_e2e_map
 
 
 # ---------------------------------------------------------------------------
@@ -303,7 +292,7 @@ def train_patch_borehole_cls_transformer(
             n_batches += 1
 
         train_mse_norm = train_loss_sum / n_batches
-        val_metrics = _validate_e2e_map(model, val_loader, device, normalizer)
+        val_metrics = validate_e2e_map(model, val_loader, device, normalizer)
 
         row = {"epoch": epoch, "train_mse_norm": train_mse_norm, **val_metrics}
         history.append(row)
@@ -344,101 +333,19 @@ def train_patch_borehole_cls_transformer(
                 )
             break
 
-    save_checkpoint_model(
-        checkpoint_dir / "patch_borehole_cls_last.pt",
-        model,
-        cfg,
-        epoch,
-        history,
-        normalizer,
-        model_cfg=model_cfg,
-        n_x=cfg.n_x,
-        n_y=cfg.n_y,
-        latent_dim=cfg.latent_dim,
+    model_validation(
+        model, checkpoint_dir, "patch_borehole_cls_best.pt", history,
+        val_loader, device, normalizer,
+        false_positive_threshold=cfg.false_positive_threshold,
+        use_sequential_dataset=cfg.use_sequential_dataset,
+        verbose=verbose,
+        best_val_mse=best_val_mse,
+        best_epoch=best_epoch,
+        n_epochs=cfg.n_epochs,
+        plot_dir=plot_dir,
+        val_ds=val_ds,
+        n_val_plots=cfg.n_val_plots,
     )
-    export_history(history, checkpoint_dir)
-
-    # ---- reload best weights -------------------------------------------------
-    best_ckpt = torch.load(
-        checkpoint_dir / "patch_borehole_cls_best.pt",
-        map_location=device,
-        weights_only=False,
-    )
-    model.load_state_dict(best_ckpt["state_dict"])
-    model.eval()
-
-    # ---- drill-bin metrics (best model) --------------------------------------
-    bin_metrics = _validate_e2e_map_by_drill_bins(model, val_loader, device, normalizer)
-    if bin_metrics:
-        if verbose:
-            print("\nValidation metrics by drill count (best model, ore-value space):")
-            for lo, hi in DRILL_BINS:
-                key = f"{lo}_{hi}"
-                n = bin_metrics.get(f"n_{key}", 0)
-                mse = bin_metrics.get(f"mse_{key}", float("nan"))
-                mae = bin_metrics.get(f"mae_{key}", float("nan"))
-                corr = bin_metrics.get(f"corr_{key}", float("nan"))
-                print(
-                    f"  drills {lo:2d}-{hi:2d}"
-                    f"  n={n:5d}"
-                    f"  mse={mse:.4f}"
-                    f"  mae={mae:.4f}"
-                    f"  corr={corr:.4f}"
-                )
-        bin_path = checkpoint_dir / "val_metrics_by_drills.json"
-        with open(bin_path, "w") as f:
-            json.dump(bin_metrics, f, indent=2)
-        if verbose:
-            print(f"  drill-bin metrics -> {bin_path}")
-
-    # ---- per-step metrics ----------------------------------------------------
-    step_metrics = _validate_e2e_map_by_step(model, val_loader, device, normalizer)
-    if step_metrics:
-        label = "step" if cfg.use_sequential_dataset else "drill count"
-        if verbose:
-            print(f"\nValidation metrics by {label} (best model, ore-value space):")
-            for k, m in sorted(step_metrics.items()):
-                print(
-                    f"  K={k:3d}  n={m['n']:5d}"
-                    f"  mse={m['mse']:.4f}"
-                    f"  mae={m['mae']:.4f}"
-                    f"  corr={m['corr']:.4f}"
-                )
-        step_path = checkpoint_dir / "val_metrics_by_step.json"
-        with open(step_path, "w") as f:
-            json.dump({str(k): v for k, v in step_metrics.items()}, f, indent=2)
-        if verbose:
-            print(f"  step metrics -> {step_path}")
-
-    # ---- no-ore false-positive metrics ---------------------------------------
-    no_ore_metrics = _validate_no_ore_e2e_map(
-        model,
-        val_loader,
-        device,
-        normalizer,
-        threshold=cfg.false_positive_threshold,
-    )
-    save_no_ore_metrics(no_ore_metrics, checkpoint_dir, verbose=verbose)
-
-    # ---- optional validation plots -------------------------------------------
-    if plot_dir is not None:
-        Path(plot_dir).mkdir(parents=True, exist_ok=True)
-        if cfg.use_sequential_dataset:
-            _save_e2e_map_sequential_val_plots(
-                model, val_ds, normalizer, plot_dir, device, n_sequences=cfg.n_val_plots
-            )
-        else:
-            _save_e2e_map_val_plots(
-                model, val_ds, normalizer, plot_dir, device, n_plots=cfg.n_val_plots
-            )
-
-    if verbose:
-        print(
-            f"\nTraining complete.  Best val MSE: {best_val_mse:.4f}"
-            f"  (epoch {best_epoch}/{cfg.n_epochs})"
-        )
-        print(f"  checkpoints -> {checkpoint_dir}")
-
     return model, normalizer
 
 

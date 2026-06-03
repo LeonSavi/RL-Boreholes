@@ -56,11 +56,12 @@ from ...models.belief_models.end_to_end.variable_aware_patch_borehole_transforme
 from ...models.belief_models.end_to_end.variable_aware_patch_borehole_uncertainty_transformer import (
     VariableAwarePatchBoreholeUncertaintyEndToEndMapBeliefTransformer,
 )
-from .train_end_to_end_map_belief import E2EMapDataset, collate_e2e_map
-from .end_to_end_helpers import (
-    _validate_e2e_map_by_drill_bins,
-    _validate_e2e_map_by_step,
-    _validate_no_ore_e2e_map,
+from .train_end_to_end_map_belief import E2EMapDataset
+from .helpers import (
+    validate_e2e_map_by_drill_bins,
+    validate_e2e_map_by_step,
+    validate_no_ore_e2e_map,
+    collate_e2e_map,
 )
 
 
@@ -83,7 +84,7 @@ def _ore_gradient_magnitude_np(ore_map: np.ndarray) -> np.ndarray:
 class _OreWrapper(nn.Module):
     """Wraps the uncertainty model so that forward() returns only the ore prediction.
 
-    Allows reusing validation helpers from end_to_end_helpers.py that expect a
+    Allows reusing validation helpers from helpers/ that expect a
     model whose forward() returns a single (B, 1, n_x, n_y) tensor.
     """
 
@@ -1033,7 +1034,7 @@ def train_variable_aware_patch_uncertainty_borehole_transformer(
     ore_wrapper = _OreWrapper(model)
 
     # ---- drill-bin metrics (best model) --------------------------------------
-    bin_metrics = _validate_e2e_map_by_drill_bins(
+    bin_metrics = validate_e2e_map_by_drill_bins(
         ore_wrapper, val_loader, device, normalizer
     )
     if bin_metrics:
@@ -1059,7 +1060,7 @@ def train_variable_aware_patch_uncertainty_borehole_transformer(
             print(f"  drill-bin metrics -> {bin_path}")
 
     # ---- per-step metrics ----------------------------------------------------
-    step_metrics = _validate_e2e_map_by_step(
+    step_metrics = validate_e2e_map_by_step(
         ore_wrapper, val_loader, device, normalizer
     )
     if step_metrics:
@@ -1080,7 +1081,7 @@ def train_variable_aware_patch_uncertainty_borehole_transformer(
             print(f"  step metrics -> {step_path}")
 
     # ---- no-ore false-positive metrics ---------------------------------------
-    no_ore_metrics = _validate_no_ore_e2e_map(
+    no_ore_metrics = validate_no_ore_e2e_map(
         ore_wrapper,
         val_loader,
         device,
