@@ -11,9 +11,6 @@ MapBeliefTransformer
     a global CLS-token latent representing the full geological belief state.
     Use encode(x) to obtain the belief latent for downstream tasks.
 
-RawBoreholeBeliefEncoder
-    Planned future model. Raises NotImplementedError on construction.
-
 All models share the same input/output contract:
     forward(x)  : (B, 2+latent_dim, n_x, n_y) → (B, 1, n_x, n_y)
 """
@@ -27,7 +24,6 @@ from .belief_models.map_encoders.map_belief_transformer import (
     MapBeliefTransformer,
     MapBeliefModel,          # backward-compat alias for MapBeliefTransformer
 )
-from .belief_models.map_encoders.raw_borehole_belief import RawBoreholeBeliefEncoder
 from .belief_models.borehole_encoders.autoencoder import (
     AEConfig,
     BoreholeEncoder,
@@ -60,8 +56,6 @@ __all__ = [
     "OreReconstructionHead",
     "MapBeliefTransformer",
     "MapBeliefModel",        # backward-compat alias
-    # Future model (placeholder)
-    "RawBoreholeBeliefEncoder",
     # Borehole autoencoder
     "AEConfig",
     "BoreholeEncoder",

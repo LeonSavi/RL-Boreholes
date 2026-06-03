@@ -4,6 +4,9 @@ These helpers work with any model that exposes the same forward signature as
 EndToEndMapBeliefTransformer / PatchBoreholeEndToEndMapBeliefTransformer:
 
     model(boreholes, ore_vals, positions, padding_mask) -> (B, 1, n_x, n_y)
+
+Also contains sequential-step validation helpers for models that consume
+GeologicalBeliefDataset (UNet/MapBelief pipelines).
 """
 
 from __future__ import annotations
@@ -16,7 +19,12 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from ....utils import TargetNormalizer
-from ....training_utils import DRILL_BINS, pearson_correlation
+from ....training_utils import (
+    DRILL_BINS,
+    pearson_correlation,
+    group_metrics,
+    no_ore_metrics_from_flat,
+)
 
 
 def validate_e2e_map(
@@ -83,9 +91,9 @@ def validate_e2e_map_by_drill_bins(
             all_tgt.append(normalizer.inverse_tensor(tgt).cpu())
             all_counts.append(batch["drill_counts"])
 
-    preds = torch.cat(all_pred, dim=0)     # (N, 1, n_x, n_y)
-    tgts = torch.cat(all_tgt, dim=0)      # (N, 1, n_x, n_y)
-    counts = torch.cat(all_counts, dim=0)  # (N,)
+    preds = torch.cat(all_pred, dim=0)
+    tgts = torch.cat(all_tgt, dim=0)
+    counts = torch.cat(all_counts, dim=0)
 
     result: dict[str, float | int] = {}
     for lo, hi in bins:
@@ -98,11 +106,10 @@ def validate_e2e_map_by_drill_bins(
             result[f"mae_{key}"] = float("nan")
             result[f"corr_{key}"] = float("nan")
             continue
-        p = preds[sel]
-        t = tgts[sel]
-        result[f"mse_{key}"] = F.mse_loss(p, t).item()
-        result[f"mae_{key}"] = (p - t).abs().mean().item()
-        result[f"corr_{key}"] = pearson_correlation(p, t)
+        m = group_metrics(preds[sel], tgts[sel])
+        result[f"mse_{key}"] = m["mse"]
+        result[f"mae_{key}"] = m["mae"]
+        result[f"corr_{key}"] = m["corr"]
 
     return result
 
@@ -116,9 +123,7 @@ def validate_no_ore_e2e_map(
 ) -> dict[str, float | int]:
     """False-positive metrics on samples whose true ore map is entirely zero."""
     model.eval()
-    pred_totals: list[torch.Tensor] = []
-    pred_maxes: list[torch.Tensor] = []
-    fp_areas: list[torch.Tensor] = []
+    all_pred_flat: list[torch.Tensor] = []
     n_no_ore = 0
 
     with torch.no_grad():
@@ -141,10 +146,7 @@ def validate_no_ore_e2e_map(
             p = pred[no_ore].cpu()
             n = p.shape[0]
             n_no_ore += n
-            pv = p.view(n, -1)
-            pred_totals.append(pv.sum(dim=1))
-            pred_maxes.append(pv.max(dim=1).values)
-            fp_areas.append((pv > threshold).float().mean(dim=1))
+            all_pred_flat.append(p.view(n, -1))
 
     if n_no_ore == 0:
         return {
@@ -156,9 +158,7 @@ def validate_no_ore_e2e_map(
 
     return {
         "no_ore_n": n_no_ore,
-        "no_ore_pred_total": torch.cat(pred_totals).mean().item(),
-        "no_ore_pred_max": torch.cat(pred_maxes).mean().item(),
-        "no_ore_fp_area": torch.cat(fp_areas).mean().item(),
+        **no_ore_metrics_from_flat(torch.cat(all_pred_flat), threshold),
     }
 
 
@@ -187,19 +187,99 @@ def validate_e2e_map_by_step(
             pred_norm = model(bh, ov, pos, pm)
             pred = normalizer.inverse_tensor(pred_norm).cpu()
             tgt_raw = normalizer.inverse_tensor(tgt).cpu()
-            ks = batch["drill_counts"].tolist()
 
-            for k, p, t in zip(ks, pred, tgt_raw):
+            for k, p, t in zip(batch["drill_counts"].tolist(), pred, tgt_raw):
                 groups[int(k)][0].append(p.unsqueeze(0))
                 groups[int(k)][1].append(t.unsqueeze(0))
 
-    metrics: dict[int, dict[str, float]] = {}
-    for k in sorted(groups):
-        ps = torch.cat(groups[k][0])  # (n, 1, n_x, n_y)
-        ts = torch.cat(groups[k][1])
-        mse = F.mse_loss(ps, ts).item()
-        mae = (ps - ts).abs().mean().item()
-        corr = pearson_correlation(ps, ts)
-        metrics[k] = {"n": len(ps), "mse": mse, "mae": mae, "corr": corr}
+    return {
+        k: group_metrics(torch.cat(ps), torch.cat(ts))
+        for k, (ps, ts) in sorted(groups.items())
+    }
 
-    return metrics
+
+def validate_by_step(
+    model: nn.Module,
+    val_ds: object,
+    normalizer: TargetNormalizer,
+    device: str,
+    batch_size: int = 64,
+) -> dict[int, dict[str, float | int]]:
+    """Validation metrics grouped by sequential drill step (GeologicalBeliefDataset).
+
+    Returns an empty dict when ``val_ds.metadata`` is not set.
+    Metrics are in ore-value space (denormalised).
+    """
+    if getattr(val_ds, "metadata", None) is None:
+        return {}
+
+    model.eval()
+    loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
+    all_pred: list[torch.Tensor] = []
+    all_tgt: list[torch.Tensor] = []
+
+    with torch.no_grad():
+        for x, y in loader:
+            x, y = x.to(device), y.to(device)
+            all_pred.append(normalizer.inverse_tensor(model(x)).cpu())
+            all_tgt.append(normalizer.inverse_tensor(y).cpu())
+
+    preds = torch.cat(all_pred, dim=0)
+    tgts = torch.cat(all_tgt, dim=0)
+    steps = torch.tensor([m["step"] for m in val_ds.metadata], dtype=torch.long)
+
+    return {
+        step: group_metrics(preds[steps == step], tgts[steps == step])
+        for step in sorted(set(steps.tolist()))
+    }
+
+
+def validate_no_ore_by_step(
+    model: nn.Module,
+    val_ds: object,
+    normalizer: TargetNormalizer,
+    device: str,
+    threshold: float = 0.05,
+    batch_size: int = 64,
+) -> dict[int, dict[str, float | int]]:
+    """No-ore false-positive metrics grouped by sequential drill step (GeologicalBeliefDataset).
+
+    Returns an empty dict when ``val_ds.metadata`` is not set.
+    """
+    if getattr(val_ds, "metadata", None) is None:
+        return {}
+
+    model.eval()
+    loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
+    all_pred: list[torch.Tensor] = []
+    all_tgt: list[torch.Tensor] = []
+
+    with torch.no_grad():
+        for x, y in loader:
+            x, y = x.to(device), y.to(device)
+            all_pred.append(normalizer.inverse_tensor(model(x)).cpu())
+            all_tgt.append(normalizer.inverse_tensor(y).cpu())
+
+    preds = torch.cat(all_pred, dim=0)
+    tgts = torch.cat(all_tgt, dim=0)
+    steps = torch.tensor([m["step"] for m in val_ds.metadata], dtype=torch.long)
+    no_ore_mask = tgts.view(tgts.shape[0], -1).sum(dim=1) == 0
+
+    result: dict[int, dict[str, float | int]] = {}
+    for step in sorted(set(steps.tolist())):
+        sel = (steps == step) & no_ore_mask
+        n = int(sel.sum().item())
+        if n == 0:
+            result[step] = {
+                "no_ore_n": 0,
+                "no_ore_pred_total": float("nan"),
+                "no_ore_pred_max": float("nan"),
+                "no_ore_fp_area": float("nan"),
+            }
+        else:
+            result[step] = {
+                "no_ore_n": n,
+                **no_ore_metrics_from_flat(preds[sel].view(n, -1), threshold),
+            }
+
+    return result

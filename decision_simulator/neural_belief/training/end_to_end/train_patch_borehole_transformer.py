@@ -1,21 +1,22 @@
-"""Training pipeline for PatchBoreholeCLSEndToEndMapBeliefTransformer.
+"""Training pipeline for PatchBoreholeEndToEndMapBeliefTransformer.
 
-CLS-token patch experiment: identical to the mean-pool patch experiment
-(train_patch_borehole_transformer.py) except that the borehole encoder uses
-a learned CLS token instead of mean pooling over patch outputs.
+Patch-based experiment: replaces the CNN front-end of EndToEndMapBeliefTransformer
+with a pure depth-patch tokeniser.  The depth axis is split into fixed-size
+intervals; each patch is linearly projected to a token and passed to a
+transformer.  All downstream map components are identical to the CNN baseline.
 
-This file is intentionally parallel to train_patch_borehole_transformer.py.
-Dataset, collate, validation, and loss logic are fully reused.
+This file is intentionally parallel to train_end_to_end_map_belief.py.
+Dataset, collate, and loss logic are reused directly; only the model class and
+its config differ.
 
 Checkpoints
 -----------
-patch_borehole_cls_best.pt  — lowest validation MSE (ore-value space)
-patch_borehole_cls_last.pt  — final epoch
+patch_borehole_best.pt  — lowest validation MSE (ore-value space)
+patch_borehole_last.pt  — final epoch
 """
 
 from __future__ import annotations
 
-import math
 from pathlib import Path
 
 import numpy as np
@@ -31,33 +32,33 @@ from ...training_utils import (
     load_model_encoder_checkpoint,
     save_checkpoint_model,
 )
-from ...models.belief_models.end_to_end.patch_borehole_cls_transformer import (
-    PatchBoreholeCLSEndToEndMapBeliefTransformer,
+from ...models.belief_models.end_to_end.patch_borehole_transformer import (
+    PatchBoreholeEndToEndMapBeliefTransformer,
 )
 from .train_end_to_end_map_belief import E2EMapDataset
 from .helpers import validate_e2e_map, model_validation, collate_e2e_map
-from .training_configs import PatchBoreholeCLSConfig
+from ..belief_models.training_configs import PatchBoreholeConfig
 
 
 # ---------------------------------------------------------------------------
 # Main training function
 # ---------------------------------------------------------------------------
 
-def train_patch_borehole_cls_transformer(
+def train_patch_borehole_transformer(
     resources: DecisionSimulationResources,
-    cfg: PatchBoreholeCLSConfig,
+    cfg: PatchBoreholeConfig,
     device: str,
     checkpoint_dir: Path,
     plot_dir: Path | None = None,
     verbose: bool = True,
     train_ds: E2EMapDataset | None = None,
     val_ds: E2EMapDataset | None = None,
-) -> tuple[PatchBoreholeCLSEndToEndMapBeliefTransformer, TargetNormalizer]:
-    """Train PatchBoreholeCLSEndToEndMapBeliefTransformer with a full-map reconstruction objective.
+) -> tuple[PatchBoreholeEndToEndMapBeliefTransformer, TargetNormalizer]:
+    """Train PatchBoreholeEndToEndMapBeliefTransformer with a full-map reconstruction objective.
 
     Saves two checkpoints to checkpoint_dir:
-      patch_borehole_cls_best.pt  — lowest validation MSE (ore-value space)
-      patch_borehole_cls_last.pt  — final epoch
+      patch_borehole_best.pt  — lowest validation MSE (ore-value space)
+      patch_borehole_last.pt  — final epoch
 
     Parameters
     ----------
@@ -71,7 +72,7 @@ def train_patch_borehole_cls_transformer(
 
     Returns
     -------
-    (trained PatchBoreholeCLSEndToEndMapBeliefTransformer with best weights, fitted TargetNormalizer)
+    (trained PatchBoreholeEndToEndMapBeliefTransformer with best weights, fitted TargetNormalizer)
     """
     checkpoint_dir = Path(checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -126,7 +127,7 @@ def train_patch_borehole_cls_transformer(
 
     # ---- model ---------------------------------------------------------------
     model_cfg = cfg.to_model_config()
-    model = PatchBoreholeCLSEndToEndMapBeliefTransformer(model_cfg).to(device)
+    model = PatchBoreholeEndToEndMapBeliefTransformer(model_cfg).to(device)
     optimiser = torch.optim.AdamW(
         model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay
     )
@@ -135,9 +136,9 @@ def train_patch_borehole_cls_transformer(
         n_params = sum(p.numel() for p in model.parameters())
         print(f"  model params  : {n_params:,}")
         print(f"  patch_size    : {cfg.bh_patch_size}")
+        import math
         n_patches = math.ceil(cfg.n_depth / cfg.bh_patch_size)
         print(f"  n_patches     : {n_patches}")
-        print(f"  cls_pooling   : True")
         print(f"  bh_d_model    : {cfg.bh_d_model}")
         print(f"  bh_n_layers   : {cfg.bh_n_layers}")
         print(f"  d_model       : {cfg.d_model}")
@@ -204,7 +205,7 @@ def train_patch_borehole_cls_transformer(
             best_epoch = epoch
             patience_counter = 0
             save_checkpoint_model(
-                checkpoint_dir / "patch_borehole_cls_best.pt",
+                checkpoint_dir / "patch_borehole_best.pt",
                 model,
                 cfg,
                 epoch,
@@ -227,7 +228,7 @@ def train_patch_borehole_cls_transformer(
             break
 
     model_validation(
-        model, checkpoint_dir, "patch_borehole_cls_best.pt", history,
+        model, checkpoint_dir, "patch_borehole_best.pt", history,
         val_loader, device, normalizer,
         false_positive_threshold=cfg.false_positive_threshold,
         use_sequential_dataset=cfg.use_sequential_dataset,
@@ -246,21 +247,21 @@ def train_patch_borehole_cls_transformer(
 # Checkpoint loading
 # ---------------------------------------------------------------------------
 
-def load_patch_borehole_cls_checkpoint(
+def load_patch_borehole_checkpoint(
     path: Path,
     device: str = "cpu",
-) -> tuple[PatchBoreholeCLSEndToEndMapBeliefTransformer, PatchBoreholeCLSConfig, TargetNormalizer, list[dict]]:
-    """Load a PatchBoreholeCLSEndToEndMapBeliefTransformer checkpoint.
+) -> tuple[PatchBoreholeEndToEndMapBeliefTransformer, PatchBoreholeConfig, TargetNormalizer, list[dict]]:
+    """Load a PatchBoreholeEndToEndMapBeliefTransformer checkpoint.
 
     Returns
     -------
     (model, training_cfg, normalizer, history)
     """
-    def _model_fn(ckpt: dict) -> PatchBoreholeCLSEndToEndMapBeliefTransformer:
+    def _model_fn(ckpt: dict) -> PatchBoreholeEndToEndMapBeliefTransformer:
         if "model_cfg" in ckpt:
-            return PatchBoreholeCLSEndToEndMapBeliefTransformer(ckpt["model_cfg"])
-        return PatchBoreholeCLSEndToEndMapBeliefTransformer(ckpt["cfg"].to_model_config())
+            return PatchBoreholeEndToEndMapBeliefTransformer(ckpt["model_cfg"])
+        return PatchBoreholeEndToEndMapBeliefTransformer(ckpt["cfg"].to_model_config())
 
     return load_model_encoder_checkpoint(
-        path, _model_fn, PatchBoreholeCLSConfig, device
+        path, _model_fn, PatchBoreholeConfig, device
     )

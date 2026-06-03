@@ -59,7 +59,7 @@ from .helpers import (
     validate_no_ore_e2e_map,
     collate_e2e_map,
 )
-from .training_configs import VariableAwarePatchBoreholeUncertaintyConfig
+from ..belief_models.training_configs import VariableAwarePatchBoreholeUncertaintyConfig
 
 
 # ---------------------------------------------------------------------------

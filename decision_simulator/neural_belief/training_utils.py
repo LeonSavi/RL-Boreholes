@@ -52,6 +52,27 @@ def pearson_correlation(pred: torch.Tensor, target: torch.Tensor) -> float:
 # ---------------------------------------------------------------------------
 
 
+def group_metrics(preds: torch.Tensor, tgts: torch.Tensor) -> dict[str, float | int]:
+    """MSE/MAE/Pearson/count for a matched pair of prediction and target tensors."""
+    return {
+        "n": len(preds),
+        "mse": nn.functional.mse_loss(preds, tgts).item(),
+        "mae": (preds - tgts).abs().mean().item(),
+        "corr": pearson_correlation(preds, tgts),
+    }
+
+
+def no_ore_metrics_from_flat(
+    preds_flat: torch.Tensor, threshold: float
+) -> dict[str, float]:
+    """Aggregate false-positive metrics from a (n, cells) flat prediction tensor."""
+    return {
+        "no_ore_pred_total": preds_flat.sum(dim=1).mean().item(),
+        "no_ore_pred_max": preds_flat.max(dim=1).values.mean().item(),
+        "no_ore_fp_area": (preds_flat > threshold).float().mean(dim=1).mean().item(),
+    }
+
+
 def validate(
     model: nn.Module,
     loader: DataLoader,
@@ -396,5 +417,3 @@ def save_val_plots(
         )
 
     print(f"  plots saved -> {plot_dir}")
-
-

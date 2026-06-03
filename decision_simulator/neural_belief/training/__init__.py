@@ -20,9 +20,6 @@ train_patch_borehole_cls_transformer(resources, cfg, device, checkpoint_dir, ...
 train_variable_aware_patch_borehole_transformer(resources, cfg, device, checkpoint_dir, ...)
     Train VariableAwarePatchBoreholeEndToEndMapBeliefTransformer. Config: VariableAwarePatchBoreholeConfig.
 
-train_raw_borehole_belief(...)
-    Planned future training pipeline. Raises NotImplementedError.
-
 Checkpoint loading
 ------------------
 load_belief_checkpoint(path, device)              → UNetBelief
@@ -32,9 +29,8 @@ load_patch_borehole_checkpoint(path, device)      → PatchBoreholeEndToEndMapBe
 load_patch_borehole_cls_checkpoint(path, device)  → PatchBoreholeCLSEndToEndMapBeliefTransformer
 load_variable_aware_patch_borehole_checkpoint(path, device)  → VariableAwarePatchBoreholeEndToEndMapBeliefTransformer
 
-All public symbols are re-exported here so that both the new canonical import
-paths and the original ``decision_simulator.neural_belief.training.*`` paths
-continue to work without modification.
+All public symbols are re-exported here so that callers importing from
+``decision_simulator.neural_belief.training`` continue to work.
 """
 
 from .belief_models.training_configs import (
@@ -47,38 +43,37 @@ from .belief_models.training_configs import (
     VariableAwarePatchBoreholeConfig,
     VariableAwarePatchBoreholeUncertaintyConfig,
 )
-from .belief_models.train_unet_belief import (
+from .map_encoders.train_unet_belief import (
     train_neural_belief,
     load_belief_checkpoint,
 )
-from .belief_models.train_map_belief import (
+from .map_encoders.train_map_belief import (
     train_map_belief,
     load_map_belief_checkpoint,
 )
-from .belief_models.train_raw_borehole_belief import train_raw_borehole_belief
-from .belief_models.train_end_to_end_map_belief import (
+from .end_to_end.train_end_to_end_map_belief import (
     E2EMapDataset,
     collate_e2e_map,
     train_end_to_end_map_belief,
     load_e2e_map_belief_checkpoint,
 )
-from .belief_models.train_patch_borehole_transformer import (
+from .end_to_end.train_patch_borehole_transformer import (
     train_patch_borehole_transformer,
     load_patch_borehole_checkpoint,
 )
-from .belief_models.train_patch_borehole_cls_transformer import (
+from .end_to_end.train_patch_borehole_cls_transformer import (
     train_patch_borehole_cls_transformer,
     load_patch_borehole_cls_checkpoint,
 )
-from .belief_models.train_variable_aware_patch_borehole_transformer import (
+from .end_to_end.train_variable_aware_patch_borehole_transformer import (
     train_variable_aware_patch_borehole_transformer,
     load_variable_aware_patch_borehole_checkpoint,
 )
-from .belief_models.train_variable_aware_patch_borehole_uncertainty_transformer import (
+from .end_to_end.train_variable_aware_patch_borehole_uncertainty_transformer import (
     train_variable_aware_patch_uncertainty_borehole_transformer,
     load_variable_aware_patch_uncertainty_borehole_checkpoint,
 )
-from .belief_models.train_guided_exploration_belief import (
+from .end_to_end.train_guided_exploration_belief import (
     GuidedExplorationConfig,
     GuidedE2EMapDataset,
     GuidedTrainingStats,
@@ -86,8 +81,7 @@ from .belief_models.train_guided_exploration_belief import (
     load_guided_belief_checkpoint,
 )
 
-# Shared validation utilities re-exported here for callers that previously
-# imported validate_by_drill_bins from decision_simulator.neural_belief.training
+# Shared validation utilities re-exported for backward compatibility
 from ..training_utils import (
     DRILL_BINS,
     validate_by_drill_bins,
@@ -99,7 +93,7 @@ from ..training_utils import (
     load_model_encoder_checkpoint,
     save_checkpoint_model,
 )
-from ..sequential_eval import validate_by_step, save_sequential_val_plots
+from .end_to_end.helpers import validate_by_step, save_sequential_val_plots
 
 __all__ = [
     # UNet pipeline
@@ -141,8 +135,6 @@ __all__ = [
     "GuidedTrainingStats",
     "train_guided_exploration_belief",
     "load_guided_belief_checkpoint",
-    # Placeholder
-    "train_raw_borehole_belief",
     # Shared utilities
     "build_training_config",
     "load_model_encoder_checkpoint",

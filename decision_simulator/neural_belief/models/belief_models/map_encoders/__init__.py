@@ -7,7 +7,6 @@ from .map_belief_transformer import (
     MapBeliefTransformer,
     MapBeliefModel,
 )
-from .raw_borehole_belief import RawBoreholeBeliefEncoder
 
 __all__ = [
     "UNetBelief",
@@ -17,5 +16,4 @@ __all__ = [
     "OreReconstructionHead",
     "MapBeliefTransformer",
     "MapBeliefModel",
-    "RawBoreholeBeliefEncoder",
 ]

@@ -38,7 +38,7 @@ from ...models.belief_models.end_to_end.variable_aware_patch_borehole_transforme
 )
 from .train_end_to_end_map_belief import E2EMapDataset
 from .helpers import validate_e2e_map, model_validation, collate_e2e_map
-from .training_configs import VariableAwarePatchBoreholeConfig
+from ..belief_models.training_configs import VariableAwarePatchBoreholeConfig
 
 
 # ---------------------------------------------------------------------------

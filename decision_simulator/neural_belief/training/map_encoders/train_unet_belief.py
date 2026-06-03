@@ -33,7 +33,7 @@ from ...training_utils import (
     load_model_encoder_checkpoint,
     save_checkpoint_model,
 )
-from .training_configs import NeuralBeliefTrainingConfig
+from ..belief_models.training_configs import NeuralBeliefTrainingConfig
 
 
 def train_neural_belief(
@@ -206,7 +206,7 @@ def train_neural_belief(
     # ---- optional plots -------------------------------------------------------
     if plot_dir is not None:
         if cfg.use_sequential_dataset:
-            from ...sequential_eval import save_sequential_val_plots
+            from ..end_to_end.helpers import save_sequential_val_plots
 
             save_sequential_val_plots(
                 model,
@@ -258,7 +258,7 @@ def train_neural_belief(
 
     # ---- sequential step metrics -----------------------------------------------
     if cfg.use_sequential_dataset:
-        from ...sequential_eval import validate_by_step
+        from ..end_to_end.helpers import validate_by_step
 
         step_metrics = validate_by_step(model, val_ds, normalizer, device)
         if step_metrics:
@@ -287,7 +287,7 @@ def train_neural_belief(
     save_no_ore_metrics(no_ore_metrics, checkpoint_dir, verbose=verbose)
 
     if cfg.use_sequential_dataset:
-        from ...sequential_eval import validate_no_ore_by_step
+        from ..end_to_end.helpers import validate_no_ore_by_step
 
         no_ore_step = validate_no_ore_by_step(
             model,

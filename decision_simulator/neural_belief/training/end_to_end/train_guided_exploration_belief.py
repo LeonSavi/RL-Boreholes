@@ -67,7 +67,7 @@ from ...training_utils import (
     load_model_encoder_checkpoint,
     save_checkpoint_model,
 )
-from .training_configs import GuidedExplorationConfig
+from ..belief_models.training_configs import GuidedExplorationConfig
 from .train_end_to_end_map_belief import E2EMapDataset
 from .helpers import validate_e2e_map, model_validation, collate_e2e_map
 
