@@ -14,14 +14,15 @@ import dataclasses
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
-from .datasets import GeologicalBeliefDataset
+if TYPE_CHECKING:
+    from .datasets import GeologicalBeliefDataset
 
 
 @dataclass

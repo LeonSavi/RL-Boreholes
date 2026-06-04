@@ -57,12 +57,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from ..map_encoders.map_belief_transformer import (
-    MapBeliefConfig,
+from ..map_encoder_components.components import (
     MapBeliefEncoder,
     OreReconstructionHead,
     SpatialTokenEmbedding,
 )
+from ..model_configs import MapBeliefConfig
+from .end_to_end_helpers import encode_boreholes, scatter_to_map
 from .variable_aware_patch_borehole_transformer import (
     VariableAwarePatchBoreholeEndToEndConfig,
     VariableAwarePatchBoreholeTransformerEncoder,
@@ -145,65 +146,8 @@ class VariableAwarePatchBoreholeUncertaintyEndToEndMapBeliefTransformer(nn.Modul
         self.uncertainty_head = UncertaintyHead(map_cfg)
 
     # ------------------------------------------------------------------
-    # Internal helpers (identical to base model)
+    # Internal helpers
     # ------------------------------------------------------------------
-
-    def _encode_boreholes(
-        self,
-        boreholes: torch.Tensor,
-        padding_mask: torch.Tensor | None,
-    ) -> torch.Tensor:
-        """Encode raw boreholes to latent vectors, skipping padded rows."""
-        B, K = boreholes.shape[:2]
-        if padding_mask is not None:
-            not_padded = ~padding_mask
-            bh_valid = boreholes[not_padded]
-            lat_valid = self.bh_encoder(bh_valid)
-            lat = torch.zeros(
-                B, K, self.cfg.latent_dim,
-                device=boreholes.device, dtype=lat_valid.dtype,
-            )
-            lat[not_padded] = lat_valid
-        else:
-            bh_flat = boreholes.reshape(B * K, *boreholes.shape[2:])
-            lat = self.bh_encoder(bh_flat).reshape(B, K, self.cfg.latent_dim)
-        return lat
-
-    def _scatter_to_map(
-        self,
-        ore_vals: torch.Tensor,
-        positions: torch.Tensor,
-        latents: torch.Tensor,
-        padding_mask: torch.Tensor | None,
-    ) -> torch.Tensor:
-        """Build a dense (B, 2 + latent_dim, n_x, n_y) map from sparse observations."""
-        B, K = ore_vals.shape
-        n_x, n_y = self.cfg.n_x, self.cfg.n_y
-        N = n_x * n_y
-        C = 2 + self.cfg.latent_dim
-        device = ore_vals.device
-        dtype = ore_vals.dtype
-
-        i_idx = (positions[..., 0] * (n_x - 1)).round().long().clamp(0, n_x - 1)
-        j_idx = (positions[..., 1] * (n_y - 1)).round().long().clamp(0, n_y - 1)
-        flat_idx = i_idx * n_y + j_idx
-
-        if padding_mask is not None:
-            flat_idx = flat_idx.masked_fill(padding_mask, N)
-            valid = (~padding_mask).to(dtype)
-        else:
-            valid = torch.ones(B, K, device=device, dtype=dtype)
-
-        ore_ch = (ore_vals * valid).unsqueeze(1)
-        mask_ch = valid.unsqueeze(1)
-        lat_ch = (latents * valid.unsqueeze(-1)).transpose(1, 2)
-        values = torch.cat([ore_ch, mask_ch, lat_ch], dim=1)
-
-        flat_idx_exp = flat_idx.unsqueeze(1).expand(B, C, K)
-        out_flat = torch.zeros(B, C, N + 1, device=device, dtype=dtype)
-        out_flat.scatter_(2, flat_idx_exp, values)
-
-        return out_flat[:, :, :N].reshape(B, C, n_x, n_y)
 
     def _forward_all(
         self,
@@ -213,8 +157,8 @@ class VariableAwarePatchBoreholeUncertaintyEndToEndMapBeliefTransformer(nn.Modul
         padding_mask: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Full pipeline returning (ore_map, uncertainty_map, map_belief_latent)."""
-        latents = self._encode_boreholes(boreholes, padding_mask)
-        x = self._scatter_to_map(ore_vals, positions, latents, padding_mask)
+        latents = encode_boreholes(self.bh_encoder, boreholes, padding_mask, self.cfg.latent_dim)
+        x = scatter_to_map(ore_vals, positions, latents, padding_mask, self.cfg.n_x, self.cfg.n_y, self.cfg.latent_dim)
         tokens = self.token_embed(x)
         cls_out, spatial_out = self.map_encoder(tokens)
         ore_map = self.ore_head(spatial_out, self.cfg.n_x, self.cfg.n_y)

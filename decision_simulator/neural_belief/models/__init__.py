@@ -16,13 +16,16 @@ All models share the same input/output contract:
 """
 
 from .belief_models.map_encoders.unet_belief import UNetBelief
-from .belief_models.map_encoders.map_belief_transformer import (
-    MapBeliefConfig,
+from .belief_models.model_configs import MapBeliefConfig
+from .belief_models.map_encoder_components.components import (
     SpatialTokenEmbedding,
     MapBeliefEncoder,
     OreReconstructionHead,
-    MapBeliefTransformer,
-    MapBeliefModel,          # backward-compat alias for MapBeliefTransformer
+)
+from .belief_models.end_to_end.precomp_bh_map_belief_transformer import (
+    PreCompBHMapBeliefTransformer,
+    MapBeliefTransformer,    # backward-compat alias
+    MapBeliefModel,          # backward-compat alias
 )
 from .belief_models.borehole_encoders.autoencoder import (
     AEConfig,
@@ -54,7 +57,8 @@ __all__ = [
     "SpatialTokenEmbedding",
     "MapBeliefEncoder",
     "OreReconstructionHead",
-    "MapBeliefTransformer",
+    "PreCompBHMapBeliefTransformer",
+    "MapBeliefTransformer",  # backward-compat alias
     "MapBeliefModel",        # backward-compat alias
     # Borehole autoencoder
     "AEConfig",

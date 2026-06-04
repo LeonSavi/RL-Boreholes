@@ -1,4 +1,4 @@
-"""Training pipeline for MapBeliefTransformer.
+"""Training pipeline for PreCompBHMapBeliefTransformer.
 
 Trains the transformer-based geological belief encoder end-to-end using MSE
 loss in normalised target space, with gradient clipping for stability.
@@ -42,7 +42,7 @@ from ....training_utils import (
     load_model_encoder_checkpoint,
     save_checkpoint_model,
 )
-from ....models.belief_models.map_encoders.map_belief_transformer import MapBeliefTransformer
+from ....models.belief_models.end_to_end.precomp_bh_map_belief_transformer import PreCompBHMapBeliefTransformer
 from ..training_configs import MapBeliefTrainingConfig
 
 # ---------------------------------------------------------------------------
@@ -59,8 +59,8 @@ def train_map_belief(
     train_ds: GeologicalBeliefDataset | None = None,
     val_ds: GeologicalBeliefDataset | None = None,
     normalizer: TargetNormalizer | None = None,
-) -> tuple[MapBeliefTransformer, TargetNormalizer]:
-    """Train the MapBeliefTransformer end-to-end.
+) -> tuple[PreCompBHMapBeliefTransformer, TargetNormalizer]:
+    """Train the PreCompBHMapBeliefTransformer end-to-end.
 
     Saves two checkpoints to ``checkpoint_dir``:
       * ``map_belief_best.pt``  — lowest validation MSE (ore-value space)
@@ -81,7 +81,7 @@ def train_map_belief(
 
     Returns
     -------
-    (trained MapBeliefTransformer with best weights, fitted TargetNormalizer)
+    (trained PreCompBHMapBeliefTransformer with best weights, fitted TargetNormalizer)
     """
     checkpoint_dir = Path(checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -111,7 +111,7 @@ def train_map_belief(
     cfg.n_x = n_x
     cfg.n_y = n_y
     model_cfg = cfg.to_model_config()
-    model = MapBeliefTransformer(model_cfg).to(device)
+    model = PreCompBHMapBeliefTransformer(model_cfg).to(device)
     optimiser = torch.optim.AdamW(
         model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay
     )
@@ -343,11 +343,11 @@ def train_map_belief(
 def load_map_belief_checkpoint(
     path: Path,
     device: str = "cpu",
-) -> tuple[MapBeliefTransformer, MapBeliefTrainingConfig, TargetNormalizer, list[dict]]:
-    def _model_fn(ckpt: dict) -> MapBeliefTransformer:
+) -> tuple[PreCompBHMapBeliefTransformer, MapBeliefTrainingConfig, TargetNormalizer, list[dict]]:
+    def _model_fn(ckpt: dict) -> PreCompBHMapBeliefTransformer:
         if "model_cfg" in ckpt:
-            return MapBeliefTransformer(ckpt["model_cfg"])
-        return MapBeliefTransformer(ckpt["cfg"].to_model_config())
+            return PreCompBHMapBeliefTransformer(ckpt["model_cfg"])
+        return PreCompBHMapBeliefTransformer(ckpt["cfg"].to_model_config())
 
     return load_model_encoder_checkpoint(
         path, _model_fn, MapBeliefTrainingConfig, device

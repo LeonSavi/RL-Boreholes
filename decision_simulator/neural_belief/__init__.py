@@ -1,4 +1,10 @@
-from .models import UNetBelief, MapBeliefConfig, MapBeliefTransformer, MapBeliefModel
+from .models import (
+    UNetBelief,
+    MapBeliefConfig,
+    PreCompBHMapBeliefTransformer,
+    MapBeliefTransformer,   # backward-compat alias
+    MapBeliefModel,         # backward-compat alias
+)
 from .datasets import (
     BeliefDatasetConfig,
     GeologicalBeliefDataset,
@@ -32,6 +38,7 @@ __all__ = [
     # Models
     "UNetBelief",
     "MapBeliefConfig",
+    "PreCompBHMapBeliefTransformer",
     "MapBeliefTransformer",
     "MapBeliefModel",
     # Dataset
