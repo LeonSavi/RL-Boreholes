@@ -1399,6 +1399,245 @@ def load_sample_borehole_from_colab(
     return torch.from_numpy(bh).to(device), resources.variable_names
 
 
+def extract_borehole_attention_from_colab(
+    checkpoint_path: str | Path,
+    storage_root: str | Path,
+    output_dir: str | Path = "attention_analysis",
+    hdf5_path: str | Path = "data/dataset_HDF5/maps_00000_00499.h5",
+    n_per_class: int = 50,
+    norm_stats_from: Literal["jepa", "autoencoder", "none"] = "jepa",
+    device: str = "cuda",
+    seed: int = 42,
+) -> dict:
+    """Extract CLS-token attention tensors from multiple validation boreholes.
+
+    Samples ``n_per_class`` no-ore maps and ``n_per_class`` ore maps from the
+    HDF5 dataset (stratified by ``n_bodies``), runs each borehole through the
+    trained ``VariableAwarePatchBoreholeTransformerEncoder`` with attention
+    capture enabled, and saves the results to ``output_dir``.
+
+    Parameters
+    ----------
+    checkpoint_path
+        Path to ``variable_aware_patch_uncertainty_best.pt``.
+    storage_root
+        Absolute root for all data and resource paths.  Relative ``hdf5_path``
+        values are resolved against this directory.
+    output_dir
+        Where to write the three output files.  Created if absent.  Relative
+        paths are resolved against the current working directory.
+    hdf5_path
+        Path to the ``.h5`` shard.  Relative paths are resolved against
+        ``storage_root``.
+    n_per_class
+        Boreholes to extract per class (no-ore and ≥1-ore-body).  Actual
+        counts may be smaller when the dataset is imbalanced.
+    norm_stats_from
+        Which encoder checkpoint to load per-variable normalization statistics
+        from.  Must match what was used during training.
+    device
+        ``"cuda"`` or ``"cpu"``.
+    seed
+        RNG seed for reproducible map / cell selection.
+
+    Returns
+    -------
+    dict with keys:
+        ``cls_attn``  — ``torch.Tensor`` ``(n_samples, n_layers, n_heads, V, P)``
+        ``latent``    — ``torch.Tensor`` ``(n_samples, latent_dim)``
+        ``metadata``  — ``pd.DataFrame``  with one row per borehole
+
+    Saved files
+    -----------
+    ``<output_dir>/cls_attn.pt``   — stacked CLS-attention tensor
+    ``<output_dir>/latent.pt``     — stacked latent embeddings
+    ``<output_dir>/metadata.csv``  — per-borehole metadata
+
+    Example
+    -------
+    >>> from decision_simulator.neural_belief.colab import (
+    ...     extract_borehole_attention_from_colab,
+    ... )
+    >>> result = extract_borehole_attention_from_colab(
+    ...     checkpoint_path=(
+    ...         "/content/drive/MyDrive/Thesis/checkpoints/"
+    ...         "variable_aware_uncertainty_no_FP/2026-06-02_07-43-54/"
+    ...         "variable_aware_patch_uncertainty_best.pt"
+    ...     ),
+    ...     storage_root="/content/drive/MyDrive/Thesis",
+    ...     output_dir="attention_analysis",
+    ...     n_per_class=50,
+    ...     device="cuda",
+    ... )
+    >>> cls_attn = result["cls_attn"]   # (100, n_layers, n_heads, 5, 22)
+    >>> latent   = result["latent"]     # (100, latent_dim)
+    >>> meta     = result["metadata"]   # pd.DataFrame
+    """
+    import h5py
+    import numpy as np
+    from .models.belief_models.borehole_encoders.autoencoder import standardise
+    from .models.belief_models.borehole_encoder_components.attention_utils import (
+        extract_cls_attention,
+    )
+
+    check_device(device)
+
+    root = Path(storage_root).expanduser().resolve()
+    out_dir = Path(output_dir)
+    if not out_dir.is_absolute():
+        out_dir = Path.cwd() / out_dir
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    hdf5_resolved = Path(hdf5_path)
+    if not hdf5_resolved.is_absolute():
+        hdf5_resolved = root / hdf5_resolved
+
+    # --- load model -----------------------------------------------------------
+    print("Loading model from checkpoint …")
+    model, _, _, _ = load_variable_aware_patch_uncertainty_borehole_checkpoint(
+        Path(checkpoint_path), device=device
+    )
+    model.eval()
+    enc = model.bh_encoder
+    n_variables = enc.cfg.n_variables
+    n_patches = enc.n_patches
+    print(f"  n_variables  : {n_variables}")
+    print(f"  n_patches    : {n_patches}")
+
+    # --- load norm stats ------------------------------------------------------
+    jepa_path, ae_path, distributions, formation_geo, discovery = (
+        resolve_resource_paths(root)
+    )
+    check_encoder_path(norm_stats_from, jepa_path, ae_path)
+    resources, _ = load_decision_resources(
+        borehole_encoder=norm_stats_from,
+        jepa_path=jepa_path,
+        ae_path=ae_path,
+        distributions_path=distributions,
+        formation_geometry_path=formation_geo,
+        discovery_prior_path=discovery,
+        device="cpu",
+    )
+
+    # --- sample map indices ---------------------------------------------------
+    rng = np.random.default_rng(seed)
+
+    with h5py.File(hdf5_resolved, "r") as hf:
+        n_maps_in_file = int(hf["boreholes"].shape[0])
+        n_cells = int(hf["boreholes"].shape[1])
+        n_x = int(hf.attrs.get("pool_n_x", int(round(n_cells ** 0.5))))
+        n_y = int(hf.attrs.get("pool_n_y", int(round(n_cells ** 0.5))))
+        n_bodies_arr = hf["n_bodies"][:].astype(np.int32)    # (N,)
+        map_index_arr = hf["map_index"][:].astype(np.int32)  # (N,)
+
+    no_ore_idxs = np.where(n_bodies_arr == 0)[0]
+    ore_idxs    = np.where(n_bodies_arr  > 0)[0]
+
+    n_no_ore = min(n_per_class, len(no_ore_idxs))
+    n_ore    = min(n_per_class, len(ore_idxs))
+
+    selected_no_ore = rng.choice(no_ore_idxs, size=n_no_ore, replace=False)
+    selected_ore    = rng.choice(ore_idxs,    size=n_ore,    replace=False)
+    selected_idxs   = np.concatenate([selected_no_ore, selected_ore])
+    ore_labels      = np.array([0] * n_no_ore + [1] * n_ore, dtype=np.int32)
+    cell_idxs       = rng.integers(0, n_cells, size=len(selected_idxs))
+
+    print(f"\n  HDF5 maps  : {n_maps_in_file}  (no-ore={len(no_ore_idxs)}, ore={len(ore_idxs)})")
+    print(f"  Selected   : no-ore={n_no_ore}  ore={n_ore}  total={len(selected_idxs)}")
+    print(f"  Grid       : {n_x} × {n_y}  ({n_cells} cells per map)\n")
+
+    # --- extract attention for each borehole ----------------------------------
+    all_cls_attn: list[torch.Tensor] = []
+    all_latent:   list[torch.Tensor] = []
+    meta_rows:    list[dict]         = []
+
+    with h5py.File(hdf5_resolved, "r") as hf:
+        boreholes_ds    = hf["boreholes"]     # (N, n_cells, V, D)
+        yield_target_ds = hf["yield_target"]  # (N, n_x, n_y)
+
+        for sample_i, (map_idx, cell_idx, ore_label) in enumerate(
+            zip(selected_idxs.tolist(), cell_idxs.tolist(), ore_labels.tolist())
+        ):
+            bh_raw = boreholes_ds[map_idx, cell_idx].astype(np.float32)  # (V, D)
+            cell_x = cell_idx // n_y
+            cell_y = cell_idx  % n_y
+            ore_val = float(yield_target_ds[map_idx, cell_x, cell_y])
+
+            if resources.norm_stats:
+                bh = standardise(bh_raw, resources.norm_stats, resources.variable_names)
+            else:
+                bh = bh_raw
+            bh = np.nan_to_num(bh, nan=0.0).astype(np.float32)
+
+            bh_t = torch.from_numpy(bh).unsqueeze(0).to(device)  # (1, V, D)
+
+            with torch.no_grad():
+                latent, attn_weights = model.encode_borehole_with_attention(bh_t)
+
+            if attn_weights is None:
+                raise RuntimeError(
+                    "Model returned no attention weights. "
+                    "Ensure bh_n_layers > 0 in the model config."
+                )
+
+            # cls_attn: (n_layers, 1, n_heads, V, P) → squeeze batch dim
+            cls_attn_sq = extract_cls_attention(
+                attn_weights, n_variables, n_patches
+            )[:, 0, :, :, :].cpu()  # (n_layers, n_heads, V, P)
+
+            all_cls_attn.append(cls_attn_sq)
+            all_latent.append(latent[0].cpu())  # (latent_dim,)
+
+            meta_rows.append({
+                "sample_idx":     sample_i,
+                "map_idx":        map_idx,
+                "map_global_idx": int(map_index_arr[map_idx]),
+                "cell_idx":       cell_idx,
+                "cell_x":         cell_x,
+                "cell_y":         cell_y,
+                "ore_label":      int(ore_label),
+                "n_bodies":       int(n_bodies_arr[map_idx]),
+                "ore_val":        ore_val,
+            })
+
+            if (sample_i + 1) % 10 == 0 or (sample_i + 1) == len(selected_idxs):
+                print(
+                    f"  [{sample_i + 1:>3}/{len(selected_idxs)}]  "
+                    f"map={map_idx:>4}  cell={cell_idx:>4}  "
+                    f"label={int(ore_label)}  ore_val={ore_val:.4f}"
+                )
+
+    # --- stack and save -------------------------------------------------------
+    cls_attn_tensor = torch.stack(all_cls_attn)  # (n_samples, n_layers, n_heads, V, P)
+    latent_tensor   = torch.stack(all_latent)    # (n_samples, latent_dim)
+    metadata_df     = pd.DataFrame(meta_rows)
+
+    torch.save(cls_attn_tensor, out_dir / "cls_attn.pt")
+    torch.save(latent_tensor,   out_dir / "latent.pt")
+    metadata_df.to_csv(out_dir / "metadata.csv", index=False)
+
+    n_no_ore_saved = int((metadata_df["ore_label"] == 0).sum())
+    n_ore_saved    = int((metadata_df["ore_label"] == 1).sum())
+
+    print(f"\n{'=' * 50}")
+    print(f"  Extracted boreholes : {len(meta_rows)}")
+    print(f"  No-ore samples      : {n_no_ore_saved}")
+    print(f"  Ore samples         : {n_ore_saved}")
+    print(f"  cls_attn shape      : {tuple(cls_attn_tensor.shape)}")
+    print(f"  latent shape        : {tuple(latent_tensor.shape)}")
+    print(f"{'=' * 50}")
+    print(f"\nSaved to  '{out_dir}':")
+    print(f"  cls_attn.pt  → {out_dir / 'cls_attn.pt'}")
+    print(f"  latent.pt    → {out_dir / 'latent.pt'}")
+    print(f"  metadata.csv → {out_dir / 'metadata.csv'}")
+
+    return {
+        "cls_attn": cls_attn_tensor,
+        "latent":   latent_tensor,
+        "metadata": metadata_df,
+    }
+
+
 def inspect_borehole_attention(
     model: object,
     borehole: "torch.Tensor",
