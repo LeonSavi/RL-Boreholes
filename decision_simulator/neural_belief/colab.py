@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Literal
 
 import pandas as pd
+import torch
 
 from decision_simulator.resources import (
     check_device,
@@ -1275,4 +1276,195 @@ def train_end_to_end_from_colab(
     )
 
     return trained_model, history
+
+
+def load_variable_aware_uncertainty_model_from_colab(
+    checkpoint_path: str | Path,
+    device: str = "cuda",
+) -> object:
+    """Load a trained VariableAwarePatchBoreholeUncertaintyEndToEndMapBeliefTransformer.
+
+    Parameters
+    ----------
+    checkpoint_path
+        Path to ``variable_aware_patch_uncertainty_best.pt``.
+    device
+        ``"cuda"`` or ``"cpu"``.
+
+    Returns
+    -------
+    model
+        Trained model in eval mode on ``device``.
+
+    Example
+    -------
+    >>> model = load_variable_aware_uncertainty_model_from_colab(
+    ...     "/content/drive/MyDrive/Thesis/checkpoints/variable_aware_uncertainty_no_FP"
+    ...     "/2026-06-02_07-43-54/variable_aware_patch_uncertainty_best.pt",
+    ...     device="cuda",
+    ... )
+    """
+    check_device(device)
+    model, _, _, _ = load_variable_aware_patch_uncertainty_borehole_checkpoint(
+        Path(checkpoint_path), device=device
+    )
+    model.eval()
+    return model
+
+
+def load_sample_borehole_from_colab(
+    storage_root: str | Path,
+    hdf5_path: str | Path = "data/dataset_HDF5/maps_00000_00499.h5",
+    map_idx: int = 0,
+    cell_idx: int = 0,
+    norm_stats_from: Literal["jepa", "autoencoder", "none"] = "jepa",
+    device: str = "cpu",
+) -> tuple["torch.Tensor", list[str]]:
+    """Load and standardize a single borehole from an HDF5 map file.
+
+    Reads one cell from the ``boreholes`` dataset (shape ``(N, n_x*n_y, V, D)``),
+    standardizes it with the same per-variable norm stats used during training,
+    and returns it ready to pass to :func:`inspect_borehole_attention`.
+
+    Parameters
+    ----------
+    storage_root
+        Absolute root for all data and checkpoint paths.
+    hdf5_path
+        Path to the ``.h5`` shard file.  Relative paths are resolved against
+        ``storage_root``.
+    map_idx
+        Which map (row index) to read from the HDF5 file.
+    cell_idx
+        Which cell within that map; cells are stored in row-major order
+        (flattened ``n_x * n_y``).
+    norm_stats_from
+        Which encoder checkpoint to load normalization statistics from.
+        Must match what was used during training.
+    device
+        Device for the returned tensor (``"cpu"`` is fine for inspection).
+
+    Returns
+    -------
+    borehole : torch.Tensor  (V, D)
+        Standardized borehole tensor.
+    variable_names : list[str]
+        Geological variable names in V-dimension order, for use as
+        ``var_names`` in :func:`inspect_borehole_attention`.
+
+    Example
+    -------
+    >>> borehole, var_names = load_sample_borehole_from_colab(
+    ...     storage_root="/content/drive/MyDrive/Thesis",
+    ...     hdf5_path="data/dataset_HDF5/maps_00000_00499.h5",
+    ...     map_idx=0,
+    ...     cell_idx=12,
+    ... )
+    >>> latent, cls_attn = inspect_borehole_attention(model, borehole.to("cuda"), var_names=var_names)
+    """
+    import h5py
+    import numpy as np
+    from .models.belief_models.borehole_encoders.autoencoder import standardise
+
+    root = Path(storage_root).expanduser().resolve()
+
+    hdf5_resolved = Path(hdf5_path)
+    if not hdf5_resolved.is_absolute():
+        hdf5_resolved = root / hdf5_resolved
+
+    jepa_path, ae_path, distributions, formation_geo, discovery = (
+        resolve_resource_paths(root)
+    )
+    check_encoder_path(norm_stats_from, jepa_path, ae_path)
+
+    resources, _ = load_decision_resources(
+        borehole_encoder=norm_stats_from,
+        jepa_path=jepa_path,
+        ae_path=ae_path,
+        distributions_path=distributions,
+        formation_geometry_path=formation_geo,
+        discovery_prior_path=discovery,
+        device="cpu",
+    )
+
+    with h5py.File(hdf5_resolved, "r") as hf:
+        bh_raw = hf["boreholes"][map_idx, cell_idx].astype(np.float32)  # (V, D)
+
+    if resources.norm_stats:
+        bh = standardise(bh_raw, resources.norm_stats, resources.variable_names)
+    else:
+        bh = bh_raw
+
+    bh = np.nan_to_num(bh, nan=0.0).astype(np.float32)
+    return torch.from_numpy(bh).to(device), resources.variable_names
+
+
+def inspect_borehole_attention(
+    model: object,
+    borehole: "torch.Tensor",
+    var_names: list[str] | None = None,
+    layer_idx: int = -1,
+    sample_idx: int = 0,
+    plot: bool = True,
+    title: str | None = None,
+) -> tuple["torch.Tensor", "torch.Tensor | None"]:
+    """Extract CLS-token attention from the borehole encoder and optionally plot it.
+
+    Only works with models that use VariableAwarePatchBoreholeTransformerEncoder
+    (i.e. ``bh_encoder_model="variable_aware"`` or ``"variable_aware_uncertainty"``).
+
+    Parameters
+    ----------
+    model      : trained end-to-end model with a ``bh_encoder`` attribute and an
+                 ``encode_borehole_with_attention()`` method (e.g.
+                 VariableAwarePatchBoreholeUncertaintyEndToEndMapBeliefTransformer).
+    borehole   : (V, D) or (B, V, D) — standardised raw borehole on the correct device.
+    var_names  : geological variable names for the y-axis labels.
+                 Falls back to "Var 0", "Var 1", … when None.
+    layer_idx  : which transformer layer to visualize; -1 = last layer.
+    sample_idx : which batch element to plot when borehole is a batch.
+    plot       : if True, render the CLS-attention heatmap inline.
+    title      : custom plot title.
+
+    Returns
+    -------
+    latent   : (B, latent_dim) — borehole latent embedding
+    cls_attn : (n_layers, B, n_heads, n_variables, n_patches) or None
+
+    Example (Colab)
+    ---------------
+    >>> model, history = train_end_to_end_from_colab(
+    ...     ..., bh_encoder_model="variable_aware_uncertainty"
+    ... )
+    >>> # borehole: a single standardised borehole tensor (V, D)
+    >>> latent, cls_attn = inspect_borehole_attention(
+    ...     model, borehole, var_names=resources.variable_names
+    ... )
+    """
+    from .models.belief_models.borehole_encoder_components.attention_utils import (
+        extract_cls_attention,
+        plot_cls_attention,
+    )
+
+    model.eval()
+    with torch.no_grad():
+        latent, attn_weights = model.encode_borehole_with_attention(borehole)
+
+    if attn_weights is None:
+        print("No attention weights (model has bh_n_layers=0).")
+        return latent, None
+
+    enc = model.bh_encoder
+    cls_attn = extract_cls_attention(attn_weights, enc.cfg.n_variables, enc.n_patches)
+
+    if plot:
+        plot_cls_attention(
+            cls_attn,
+            layer_idx=layer_idx,
+            sample_idx=sample_idx,
+            var_names=var_names,
+            title=title,
+        )
+
+    return latent, cls_attn
 

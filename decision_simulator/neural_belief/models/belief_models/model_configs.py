@@ -148,7 +148,7 @@ class EndToEndMapBeliefConfig(BaseE2EArchConfig):
 
     def to_e2e_config(self):
         """Build an E2EConfig to construct BoreholeTransformerEncoder."""
-        from .end_to_end.model_configs import E2EConfig
+        from .end_to_end.utils.model_configs import E2EConfig
         return E2EConfig(
             n_variables=self.n_variables,
             n_depth=self.n_depth,
@@ -179,7 +179,7 @@ class PatchBoreholeEndToEndConfig(BaseE2EArchConfig):
 
     def to_patch_config(self):
         """Build a PatchBoreholeConfig to construct PatchBoreholeTransformerEncoder."""
-        from .end_to_end.model_configs import PatchBoreholeConfig
+        from .end_to_end.utils.model_configs import PatchBoreholeConfig
         return PatchBoreholeConfig(
             n_variables=self.n_variables,
             n_depth=self.n_depth,
@@ -210,7 +210,7 @@ class PatchBoreholeCLSEndToEndConfig(BaseE2EArchConfig):
 
     def to_cls_config(self):
         """Build a PatchBoreholeCLSConfig to construct PatchBoreholeCLSTransformerEncoder."""
-        from .end_to_end.model_configs import PatchBoreholeCLSConfig
+        from .end_to_end.utils.model_configs import PatchBoreholeCLSConfig
         return PatchBoreholeCLSConfig(
             n_variables=self.n_variables,
             n_depth=self.n_depth,
@@ -237,7 +237,7 @@ class VariableAwarePatchBoreholeEndToEndConfig(BaseE2EArchConfig):
 
     def to_encoder_config(self):
         """Build a VariableAwarePatchBoreholeConfig for the borehole encoder."""
-        from .end_to_end.model_configs import VariableAwarePatchBoreholeConfig
+        from .end_to_end.utils.model_configs import VariableAwarePatchBoreholeConfig
         return VariableAwarePatchBoreholeConfig(
             n_variables=self.n_variables,
             n_depth=self.n_depth,

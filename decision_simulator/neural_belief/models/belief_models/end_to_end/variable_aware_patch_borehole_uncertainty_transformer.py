@@ -55,60 +55,18 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
+from ..BH_to_map_encoder_components.spatial_projection_layer import SpatialProjectionLayer
 from ..map_encoder_components.components import (
     MapBeliefEncoder,
     OreReconstructionHead,
-    SpatialTokenEmbedding,
+    UncertaintyHead,
 )
-from ..model_configs import MapBeliefConfig
-from .end_to_end_helpers import encode_boreholes, scatter_to_map
+from .utils.end_to_end_helpers import encode_boreholes
 from .variable_aware_patch_borehole_transformer import (
     VariableAwarePatchBoreholeEndToEndConfig,
     VariableAwarePatchBoreholeTransformerEncoder,
 )
-
-
-# ---------------------------------------------------------------------------
-# Uncertainty head
-# ---------------------------------------------------------------------------
-
-
-class UncertaintyHead(nn.Module):
-    """Per-cell MLP head predicting spatial prediction uncertainty.
-
-    Structurally identical to OreReconstructionHead, with softplus applied to
-    the final output to enforce strictly non-negative uncertainty estimates.
-
-    Input
-    -----
-    spatial_tokens  : (B, n_x * n_y, d_model)
-    n_x, n_y        : int — passed at runtime to support variable grid sizes
-
-    Output
-    ------
-    uncertainty_map : (B, 1, n_x, n_y)  — strictly non-negative (softplus)
-    """
-
-    def __init__(self, cfg: MapBeliefConfig) -> None:
-        super().__init__()
-        self.mlp = nn.Sequential(
-            nn.Linear(cfg.d_model, cfg.head_hidden_dim),
-            nn.GELU(),
-            nn.Dropout(cfg.dropout),
-            nn.Linear(cfg.head_hidden_dim, 1),
-        )
-        nn.init.zeros_(self.mlp[-1].bias)
-        nn.init.trunc_normal_(self.mlp[-1].weight, std=0.02)
-
-    def forward(
-        self, spatial_tokens: torch.Tensor, n_x: int, n_y: int
-    ) -> torch.Tensor:
-        B = spatial_tokens.shape[0]
-        unc_flat = self.mlp(spatial_tokens)           # (B, N, 1)
-        unc_flat = F.softplus(unc_flat.squeeze(-1))   # (B, N) — strictly positive
-        return unc_flat.reshape(B, 1, n_x, n_y)      # (B, 1, n_x, n_y)
 
 
 # ---------------------------------------------------------------------------
@@ -140,7 +98,7 @@ class VariableAwarePatchBoreholeUncertaintyEndToEndMapBeliefTransformer(nn.Modul
         )
 
         map_cfg = cfg.to_map_belief_config()
-        self.token_embed = SpatialTokenEmbedding(map_cfg)
+        self.spatial_projection = SpatialProjectionLayer(map_cfg)
         self.map_encoder = MapBeliefEncoder(map_cfg)
         self.ore_head = OreReconstructionHead(map_cfg)
         self.uncertainty_head = UncertaintyHead(map_cfg)
@@ -158,8 +116,7 @@ class VariableAwarePatchBoreholeUncertaintyEndToEndMapBeliefTransformer(nn.Modul
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Full pipeline returning (ore_map, uncertainty_map, map_belief_latent)."""
         latents = encode_boreholes(self.bh_encoder, boreholes, padding_mask, self.cfg.latent_dim)
-        x = scatter_to_map(ore_vals, positions, latents, padding_mask, self.cfg.n_x, self.cfg.n_y, self.cfg.latent_dim)
-        tokens = self.token_embed(x)
+        tokens = self.spatial_projection(ore_vals, positions, latents, padding_mask)
         cls_out, spatial_out = self.map_encoder(tokens)
         ore_map = self.ore_head(spatial_out, self.cfg.n_x, self.cfg.n_y)
         uncertainty_map = self.uncertainty_head(spatial_out, self.cfg.n_x, self.cfg.n_y)
@@ -227,3 +184,37 @@ class VariableAwarePatchBoreholeUncertaintyEndToEndMapBeliefTransformer(nn.Modul
         latent           : (B, d_model)
         """
         return self._forward_all(boreholes, ore_vals, positions, padding_mask)
+
+    def encode_borehole_with_attention(
+        self,
+        borehole: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Encode a single borehole (or batch) and return its latent plus attention weights.
+
+        Runs only the borehole encoder with attention capture enabled; the rest of
+        the pipeline (scatter, map transformer, heads) is not executed.
+
+        Parameters
+        ----------
+        borehole : (V, D) or (B, V, D) — standardised raw borehole tensor
+
+        Returns
+        -------
+        latent       : (B, latent_dim)
+        attn_weights : (n_layers, B, n_heads, seq_len, seq_len) or None
+                       seq_len = 1 + n_variables * n_patches (CLS token first).
+                       None when bh_n_layers == 0.
+
+        Example
+        -------
+        >>> latent, attn_weights = model.encode_borehole_with_attention(borehole)
+        >>> from decision_simulator.neural_belief.models.belief_models.borehole_encoder_components import (
+        ...     extract_cls_attention, plot_cls_attention,
+        ... )
+        >>> enc = model.bh_encoder
+        >>> cls_attn = extract_cls_attention(attn_weights, enc.cfg.n_variables, enc.n_patches)
+        >>> plot_cls_attention(cls_attn, var_names=["Fe", "Al", ...])
+        """
+        if borehole.dim() == 2:
+            borehole = borehole.unsqueeze(0)
+        return self.bh_encoder(borehole, return_attention=True)

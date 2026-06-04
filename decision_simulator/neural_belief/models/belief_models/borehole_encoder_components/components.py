@@ -17,8 +17,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from ..end_to_end.end_to_end_helpers import sinusoidal_pe_1d
-from ..end_to_end.model_configs import (
+from ..end_to_end.utils.end_to_end_helpers import sinusoidal_pe_1d
+from ..end_to_end.utils.model_configs import (
     E2EConfig,
     PatchBoreholeConfig,
     PatchBoreholeCLSConfig,
@@ -336,7 +336,25 @@ class VariableAwarePatchBoreholeTransformerEncoder(nn.Module):
             f"params={n_params:,}"
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        return_attention: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor | None]:
+        """Encode a batch of boreholes to latent vectors.
+
+        Parameters
+        ----------
+        x                : (B, V, D)
+        return_attention : if True, also return per-layer attention weights
+
+        Returns
+        -------
+        latent       : (B, latent_dim)
+        attn_weights : (n_layers, B, n_heads, seq_len, seq_len) — only when
+                       return_attention=True; None when bh_n_layers == 0.
+                       seq_len = 1 + n_variables * n_patches (CLS first).
+        """
         # x: (B, V, D)
         B, V, D = x.shape
         pad_len = self.padded_depth - D
@@ -362,8 +380,30 @@ class VariableAwarePatchBoreholeTransformerEncoder(nn.Module):
         cls_tokens = self.cls_token.expand(B, -1, -1)
         feat = torch.cat([cls_tokens, feat], dim=1)  # (B, 1 + V*n_patches, bh_d_model)
 
+        attn_weights: torch.Tensor | None = None
         if self.cfg.bh_n_layers > 0:
-            feat = self.transformer(feat)
+            if return_attention:
+                # Manually iterate layers to capture per-layer attention weights.
+                # Replicates nn.TransformerEncoderLayer forward with norm_first=True
+                # while calling self_attn with need_weights=True.
+                all_attn: list[torch.Tensor] = []
+                for layer in self.transformer.layers:
+                    normed = layer.norm1(feat)
+                    attn_out, attn_w = layer.self_attn(
+                        normed, normed, normed,
+                        need_weights=True,
+                        average_attn_weights=False,
+                    )
+                    feat = feat + layer.dropout1(attn_out)
+                    feat = feat + layer._ff_block(layer.norm2(feat))
+                    all_attn.append(attn_w)  # (B, n_heads, seq, seq)
+                attn_weights = torch.stack(all_attn, dim=0)  # (n_layers, B, n_heads, seq, seq)
+            else:
+                feat = self.transformer(feat)
 
         cls_out = feat[:, 0]             # (B, bh_d_model)
-        return self.out_proj(cls_out)    # (B, latent_dim)
+        latent = self.out_proj(cls_out)  # (B, latent_dim)
+
+        if return_attention:
+            return latent, attn_weights
+        return latent

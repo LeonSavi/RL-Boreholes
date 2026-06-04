@@ -40,15 +40,12 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
+from ..BH_to_map_encoder_components.spatial_projection_layer import SpatialProjectionLayer
 from ..borehole_encoder_components.components import BoreholeTransformerEncoder
-from ..map_encoder_components.components import (
-    MapBeliefEncoder,
-    OreReconstructionHead,
-    SpatialTokenEmbedding,
-)
+from ..map_encoder_components.components import MapBeliefEncoder, OreReconstructionHead
 from ..model_configs import EndToEndMapBeliefConfig, MapBeliefConfig  # noqa: F401
-from .end_to_end_helpers import encode_boreholes, scatter_to_map
-from .model_configs import E2EConfig  # noqa: F401
+from .utils.end_to_end_helpers import encode_boreholes
+from .utils.model_configs import E2EConfig  # noqa: F401
 
 # ---------------------------------------------------------------------------
 # Model
@@ -76,7 +73,7 @@ class EndToEndMapBeliefTransformer(nn.Module):
         self.bh_encoder = BoreholeTransformerEncoder(cfg.to_e2e_config())
 
         map_cfg = cfg.to_map_belief_config()
-        self.token_embed = SpatialTokenEmbedding(map_cfg)
+        self.spatial_projection = SpatialProjectionLayer(map_cfg)
         self.map_encoder = MapBeliefEncoder(map_cfg)
         self.ore_head = OreReconstructionHead(map_cfg)
 
@@ -93,8 +90,7 @@ class EndToEndMapBeliefTransformer(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Full pipeline returning (ore_map, map_belief_latent)."""
         latents = encode_boreholes(self.bh_encoder, boreholes, padding_mask, self.cfg.latent_dim)
-        x = scatter_to_map(ore_vals, positions, latents, padding_mask, self.cfg.n_x, self.cfg.n_y, self.cfg.latent_dim)
-        tokens = self.token_embed(x)
+        tokens = self.spatial_projection(ore_vals, positions, latents, padding_mask)
         cls_out, spatial_out = self.map_encoder(tokens)
         ore_map = self.ore_head(spatial_out, self.cfg.n_x, self.cfg.n_y)
         return ore_map, cls_out

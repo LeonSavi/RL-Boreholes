@@ -14,7 +14,7 @@ from ..model_configs import (
     VariableAwarePatchBoreholeEndToEndConfig,
 )
 from .end_to_end_map_belief_transformer import EndToEndMapBeliefTransformer
-from .model_configs import (
+from .utils.model_configs import (
     BaseBHEncoderConfig,
     E2EConfig,
     PatchBoreholeConfig,
