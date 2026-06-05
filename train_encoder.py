@@ -34,7 +34,7 @@ from simulator import FormationGeometry, DiscoveryPrior
 
 from simulator.distributions import DistributionBank
 from simulator.map_generator import MapGenerator, SimConfig
-from encoder.autoencoder import (
+from decision_simulator.neural_belief.models.belief_models.borehole_encoders.autoencoder import (
     BoreholeAutoencoder,
     AEConfig,
     save_checkpoint,

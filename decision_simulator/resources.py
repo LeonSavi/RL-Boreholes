@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Any, Literal
 
-from encoder.jepa_encoder import JEPAModel, load_jepa_checkpoint
+from decision_simulator.neural_belief.models.belief_models.borehole_encoders.jepa_encoder import JEPAModel, load_jepa_checkpoint
 
 from simulator.distributions import (
     DistributionBank,
@@ -112,7 +112,7 @@ def load_decision_resources(
     elif borehole_encoder == "autoencoder":
         if not ae_path.exists():
             raise FileNotFoundError(f"Autoencoder checkpoint not found: {ae_path}")
-        from encoder.autoencoder import load_checkpoint as load_ae_checkpoint
+        from decision_simulator.neural_belief.models.belief_models.borehole_encoders.autoencoder import load_checkpoint as load_ae_checkpoint
 
         print("Loading autoencoder checkpoint...")
         ae_model, norm_stats, variable_names = load_ae_checkpoint(

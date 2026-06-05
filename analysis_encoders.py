@@ -34,9 +34,9 @@ import numpy as np
 import pandas as pd
 import torch
 
-from encoder.autoencoder import load_checkpoint as load_ae_checkpoint
-from encoder.autoencoder import standardise
-from encoder.jepa_encoder import load_jepa_checkpoint
+from decision_simulator.neural_belief.models.belief_models.borehole_encoders.autoencoder import load_checkpoint as load_ae_checkpoint
+from decision_simulator.neural_belief.models.belief_models.borehole_encoders.autoencoder import standardise
+from decision_simulator.neural_belief.models.belief_models.borehole_encoders.jepa_encoder import load_jepa_checkpoint
 from simulator.distributions import DistributionBank
 from simulator.formation_geometry import FormationGeometry
 from simulator.map_generator import SimConfig

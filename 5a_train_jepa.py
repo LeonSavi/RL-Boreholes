@@ -40,7 +40,7 @@ from train_encoder import (
     _Prefetcher, EarlyStopper, _underlying,
     PROFILE_STEPS, _dump_profile, _TrainLog,
 )
-from encoder.jepa_encoder import (
+from decision_simulator.neural_belief.models.belief_models.borehole_encoders.jepa_encoder import (
     JEPAModel, JEPAConfig, save_jepa_checkpoint,
     sample_context_target_positions,
 )

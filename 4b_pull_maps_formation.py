@@ -36,7 +36,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from encoder.autoencoder import standardise
+from decision_simulator.neural_belief.models.belief_models.borehole_encoders.autoencoder import standardise
 from simulator.formation_distributions import FormationDistributionBank
 from simulator.distributions import DiscoveryPrior
 from simulator.formation_geometry import FormationGeometry

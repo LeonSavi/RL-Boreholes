@@ -4,7 +4,7 @@ import warnings
 import numpy as np
 import torch
 
-from encoder.autoencoder import standardise
+from decision_simulator.neural_belief.models.belief_models.borehole_encoders.autoencoder import standardise
 from decision_simulator.resources import DecisionSimulationResources
 from decision_simulator.typing import DrillObservation
 

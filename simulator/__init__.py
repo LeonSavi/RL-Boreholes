@@ -15,7 +15,7 @@ from simulator.distributions import DistributionBank, CellDistribution, Discover
 from simulator.orebody import OreBody, sample_orebodies
 from simulator.map_generator import generate_map, MapGenerator, SimConfig
 from simulator.formation_geometry import FormationGeometry, FORMATION_ORDER,FormationStats
-from encoder.autoencoder import (
+from decision_simulator.neural_belief.models.belief_models.borehole_encoders.autoencoder import (
     BoreholeAutoencoder, AEConfig,
     save_checkpoint, load_checkpoint,
 )

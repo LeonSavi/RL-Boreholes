@@ -38,7 +38,7 @@ from .formation_geometry import (
     FORMATION_ORDER,
 )
 from .map_generator import generate_map, SimConfig, MapGenerator
-from encoder.autoencoder import BoreholeAutoencoder, AEConfig
+from decision_simulator.neural_belief.models.belief_models.borehole_encoders.autoencoder import BoreholeAutoencoder, AEConfig
 from train_encoder import boreholes_from_map, compute_standardisation_stats, standardise
 
 # rocks the fake geometry below can produce; bank must cover all of these
