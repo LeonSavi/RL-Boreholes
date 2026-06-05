@@ -54,3 +54,8 @@ data/garcon/
 
 .claude/
 .tex/
+
+decision_simulator/plots
+attention_plots
+attention_analysis
+decision_simulator/results/
