@@ -13,10 +13,18 @@ decision_simulator/results/
 *.parquet
 *.las
 *.json
+*.npz
+
+data/dataset/
+
 
 *.csv
 *.csv*
 *.xlsx
+*.xlsx:mshield
+*.xlsx:Zone.Identifier
+*:Zone.Identifier
+
 !boreholes.xlsx
 !data/nlog/boreholes.xlsx
 
@@ -35,8 +43,19 @@ test.py
 
 *.npy
 
-.claude/
 
-decision_simulator/plots
-attention_plots
-attention_analysis
+# backup pickles / parquets / checkpoints (large, not source of truth)
+*.bak*
+
+# runtime logs
+logs/
+*.log
+!boreholes.xlsx
+
+# raw external dataset (downloadable from Garzon Zenodo DOI; analysis
+# outputs live under plots/garcon/ and plots/analysis/)
+data/garcon/
+
+.claude/
+.tex/
+

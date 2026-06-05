@@ -119,18 +119,27 @@ def generate_independent_boreholes(
     for z_idx in range(nz):
         depth = float(depth_axis[z_idx])
         col = rocks[:, z_idx]
-        unique_rocks = np.unique(col)
-        for rock in unique_rocks:
-            mask = (col == rock)
+        fm_col = forms[:, z_idx]
+        # v3.1: bank keys on (rock, formation, depth_bin) -- batch by
+        # (rock, formation) so each bank.sample() draws from the correct
+        # formation-specific cell.
+        pairs = set(zip(col.tolist(), fm_col.tolist()))
+        for rock, formation in pairs:
+            if rock is None:
+                continue
+            mask = (col == rock) & (fm_col == formation)
             idxs = np.where(mask)[0]
             n_cells = len(idxs)
             if n_cells == 0:
                 continue
             try:
-                samples = bank.sample(str(rock), depth, n=n_cells, rng=rng)
+                samples = bank.sample(
+                    str(rock), depth, n=n_cells, rng=rng,
+                    formation=str(formation) if formation is not None else None,
+                )
             except Exception as exc:  # noqa: BLE001
                 print(f"    [warn] bank.sample failed for "
-                      f"({rock}, {depth:.0f}m): {exc!r}")
+                      f"({rock}, {formation}, {depth:.0f}m): {exc!r}")
                 continue
             for v in variables:
                 if v not in samples:

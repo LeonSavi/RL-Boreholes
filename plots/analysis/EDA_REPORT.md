@@ -4,7 +4,7 @@ Run before training to characterise the corpus and the design choices it forced.
 
 ## 1. Data census
 
-- **8,504,443** rows total · **2,069** unique wells
+- **8,517,438** rows total · **2,069** unique wells
 - **NLOG**: 1,537 wells (Dutch onshore + Dutch sector of the North Sea)
 - **LILY**: 532 wells (IODP scientific drilling, global)
 
@@ -49,8 +49,8 @@ Run before training to characterise the corpus and the design choices it forced.
 | formation | measurement | coarse IQR | fine IQR | reduction % |
 |---|---|---|---|---|
 | ZE | rhob | 0.6269 | 0.328 | **47.7%** |
-| RO | gr_api | 52.4678 | 32.0378 | **38.9%** |
-| RO | rhob | 0.2393 | 0.1537 | **35.8%** |
+| RO | gr_api | 52.469 | 32.0366 | **38.9%** |
+| RO | rhob | 0.2393 | 0.1536 | **35.8%** |
 | SL | res_shal_log | 0.4552 | 0.3123 | **31.4%** |
 | RO | vcl | 0.4531 | 0.3177 | **29.9%** |
 
@@ -69,7 +69,7 @@ Splitting `claystone` → `claystone_hot`/`claystone_cool` and `sandstone` → `
 
 ![LILY vs NLOG depth-matched](12_lily_vs_nlog_calibration.png)
 
-- 29 (rock × measurement × depth-bin) cells have both corpora; **20** flag as materially disagreeing (|Δmedian| > pooled IQR).
+- 31 (rock × measurement × depth-bin) cells have both corpora; **24** flag as materially disagreeing (|Δmedian| > pooled IQR).
 - Pooling the two corpora extends the empirical support (see `support_bounds.csv` for the `extends` column) but would bias absolute values where the two disagree.  The simulator therefore samples from rock-stratified pools, not the marginal.
 
 ### 5.3 Empirical clipping bounds

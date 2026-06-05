@@ -314,7 +314,8 @@ def _fit_transition_matrix(
     bin_step_m: float = TRANSITION_BIN_STEP_M,
     laplace: float = TRANSITION_LAPLACE,
     calibrate_to_empirical_runs: bool = True,
-    max_p_self: float = 0.998,
+    max_p_self: float = 0.97,
+    max_gap_cells: int = 5,
 ) -> tuple[pd.DataFrame, int]:
     """Fit a 1-step Markov transition matrix at the given depth step.
 
@@ -354,7 +355,12 @@ def _fit_transition_matrix(
     work["_prev_bin"] = work.groupby("borehole")["_bin"].shift(1)
     work["_prev_rock"] = work.groupby("borehole")["rock_type_fine"].shift(1)
     pairs = work.dropna(subset=["_prev_bin", "_prev_rock"])
-    pairs = pairs[pairs["_bin"] - pairs["_prev_bin"] == 1]
+    # v3.3 (Phase S): allow up to MAX_GAP_CELLS missing bins between
+    # observed bins. The previous strict +1 filter dropped rare-rock
+    # transitions that survive across small log gaps -- making the
+    # bank's matrix miss e.g. RB sandstone entirely.
+    pair_gap = pairs["_bin"] - pairs["_prev_bin"]
+    pairs = pairs[(pair_gap >= 1) & (pair_gap <= max_gap_cells)]
     if not pairs.empty:
         ij = pairs[["_prev_rock", "rock_type_fine"]].to_numpy()
         for r_prev, r_cur in ij:
@@ -672,52 +678,43 @@ class FormationGeometry:
         min_layer_thickness: float,
         max_resamples: int,
     ) -> list[float]:
+        # Comonotone-quantile coupling.
+        #
+        # In real Dutch wells, formation top depths are positively
+        # correlated: a well drilled in a thick-Cenozoic area has all
+        # formations sitting deeper (compaction + basin subsidence).
+        # The previous implementation sampled each formation
+        # independently and rejected non-monotone vectors, falling
+        # back to a fixed median stack in 71% of cases (audit:
+        # `topdepth_dispersion_audit.py`).  That collapsed the
+        # variance.  Naive sequential per-formation resampling
+        # restored variance but broke the inter-formation
+        # correlation, pushing deep formations to the tails.
+        #
+        # We now draw ONE uniform u per column and use u as the
+        # quantile for every formation in the stack:
+        #   top_i = empirical_quantile_i(u) with u ~ Uniform(0,1).
+        # This gives perfect rank correlation (any deep well drills
+        # deep into all formations and vice-versa) while preserving
+        # each formation's empirical top-depth marginal exactly.
+        # Monotone constraints are then enforced with a small bump.
         n = len(combination)
-
-        for attempt in range(max_resamples):
-            sampled = []
-            for fm in combination:
-                stats = self.formations.get(fm)
-                if stats is None:
-                    sampled.append(None)
-                else:
-                    sampled.append(stats.sample_top_depth(rng))
-
-            for i, t in enumerate(sampled):
-                if t is None:
-                    if i == 0:
-                        sampled[i] = 0.0
-                    else:
-                        sampled[i] = sampled[i - 1] + min_layer_thickness
-
-            max_allowed_last = max_depth - min_layer_thickness
-            if sampled[-1] > max_allowed_last:
-                sampled[-1] = max_allowed_last
-
-            ok = True
-            for i in range(1, n):
-                if sampled[i] < sampled[i - 1] + min_layer_thickness:
-                    ok = False
-                    break
-            if sampled[0] < 0:
-                sampled[0] = 0.0
-
-            if ok:
-                return sampled
-
-        sampled = []
-        for fm in combination:
+        u = float(rng.uniform(0.02, 0.98))   # avoid tail extremes
+        sampled: list[float] = []
+        prev = 0.0
+        for i, fm in enumerate(combination):
             stats = self.formations.get(fm)
-            sampled.append(stats.median_top if stats else 0.0)
-        sampled.sort()
-        for i in range(1, n):
-            if sampled[i] < sampled[i - 1] + min_layer_thickness:
-                sampled[i] = sampled[i - 1] + min_layer_thickness
-        if sampled[-1] > max_depth - min_layer_thickness:
-            sampled[-1] = max_depth - min_layer_thickness
-        for i in range(1, n):
-            if sampled[i] < sampled[i - 1] + min_layer_thickness:
-                sampled[i] = sampled[i - 1] + min_layer_thickness
+            lo = prev + (min_layer_thickness if i > 0 else 0.0)
+            hi = max_depth - (n - i) * min_layer_thickness
+            if hi <= lo:
+                hi = lo + 1.0
+            if stats is not None and len(stats.top_depths) > 0:
+                v = float(np.quantile(stats.top_depths, u))
+                v = max(lo, min(v, hi))
+            else:
+                v = lo
+            sampled.append(v)
+            prev = v
         return sampled
 
     # ---------- IO -----------------------------------------------------

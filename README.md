@@ -47,13 +47,37 @@ The repo follows a numbered-script convention so the order to run is
 obvious:
 
 ```
-1_scraper.py                 scrape NLOG well metadata + LAS files
-2_pull_data.py               clean + merge → data/clean/samples.parquet
-3_save_distributions.py      fit DistributionBank / FormationGeometry / DiscoveryPrior
-4_pull_maps.py               pre-generate the training dataset (data/dataset/)
-5a_train_jepa.py             train the JEPA encoder
-5b_train_encoder.py          train the autoencoder
+1_scraper.py                       scrape NLOG well metadata + LAS files
+2_pull_data.py                     clean + merge → data/clean/samples.parquet
+scripts/reclassify_coarse_rocks.py reclassify residual coarse rows (see below)
+3_save_distributions.py            fit DistributionBank / FormationGeometry / DiscoveryPrior
+4_pull_maps.py                     pre-generate the training dataset (data/dataset/)
+5a_train_jepa.py                   train the JEPA encoder
+5b_train_encoder.py                train the autoencoder
 ```
+
+### Coarse-row reclassification
+
+`2_pull_data.py` maps NLOG `strat_unit` codes to fine
+rock classes via longest-prefix matching, but some codes (e.g. a
+generic `KNNC`, or any Zechstein row labelled only `ZE`) are too
+generic to assign. Those rows land in the coarse buckets
+`claystone`, `sandstone`, `other`, and `clay`. `scripts/reclassify_coarse_rocks.py` then runs a
+single per-formation data-driven match: it builds wireline
+templates from rows that already have a fine label, opens an
+adaptive depth window around the coarse row (start at the row's
+own 10 m bin, expand until ≥ 50 rows are collected), and assigns
+the row to the closest fine class if the mean per-channel z-score
+is ≤ 2.0 and the row has ≥ 2 wireline channels.
+
+There is **no off-formation fallback** and **no geology default** —
+a row that cannot be matched is dropped from the bank.
+`clay` is the one exception: it is protected (Quaternary
+unconsolidated; distinct petrophysics from lithified claystone)
+and never reassigned. On the ~1.02 M coarse rows, 198 k are
+reassigned, 609 k clay rows pass through, and ~213 k are dropped.
+The bank ends up with 9 fine rock classes (the coarse classes
+`claystone`, `sandstone`, `other` are eliminated).
 
 Plus three analysis scripts that produce thesis-grade plots and reports:
 
