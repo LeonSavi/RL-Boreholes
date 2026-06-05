@@ -98,3 +98,24 @@ class PatchBoreholeCLSConfig(PatchBoreholeConfig):
 @dataclass
 class VariableAwarePatchBoreholeConfig(PatchBoreholeConfig):
     """Same fields as PatchBoreholeConfig; marks the variable-aware encoder variant."""
+
+    # NOTE: No additional fields — this class exists purely as a type tag so that
+    # VariableAwarePatchBoreholeTransformerEncoder can be selected by config type.
+
+
+@dataclass
+class CatVarBoreholeConfig(VariableAwarePatchBoreholeConfig):
+    """Extends VariableAwarePatchBoreholeConfig with categorical label vocabulary sizes.
+
+    Rock types and formations are categorical — they carry no ordinal meaning and
+    must NOT be inserted as raw numeric channels.  Instead, integer vocab indices are
+    passed through nn.Embedding layers and the resulting dense vectors are summed into
+    the continuous variable-patch tokens.
+
+    n_rock_types and n_formations must match the vocabulary sizes used when
+    generating the dataset (see labels_vocab.pkl produced by 4_pull_maps.py).
+    Index 0 is reserved for the 'other'/unknown label in both vocabularies.
+    """
+
+    n_rock_types: int = 20   # size of rock-type vocabulary (incl. index-0 "other")
+    n_formations: int = 40   # size of formation vocabulary  (incl. index-0 "other")

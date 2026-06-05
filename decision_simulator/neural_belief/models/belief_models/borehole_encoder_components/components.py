@@ -23,6 +23,7 @@ from ..end_to_end.utils.model_configs import (
     PatchBoreholeConfig,
     PatchBoreholeCLSConfig,
     VariableAwarePatchBoreholeConfig,
+    CatVarBoreholeConfig,
 )
 
 
@@ -398,6 +399,204 @@ class VariableAwarePatchBoreholeTransformerEncoder(nn.Module):
                     feat = feat + layer._ff_block(layer.norm2(feat))
                     all_attn.append(attn_w)  # (B, n_heads, seq, seq)
                 attn_weights = torch.stack(all_attn, dim=0)  # (n_layers, B, n_heads, seq, seq)
+            else:
+                feat = self.transformer(feat)
+
+        cls_out = feat[:, 0]             # (B, bh_d_model)
+        latent = self.out_proj(cls_out)  # (B, latent_dim)
+
+        if return_attention:
+            return latent, attn_weights
+        return latent
+
+
+# ---------------------------------------------------------------------------
+# Categorical + variable-aware patch encoder — per-(variable, patch) token, CLS pooling
+# ---------------------------------------------------------------------------
+
+
+class CatVarBoreholeTransformerEncoder(nn.Module):
+    """Variable-aware patch borehole encoder extended with categorical rock/formation labels.
+
+    Differs from VariableAwarePatchBoreholeTransformerEncoder in one way: alongside the
+    5 continuous variable channels it also accepts per-depth rock-type and formation
+    integer IDs.  These are embedded via learned nn.Embedding layers, mean-pooled over
+    each depth patch, and *added* to the continuous variable-patch tokens:
+
+        token(v, p) = continuous_patch_proj(v, p)
+                    + variable_embedding(v)
+                    + depth_position_embedding(p)
+                    + rock_patch_embedding(p)      # mean of rock_embed over patch window
+                    + formation_patch_embedding(p)
+
+    Why embeddings instead of raw channels?
+    Rock types and formations are *categorical* labels — the integer IDs carry no ordinal
+    meaning (rock_id=3 is not "more rock" than rock_id=2).  Passing them as continuous
+    channels would impose a false numeric ordering.  Embedding layers map each category
+    to a learned dense vector in the same space as the continuous tokens, so the
+    transformer can attend to geological context without numeric bias.
+
+    Input:  (B, V, D)  continuous variables
+            (B, D)     rock_ids     int64 vocab indices (0 = other/unknown)
+            (B, D)     formation_ids int64 vocab indices (0 = other/unknown)
+    Output: (B, latent_dim)
+    """
+
+    def __init__(self, cfg: CatVarBoreholeConfig) -> None:
+        super().__init__()
+        self.cfg = cfg
+        self.n_patches = math.ceil(cfg.n_depth / cfg.bh_patch_size)
+        self.padded_depth = self.n_patches * cfg.bh_patch_size
+
+        self.patch_proj = nn.Linear(cfg.bh_patch_size, cfg.bh_d_model)
+
+        self.var_embed = nn.Embedding(cfg.n_variables, cfg.bh_d_model)
+        nn.init.trunc_normal_(self.var_embed.weight, std=0.02)
+
+        # Categorical embeddings: one dense vector per vocab entry, same dim as tokens.
+        self.rock_embed = nn.Embedding(cfg.n_rock_types, cfg.bh_d_model)
+        self.form_embed = nn.Embedding(cfg.n_formations, cfg.bh_d_model)
+        nn.init.trunc_normal_(self.rock_embed.weight, std=0.02)
+        nn.init.trunc_normal_(self.form_embed.weight, std=0.02)
+
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, cfg.bh_d_model))
+        nn.init.trunc_normal_(self.cls_token, std=0.02)
+
+        if cfg.bh_n_layers > 0:
+            enc_layer = nn.TransformerEncoderLayer(
+                d_model=cfg.bh_d_model,
+                nhead=cfg.bh_n_heads,
+                dim_feedforward=cfg.bh_d_model * 4,
+                dropout=cfg.dropout,
+                activation="gelu",
+                batch_first=True,
+                norm_first=True,
+            )
+            self.transformer: nn.Module = nn.TransformerEncoder(
+                enc_layer, cfg.bh_n_layers
+            )
+        else:
+            self.transformer = nn.Identity()
+
+        self.out_proj = nn.Linear(cfg.bh_d_model, cfg.latent_dim)
+
+        n_bh_tokens = cfg.n_variables * self.n_patches
+        n_params = sum(p.numel() for p in self.parameters())
+        print("CatVarBoreholeTransformerEncoder: variable-aware + categorical labels")
+        print(
+            f"  n_variables={cfg.n_variables}, patch_size={cfg.bh_patch_size}, "
+            f"n_patches={self.n_patches}"
+        )
+        print(
+            f"  n_rock_types={cfg.n_rock_types}, n_formations={cfg.n_formations}"
+        )
+        print(
+            f"  total borehole tokens = {cfg.n_variables} × {self.n_patches} + 1 CLS"
+            f" = {n_bh_tokens + 1}"
+        )
+        print(
+            f"  bh_d_model={cfg.bh_d_model}, n_layers={cfg.bh_n_layers}, "
+            f"n_heads={cfg.bh_n_heads}, latent_dim={cfg.latent_dim}, "
+            f"params={n_params:,}"
+        )
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        rock_ids: torch.Tensor,
+        formation_ids: torch.Tensor,
+        return_attention: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor | None]:
+        """Encode a batch of boreholes with categorical label context.
+
+        Parameters
+        ----------
+        x             : (B, V, D)  standardised continuous variables
+        rock_ids      : (B, D)     int64 rock-type vocab indices
+        formation_ids : (B, D)     int64 formation vocab indices
+        return_attention : if True, also return per-layer attention weights
+
+        Returns
+        -------
+        latent       : (B, latent_dim)
+        attn_weights : (n_layers, B, n_heads, seq_len, seq_len) — only when
+                       return_attention=True; None when bh_n_layers == 0.
+                       seq_len = 1 + n_variables * n_patches (CLS first).
+        """
+        B, V, D = x.shape
+        pad_len = self.padded_depth - D
+        if pad_len > 0:
+            x = F.pad(x, (0, pad_len))
+
+        x = x.view(B, V, self.n_patches, self.cfg.bh_patch_size)
+        x = x.reshape(B, V * self.n_patches, self.cfg.bh_patch_size)
+
+        feat = self.patch_proj(x)  # (B, V * n_patches, bh_d_model)
+
+        # Variable embedding: token v*n_patches+p belongs to variable v
+        var_idx = torch.arange(V, device=x.device).repeat_interleave(self.n_patches)
+        var_emb = self.var_embed(var_idx)  # (V * n_patches, bh_d_model)
+        feat = feat + var_emb.unsqueeze(0)
+
+        # Depth positional encoding: token v*n_patches+p belongs to patch p
+        pe_full = sinusoidal_pe_1d(self.n_patches, self.cfg.bh_d_model, feat.device)
+        patch_idx = torch.arange(self.n_patches, device=feat.device).repeat(V)
+        depth_pe = pe_full[patch_idx]  # (V * n_patches, bh_d_model)
+        feat = feat + depth_pe.unsqueeze(0)
+
+        # --- Categorical patch embeddings ------------------------------------
+        # Each depth-level ID is embedded, then mean-pooled over the patch
+        # window to produce one vector per patch. That vector is then broadcast
+        # to all V variable tokens belonging to the same patch.
+
+        # rock: (B, D) → embed → (B, D, bh_d_model); pad depth if needed
+        rock_emb = self.rock_embed(rock_ids)   # (B, D, bh_d_model)
+        form_emb = self.form_embed(formation_ids)
+        if pad_len > 0:
+            rock_emb = F.pad(rock_emb, (0, 0, 0, pad_len))
+            form_emb = F.pad(form_emb, (0, 0, 0, pad_len))
+
+        # reshape → (B, n_patches, bh_patch_size, bh_d_model) → mean over patch
+        rock_patch = rock_emb.view(
+            B, self.n_patches, self.cfg.bh_patch_size, self.cfg.bh_d_model
+        ).mean(2)  # (B, n_patches, bh_d_model)
+        form_patch = form_emb.view(
+            B, self.n_patches, self.cfg.bh_patch_size, self.cfg.bh_d_model
+        ).mean(2)
+
+        # expand to V variables; token order is variable-major, patch-minor (v*P+p)
+        rock_patch = (
+            rock_patch.unsqueeze(1)
+            .expand(-1, V, -1, -1)
+            .reshape(B, V * self.n_patches, self.cfg.bh_d_model)
+        )
+        form_patch = (
+            form_patch.unsqueeze(1)
+            .expand(-1, V, -1, -1)
+            .reshape(B, V * self.n_patches, self.cfg.bh_d_model)
+        )
+
+        feat = feat + rock_patch + form_patch
+        # ---------------------------------------------------------------------
+
+        cls_tokens = self.cls_token.expand(B, -1, -1)
+        feat = torch.cat([cls_tokens, feat], dim=1)  # (B, 1 + V*n_patches, bh_d_model)
+
+        attn_weights: torch.Tensor | None = None
+        if self.cfg.bh_n_layers > 0:
+            if return_attention:
+                all_attn: list[torch.Tensor] = []
+                for layer in self.transformer.layers:
+                    normed = layer.norm1(feat)
+                    attn_out, attn_w = layer.self_attn(
+                        normed, normed, normed,
+                        need_weights=True,
+                        average_attn_weights=False,
+                    )
+                    feat = feat + layer.dropout1(attn_out)
+                    feat = feat + layer._ff_block(layer.norm2(feat))
+                    all_attn.append(attn_w)
+                attn_weights = torch.stack(all_attn, dim=0)
             else:
                 feat = self.transformer(feat)
 

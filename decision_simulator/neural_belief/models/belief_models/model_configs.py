@@ -254,3 +254,40 @@ class VariableAwarePatchBoreholeEndToEndConfig(BaseE2EArchConfig):
             head_hidden_dim=self.head_hidden_dim,
             pe_max_freq=self.pe_max_freq,
         )
+
+
+@dataclass
+class CatVarEndToEndConfig(VariableAwarePatchBoreholeEndToEndConfig):
+    """Hyperparameters for CatVarEncoder (variable-aware patch + categorical labels).
+
+    Extends VariableAwarePatchBoreholeEndToEndConfig with vocabulary size fields for
+    rock types and formations.  These must match the vocab sizes in labels_vocab.pkl
+    produced by 4_pull_maps.py (index 0 is always reserved for 'other'/unknown).
+
+    All map-transformer fields (d_model, n_heads, etc.) are inherited unchanged.
+    """
+
+    n_rock_types: int = 20   # size of rock-type vocabulary (incl. index-0 "other")
+    n_formations: int = 40   # size of formation vocabulary  (incl. index-0 "other")
+
+    def to_encoder_config(self):
+        """Build a CatVarBoreholeConfig for the categorical borehole encoder."""
+        from .end_to_end.utils.model_configs import CatVarBoreholeConfig
+        return CatVarBoreholeConfig(
+            n_variables=self.n_variables,
+            n_depth=self.n_depth,
+            bh_patch_size=self.bh_patch_size,
+            bh_d_model=self.bh_d_model,
+            bh_n_heads=self.bh_n_heads,
+            bh_n_layers=self.bh_n_layers,
+            latent_dim=self.latent_dim,
+            dropout=self.dropout,
+            d_model=self.d_model,
+            n_heads=self.n_heads,
+            n_layers=self.n_encoder_layers,
+            d_ff=self.d_ff,
+            head_hidden_dim=self.head_hidden_dim,
+            pe_max_freq=self.pe_max_freq,
+            n_rock_types=self.n_rock_types,
+            n_formations=self.n_formations,
+        )

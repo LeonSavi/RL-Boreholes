@@ -2,12 +2,14 @@
 
 from ..borehole_encoder_components.components import (
     BoreholeTransformerEncoder,
+    CatVarBoreholeTransformerEncoder,
     PatchBoreholeTransformerEncoder,
     PatchBoreholeCLSTransformerEncoder,
     VariableAwarePatchBoreholeTransformerEncoder,
 )
 from ..model_configs import (
     BaseE2EArchConfig,
+    CatVarEndToEndConfig,
     EndToEndMapBeliefConfig,
     PatchBoreholeEndToEndConfig,
     PatchBoreholeCLSEndToEndConfig,
@@ -16,6 +18,7 @@ from ..model_configs import (
 from .end_to_end_map_belief_transformer import EndToEndMapBeliefTransformer
 from .utils.model_configs import (
     BaseBHEncoderConfig,
+    CatVarBoreholeConfig,
     E2EConfig,
     PatchBoreholeConfig,
     PatchBoreholeCLSConfig,
@@ -31,26 +34,31 @@ from .precomp_bh_map_belief_transformer import (
 from .variable_aware_patch_borehole_transformer import (
     VariableAwarePatchBoreholeEndToEndMapBeliefTransformer,
 )
+from .cat_var_encoder import CatVarEncoder
 
 __all__ = [
     # End-to-end model configs (top-level)
     "BaseE2EArchConfig",
+    "CatVarEndToEndConfig",
     "EndToEndMapBeliefConfig",
     "PatchBoreholeEndToEndConfig",
     "PatchBoreholeCLSEndToEndConfig",
     "VariableAwarePatchBoreholeEndToEndConfig",
     # Borehole encoder configs
     "BaseBHEncoderConfig",
+    "CatVarBoreholeConfig",
     "E2EConfig",
     "PatchBoreholeConfig",
     "PatchBoreholeCLSConfig",
     "VariableAwarePatchBoreholeConfig",
     # Borehole encoder modules
     "BoreholeTransformerEncoder",
+    "CatVarBoreholeTransformerEncoder",
     "PatchBoreholeTransformerEncoder",
     "PatchBoreholeCLSTransformerEncoder",
     "VariableAwarePatchBoreholeTransformerEncoder",
     # End-to-end models
+    "CatVarEncoder",
     "EndToEndMapBeliefTransformer",
     "PatchBoreholeEndToEndMapBeliefTransformer",
     "PatchBoreholeCLSEndToEndMapBeliefTransformer",

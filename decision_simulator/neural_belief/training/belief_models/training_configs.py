@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from ...models.belief_models.model_configs import (
     BaseE2EArchConfig,
     BaseMapArchConfig,
+    CatVarEndToEndConfig,
     EndToEndMapBeliefConfig,
     MapBeliefConfig,
     PatchBoreholeCLSEndToEndConfig,
@@ -276,6 +277,42 @@ class VariableAwarePatchBoreholeUncertaintyConfig(BaseE2ETrainingConfig):
         """Build a VariableAwarePatchBoreholeEndToEndConfig for model construction."""
         return VariableAwarePatchBoreholeEndToEndConfig(
             **{f.name: getattr(self, f.name) for f in dataclasses.fields(VariableAwarePatchBoreholeEndToEndConfig)}
+        )
+
+
+@dataclass
+class CatVarConfig(BaseE2ETrainingConfig):
+    """Training hyperparameters for CatVarEncoder.
+
+    Extends BaseE2ETrainingConfig with:
+    - bh_patch_size  : depth patch size (encoder creates one token per (variable, patch) pair)
+    - n_rock_types   : rock-type vocab size — must match labels_vocab.pkl from 4_pull_maps.py
+    - n_formations   : formation vocab size — same source
+    - uncertainty_weight : weight for the uncertainty MSE loss term
+
+    The training objective mirrors the uncertainty variant:
+      ore_loss         = MSE(pred_ore, target)
+      uncertainty_loss = MSE(pred_uncertainty, |pred_ore.detach() - target|)
+      total_loss       = ore_loss + uncertainty_weight * uncertainty_loss
+    """
+
+    bh_patch_size: int = 20
+
+    # Vocabulary sizes — must agree with the dataset's labels_vocab.pkl.
+    # Index 0 is reserved for 'other'/unknown in both vocabularies.
+    n_rock_types: int = 20
+    n_formations: int = 40
+
+    # Uncertainty head
+    use_uncertainty_head: bool = True
+    uncertainty_weight: float = 0.1
+
+    borehole_encoder: str = "cat_var"
+
+    def to_model_config(self) -> CatVarEndToEndConfig:
+        """Build a CatVarEndToEndConfig for model construction."""
+        return CatVarEndToEndConfig(
+            **{f.name: getattr(self, f.name) for f in dataclasses.fields(CatVarEndToEndConfig)}
         )
 
 
