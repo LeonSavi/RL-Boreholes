@@ -58,4 +58,5 @@ data/garcon/
 
 .claude/
 .tex/
-
+plots/
+attention_analysis
