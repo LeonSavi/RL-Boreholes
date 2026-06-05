@@ -1,3 +1,3 @@
-from .components import SpatialTokenEmbedding, MapBeliefEncoder, OreReconstructionHead
+from .components import SpatialTokenEmbedding, MapBeliefEncoder, OreReconstructionHead, UncertaintyHead
 
-__all__ = ["SpatialTokenEmbedding", "MapBeliefEncoder", "OreReconstructionHead"]
+__all__ = ["SpatialTokenEmbedding", "MapBeliefEncoder", "OreReconstructionHead", "UncertaintyHead"]

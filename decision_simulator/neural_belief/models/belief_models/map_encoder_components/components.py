@@ -23,6 +23,7 @@ import math
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from ..model_configs import MapBeliefConfig
 
@@ -232,3 +233,43 @@ class OreReconstructionHead(nn.Module):
         B = spatial_tokens.shape[0]
         ore_flat = self.mlp(spatial_tokens).squeeze(-1)  # (B, N)
         return ore_flat.reshape(B, 1, n_x, n_y)
+
+
+# ---------------------------------------------------------------------------
+# Component 4: UncertaintyHead
+# ---------------------------------------------------------------------------
+
+class UncertaintyHead(nn.Module):
+    """Per-cell MLP head predicting spatial prediction uncertainty.
+
+    Structurally identical to OreReconstructionHead, with softplus applied to
+    the final output to enforce strictly non-negative uncertainty estimates.
+
+    Input
+    -----
+    spatial_tokens  : (B, n_x * n_y, d_model)
+    n_x, n_y        : int — passed at runtime to support variable grid sizes
+
+    Output
+    ------
+    uncertainty_map : (B, 1, n_x, n_y)  — strictly non-negative (softplus)
+    """
+
+    def __init__(self, cfg: MapBeliefConfig) -> None:
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(cfg.d_model, cfg.head_hidden_dim),
+            nn.GELU(),
+            nn.Dropout(cfg.dropout),
+            nn.Linear(cfg.head_hidden_dim, 1),
+        )
+        nn.init.zeros_(self.mlp[-1].bias)
+        nn.init.trunc_normal_(self.mlp[-1].weight, std=0.02)
+
+    def forward(
+        self, spatial_tokens: torch.Tensor, n_x: int, n_y: int
+    ) -> torch.Tensor:
+        B = spatial_tokens.shape[0]
+        unc_flat = self.mlp(spatial_tokens)           # (B, N, 1)
+        unc_flat = F.softplus(unc_flat.squeeze(-1))   # (B, N) — strictly positive
+        return unc_flat.reshape(B, 1, n_x, n_y)      # (B, 1, n_x, n_y)
