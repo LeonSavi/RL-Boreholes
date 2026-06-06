@@ -44,8 +44,14 @@ def _panels_from_e2e_sample(
     bh = torch.from_numpy(sample["boreholes"]).unsqueeze(0).to(device)
     ov = torch.from_numpy(sample["ore_vals"]).unsqueeze(0).to(device)
     pos = torch.from_numpy(sample["positions"]).unsqueeze(0).to(device)
+    if "rock_ids" in sample and hasattr(model, "_rock_ids"):
+        model._rock_ids = torch.from_numpy(
+            np.asarray(sample["rock_ids"], dtype=np.int64)
+        ).unsqueeze(0).to(device)
     with torch.no_grad():
         pred_ore, pred_unc = _unpack_model_output(model(bh, ov, pos), normalizer)
+    if hasattr(model, "_rock_ids"):
+        model._rock_ids = None
 
     n_x, n_y = sample["target_map"].shape
     sparse_ore = np.zeros((n_x, n_y), dtype=np.float32)

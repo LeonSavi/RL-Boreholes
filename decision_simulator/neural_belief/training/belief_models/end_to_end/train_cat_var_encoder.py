@@ -297,9 +297,9 @@ class _OreWrapper(nn.Module):
         positions: torch.Tensor,
         padding_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        B, K, D = boreholes.shape[0], boreholes.shape[1], boreholes.shape[3]
         rock_ids = self._rock_ids
-        if rock_ids is None:
-            B, K, D = boreholes.shape[0], boreholes.shape[1], boreholes.shape[3]
+        if rock_ids is None or rock_ids.shape[:2] != torch.Size([B, K]):
             rock_ids = torch.zeros(B, K, D, dtype=torch.long, device=boreholes.device)
         pred_ore, _ = self._model(boreholes, rock_ids, ore_vals, positions, padding_mask)
         return pred_ore
