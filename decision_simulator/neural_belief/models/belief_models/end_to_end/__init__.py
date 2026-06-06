@@ -35,6 +35,7 @@ from .variable_aware_patch_borehole_transformer import (
     VariableAwarePatchBoreholeEndToEndMapBeliefTransformer,
 )
 from .cat_var_encoder import CatVarEncoder
+from .ore_only_null_encoder import OreOnlyNullEncoder
 
 __all__ = [
     # End-to-end model configs (top-level)
@@ -59,6 +60,7 @@ __all__ = [
     "VariableAwarePatchBoreholeTransformerEncoder",
     # End-to-end models
     "CatVarEncoder",
+    "OreOnlyNullEncoder",
     "EndToEndMapBeliefTransformer",
     "PatchBoreholeEndToEndMapBeliefTransformer",
     "PatchBoreholeCLSEndToEndMapBeliefTransformer",

@@ -43,6 +43,7 @@ from .belief_models.training_configs import (
     VariableAwarePatchBoreholeConfig,
     VariableAwarePatchBoreholeUncertaintyConfig,
     CatVarConfig,
+    OreOnlyNullConfig,
 )
 from .belief_models.map_encoders.train_unet_belief import (
     train_neural_belief,
@@ -86,6 +87,10 @@ from .belief_models.end_to_end.train_cat_var_encoder import (
     collate_cat_var_e2e_map,
     train_cat_var_encoder,
     load_cat_var_checkpoint,
+)
+from .belief_models.end_to_end.train_ore_only_null_encoder import (
+    train_ore_only_null_encoder,
+    load_ore_only_null_checkpoint,
 )
 
 # Shared validation utilities re-exported for backward compatibility
@@ -148,6 +153,10 @@ __all__ = [
     "collate_cat_var_e2e_map",
     "train_cat_var_encoder",
     "load_cat_var_checkpoint",
+    # Ore-only null-test encoder
+    "OreOnlyNullConfig",
+    "train_ore_only_null_encoder",
+    "load_ore_only_null_checkpoint",
     # Shared utilities
     "build_training_config",
     "load_model_encoder_checkpoint",

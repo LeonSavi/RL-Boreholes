@@ -55,6 +55,9 @@ from .training import (
     CatVarE2EMapDataset,
     train_cat_var_encoder,
     load_cat_var_checkpoint,
+    OreOnlyNullConfig,
+    train_ore_only_null_encoder,
+    load_ore_only_null_checkpoint,
 )
 from .training.belief_models.end_to_end.train_guided_exploration_belief import _load_guide_model
 
@@ -106,6 +109,7 @@ _DEBUG_CLS: dict = {**_DEBUG_E2E, "bh_patch_size": 10}
 _DEBUG_VAR_AWARE: dict = {**_DEBUG_E2E, "bh_patch_size": 10}
 _DEBUG_VAR_AWARE_UNCERTAINTY: dict = {**_DEBUG_E2E, "bh_patch_size": 10}
 _DEBUG_CAT_VAR: dict = {**_DEBUG_E2E, "bh_patch_size": 10}
+_DEBUG_ORE_ONLY_NULL: dict = {**_DEBUG_E2E, "bh_patch_size": 10}
 
 # Fields present in NeuralBeliefTrainingConfig but not in MapBeliefTrainingConfig.
 # These are silently dropped when building a transformer config from **overrides.
@@ -929,7 +933,7 @@ def train_end_to_end_from_colab(
     use_sequential_dataset: bool = False,
     n_sequences_per_map: int = 3,
     prefix_steps: list[int] | None = None,
-    bh_encoder_model: Literal["cnn", "patch", "cls", "variable_aware", "variable_aware_uncertainty", "cat_var_encoder"] = "cnn",
+    bh_encoder_model: Literal["cnn", "patch", "cls", "variable_aware", "variable_aware_uncertainty", "cat_var_encoder", "ore_only_null"] = "cnn",
     guided_training: bool = False,
     guide_ckpt_path: str | Path | None = None,
     labels_dir: str | Path | None = None,
@@ -1006,12 +1010,15 @@ def train_end_to_end_from_colab(
         ``"variable_aware"``             — one token per (variable, depth patch) + variable embedding + CLS pooling
         ``"variable_aware_uncertainty"`` — same as ``"variable_aware"`` with a parallel uncertainty head that predicts per-cell prediction error
         ``"cat_var_encoder"``            — same as ``"variable_aware_uncertainty"`` but also embeds per-depth rock-type labels via a soft one-hot projection
+        ``"ore_only_null"``             — null-test model: uses only observed ore values and drill positions; no borehole logs, no rock/formation labels. Map-encoder architecture is identical to ``"cat_var_encoder"`` (latent channels are zero-filled) so results are directly comparable.
 
         When ``"patch"``, ``"cls"``, ``"variable_aware"``, ``"variable_aware_uncertainty"``, or
         ``"cat_var_encoder"``, pass ``bh_patch_size=N`` in ``**overrides`` to control the patch size (default 20).
     labels_dir
         Directory containing ``labels_vocab.pkl`` and ``labels_NNNNN.npz`` files produced by
-        ``generate_training_maps.py``.  Only used when ``bh_encoder_model="cat_var_encoder"``.
+        ``generate_training_maps.py``.  Used when ``bh_encoder_model="cat_var_encoder"`` or
+        ``"ore_only_null"`` (the null model reuses the same dataset class so rock labels are
+        loaded for dataloader consistency, even though the model ignores them).
         If ``None``, rock IDs default to zero (the ``"other"`` / unknown category).
         ``n_rock_types`` is inferred automatically from ``labels_vocab.pkl`` in this directory.
     **overrides
@@ -1074,7 +1081,11 @@ def train_end_to_end_from_colab(
     is_var_aware = bh_encoder_model == "variable_aware"
     is_var_aware_uncertainty = bh_encoder_model == "variable_aware_uncertainty"
     is_cat_var = bh_encoder_model == "cat_var_encoder"
-    if is_cat_var:
+    is_ore_only_null = bh_encoder_model == "ore_only_null"
+    if is_ore_only_null:
+        cfg_class = OreOnlyNullConfig
+        debug_defaults = _DEBUG_ORE_ONLY_NULL if debug else {}
+    elif is_cat_var:
         cfg_class = CatVarConfig
         debug_defaults = _DEBUG_CAT_VAR if debug else {}
     elif is_var_aware_uncertainty:
@@ -1145,7 +1156,9 @@ def train_end_to_end_from_colab(
     print(f"bh_encoder_model : {bh_encoder_model}")
     if is_patch or is_cls or is_var_aware or is_var_aware_uncertainty or is_cat_var:
         print(f"bh_patch_size    : {cfg.bh_patch_size}")
-    if is_cat_var:
+    if is_ore_only_null:
+        print("bh_encoder       : none (null-test — zero latents, ore + positions only)")
+    if is_cat_var or is_ore_only_null:
         print(f"labels_dir       : {labels_dir}")
     print(f"map_pool_path    : {resolved_pool}")
     print(f"n_orebodies      : {n_orebodies}")
@@ -1164,11 +1177,11 @@ def train_end_to_end_from_colab(
         print(f"guide model      : {resolved_guide_path or 'heuristic (distance-from-drills)'}")
     print(f"Training config  :\n{cfg}\n")
 
-    is_cnn = not (is_patch or is_cls or is_var_aware or is_var_aware_uncertainty or is_cat_var)
+    is_cnn = not (is_patch or is_cls or is_var_aware or is_var_aware_uncertainty or is_cat_var or is_ore_only_null)
 
     # Resolve labels_dir once — used for both dataset building and vocab inference.
     _resolved_labels: Path | None = None
-    if is_cat_var and labels_dir is not None:
+    if (is_cat_var or is_ore_only_null) and labels_dir is not None:
         _resolved_labels = Path(labels_dir)
         if not _resolved_labels.is_absolute():
             _resolved_labels = root / _resolved_labels
@@ -1202,7 +1215,7 @@ def train_end_to_end_from_colab(
         )
     else:
         print("Building training dataset ...")
-        if is_cat_var:
+        if is_cat_var or is_ore_only_null:
             train_ds = CatVarE2EMapDataset.from_cache(
                 train_cache, resources, cfg, labels_dir=_resolved_labels, verbose=True, is_val=False
             )
@@ -1219,7 +1232,22 @@ def train_end_to_end_from_colab(
                 val_cache, resources, cfg, verbose=True, is_val=True
             )
 
-    if is_cat_var:
+    if is_ore_only_null:
+        trained_model, _, run_dir = train_ore_only_null_encoder(
+            resources=resources,
+            cfg=cfg,
+            device=device,
+            checkpoint_dir=ckpt_dir,
+            labels_dir=_resolved_labels,
+            plot_dir=ckpt_dir,
+            verbose=True,
+            train_ds=train_ds,
+            val_ds=val_ds,
+        )
+        _, _, _, history = load_ore_only_null_checkpoint(
+            run_dir / "ore_only_null_best.pt", device=device
+        )
+    elif is_cat_var:
         trained_model, _, run_dir = train_cat_var_encoder(
             resources=resources,
             cfg=cfg,

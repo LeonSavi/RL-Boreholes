@@ -16,6 +16,10 @@ from ...models.belief_models.model_configs import (
     VariableAwarePatchBoreholeEndToEndConfig,
 )
 
+# OreOnlyNullEndToEndConfig reuses CatVarEndToEndConfig — the null encoder
+# accepts the same config shape but ignores n_rock_types and bh_patch_size.
+OreOnlyNullEndToEndConfig = CatVarEndToEndConfig
+
 
 @dataclass
 class NeuralBeliefTrainingConfig:
@@ -311,6 +315,40 @@ class CatVarConfig(BaseE2ETrainingConfig):
 
     def to_model_config(self) -> CatVarEndToEndConfig:
         """Build a CatVarEndToEndConfig for model construction."""
+        return CatVarEndToEndConfig(
+            **{f.name: getattr(self, f.name) for f in dataclasses.fields(CatVarEndToEndConfig)}
+        )
+
+
+@dataclass
+class OreOnlyNullConfig(BaseE2ETrainingConfig):
+    """Training hyperparameters for OreOnlyNullEncoder (null-test model).
+
+    Mirrors CatVarConfig so that training runs can be compared directly against
+    CatVarEncoder under identical hyperparameters.
+
+    Fields bh_patch_size and n_rock_types are kept for config-shape parity with
+    CatVarEndToEndConfig (used by to_model_config); OreOnlyNullEncoder ignores them.
+    """
+
+    bh_patch_size: int = 20
+
+    # Kept for CatVarEndToEndConfig parity; unused by the null encoder.
+    n_rock_types: int = 1
+
+    # Uncertainty head — same as CatVarConfig for a fair comparison.
+    use_uncertainty_head: bool = True
+    uncertainty_weight: float = 0.1
+
+    borehole_encoder: str = "ore_only_null"
+
+    def to_model_config(self) -> CatVarEndToEndConfig:
+        """Build a CatVarEndToEndConfig for model construction.
+
+        OreOnlyNullEncoder accepts CatVarEndToEndConfig so the map-encoder
+        architecture (including latent_dim and raw_token_dim) is identical to
+        CatVarEncoder, making the null-test comparison fair.
+        """
         return CatVarEndToEndConfig(
             **{f.name: getattr(self, f.name) for f in dataclasses.fields(CatVarEndToEndConfig)}
         )
