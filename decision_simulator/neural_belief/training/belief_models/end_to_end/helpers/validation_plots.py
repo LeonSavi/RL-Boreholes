@@ -268,7 +268,7 @@ def save_sequential_val_plots(
             ax.set_xticks([])
             ax.set_yticks([])
 
-        fig.colorbar(im_pred, ax=[axes[:, 1], axes[:, 2]], shrink=0.6, label="ore value")
+        fig.colorbar(im_pred, ax=list(axes[:, 1]) + list(axes[:, 2]), shrink=0.6, label="ore value")
         if has_unc and im_unc is not None:
             fig.colorbar(im_unc, ax=axes[:, 3], shrink=0.6, label="uncertainty")
             fig.colorbar(im_err, ax=axes[:, 4], shrink=0.6, label="abs error")
