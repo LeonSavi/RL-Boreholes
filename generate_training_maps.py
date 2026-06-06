@@ -77,6 +77,7 @@ _WORKER_SAMPLES_PER_MAP: int = 0
 _WORKER_MIN_DRILLS: int = 0
 _WORKER_MAX_DRILLS: int = 0
 _WORKER_SEED: int = 0
+_WORKER_MIN_N_BODIES: int = 0
 
 
 def _worker_init(
@@ -94,12 +95,13 @@ def _worker_init(
     max_drills,
     main_seed,
     n_ore_bodies,
+    min_n_bodies,
 ):
     global _WORKER_GEN, _WORKER_VARS
     global _WORKER_ROCK_VOCAB, _WORKER_FM_VOCAB
     global _WORKER_N_X, _WORKER_N_Y
     global _WORKER_SAMPLES_PER_MAP, _WORKER_MIN_DRILLS, _WORKER_MAX_DRILLS
-    global _WORKER_SEED
+    global _WORKER_SEED, _WORKER_MIN_N_BODIES
 
     bank = FormationDistributionBank.load(bank_path)
     geom = FormationGeometry.load(geom_path)
@@ -116,6 +118,7 @@ def _worker_init(
     _WORKER_MIN_DRILLS = min_drills
     _WORKER_MAX_DRILLS = max_drills
     _WORKER_SEED = main_seed
+    _WORKER_MIN_N_BODIES = min_n_bodies
 
 
 # ---------------------------------------------------------------------------
@@ -168,7 +171,10 @@ def _encode_labels(arr: np.ndarray, vocab: dict[str, int]) -> np.ndarray:
 def _generate_one(map_idx: int) -> tuple[int, dict, float]:
     """Generate one map and return its arrays (no disk I/O in the worker)."""
     t0 = time.perf_counter()
-    m = next(_WORKER_GEN)
+    while True:
+        m = next(_WORKER_GEN)
+        if len(m["bodies"]) >= _WORKER_MIN_N_BODIES:
+            break
     n_x, n_y = _WORKER_N_X, _WORKER_N_Y
     n_depth = len(m["depth_axis"])
 
@@ -343,6 +349,92 @@ def _find_completed_maps(out_dir: Path) -> set[int]:
 
 
 # ---------------------------------------------------------------------------
+# Phase runner
+# ---------------------------------------------------------------------------
+
+
+def _generate_phase(
+    pending: list[int],
+    phase_start: int,
+    shard_prefix: str,
+    args,
+    pool_config: dict,
+    rock_vocab: dict[str, int],
+    fm_vocab: dict[str, int],
+    max_ore_bodies: int | None,
+    min_ore_bodies: int,
+    n_x: int,
+    n_y: int,
+    variables: list,
+) -> None:
+    """Run one generation phase and write shards with the given prefix."""
+    init_args = (
+        str(args.bank),
+        str(args.geom),
+        str(args.prior),
+        variables,
+        args.seed * 7919,
+        rock_vocab,
+        fm_vocab,
+        n_x,
+        n_y,
+        args.samples_per_map,
+        args.min_drills,
+        args.max_drills,
+        args.seed,
+        max_ore_bodies,
+        min_ore_bodies,
+    )
+
+    existing_shards = sorted(args.out_dir.glob(f"{shard_prefix}_*.h5"))
+    shard_seq = len(existing_shards)
+
+    t0 = time.perf_counter()
+    completed_count = 0
+    last_report = t0
+    current_batch: list[tuple[int, dict]] = []
+
+    with mp.Pool(args.workers, initializer=_worker_init, initargs=init_args) as pool:
+        for map_idx, data, _dt in pool.imap_unordered(
+            _generate_one, pending, chunksize=2
+        ):
+            current_batch.append((map_idx, data))
+            completed_count += 1
+
+            now = time.perf_counter()
+            if now - last_report >= 10 or completed_count == len(pending):
+                elapsed   = now - t0
+                rate      = completed_count / elapsed if elapsed > 0 else 0
+                remaining = len(pending) - completed_count
+                eta       = remaining / rate if rate > 0 else 0
+                print(
+                    f"    {completed_count:>6d}/{len(pending)}"
+                    f"  ({rate:.1f} maps/s, ETA {eta/60:.1f} min)"
+                )
+                last_report = now
+
+            if len(current_batch) >= args.shard_size:
+                start = phase_start + shard_seq * args.shard_size
+                end   = start + args.shard_size - 1
+                shard_path = args.out_dir / f"{shard_prefix}_{start:05d}_{end:05d}.h5"
+                _write_hdf5_shard(
+                    shard_path, current_batch, pool_config,
+                    list(rock_vocab.keys()), list(fm_vocab.keys()),
+                )
+                current_batch = []
+                shard_seq += 1
+
+    if current_batch:
+        first_idx = min(x[0] for x in current_batch)
+        last_idx  = max(x[0] for x in current_batch)
+        shard_path = args.out_dir / f"{shard_prefix}_{first_idx:05d}_{last_idx:05d}.h5"
+        _write_hdf5_shard(
+            shard_path, current_batch, pool_config,
+            list(rock_vocab.keys()), list(fm_vocab.keys()),
+        )
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -382,7 +474,7 @@ def main() -> None:
     args = p.parse_args()
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
-    sim_cfg = SimConfig() if args.n_bodies is None else SimConfig(max_ore_bodies=args.n_bodies)
+    sim_cfg = SimConfig()
     n_x, n_y = sim_cfg.n_x, sim_cfg.n_y
     variables = list(sim_cfg.variables)
 
@@ -423,87 +515,59 @@ def main() -> None:
     with open(config_path, "wb") as f:
         pickle.dump(pool_config, f)
 
+    # ── Phase definitions ──────────────────────────────────────────────────
+    # Phase 1: first 4 batches — only 0 or 1 ore body maps
+    # Phase 2: next 4 batches  — only 2 or 3 ore body maps (min_ore_bodies=2)
+    # Phase 3: remaining maps  — stratified (default ore body distribution)
+    _BATCHES_PER_PHASE = 4
+    phase1_n = min(_BATCHES_PER_PHASE * args.shard_size, args.n_maps)
+    phase2_n = min(_BATCHES_PER_PHASE * args.shard_size, max(0, args.n_maps - phase1_n))
+    phase3_n = max(0, args.n_maps - phase1_n - phase2_n)
+
+    phase_defs = [
+        # (global_start, count, max_ore_bodies, min_ore_bodies, shard_prefix)
+        (0,                       phase1_n, 1,            0, "maps_0_and_1_orebodies"),
+        (phase1_n,                phase2_n, 3,            2, "maps_2_and_3_orebodies"),
+        (phase1_n + phase2_n,     phase3_n, args.n_bodies, 0, "maps_stratified"),
+    ]
+
     # ── Resume: find which maps are already in existing shards ─────────────
     completed = _find_completed_maps(args.out_dir)
-    pending   = [i for i in range(args.n_maps) if i not in completed]
-    if not pending:
+    total_pending = sum(
+        1
+        for ph_start, ph_n, *_ in phase_defs
+        for i in range(ph_start, ph_start + ph_n)
+        if i not in completed
+    )
+    if total_pending == 0:
         print(f"  all {args.n_maps} maps already written to {args.out_dir}")
         return
-    skipped = args.n_maps - len(pending)
+    skipped = args.n_maps - total_pending
     print(
-        f"  generating {len(pending)} maps with {args.workers} workers"
+        f"  generating {total_pending} maps with {args.workers} workers"
         + (f" (skipping {skipped} already in shards)" if skipped else "")
     )
 
-    # ── Parallel generation ────────────────────────────────────────────────
-    # Workers return arrays; main process batches them into HDF5 shards.
-    t0 = time.perf_counter()
-    completed_count = 0
-    last_report     = t0
-    current_batch: list[tuple[int, dict]] = []
-    n_existing_shards = len(list(args.out_dir.glob("maps_*.h5")))
-    shard_seq = n_existing_shards  # next shard sequence number
-
-    init_args = (
-        str(args.bank),
-        str(args.geom),
-        str(args.prior),
-        variables,
-        args.seed * 7919,   # worker_seed_base
-        rock_vocab,
-        fm_vocab,
-        n_x,
-        n_y,
-        args.samples_per_map,
-        args.min_drills,
-        args.max_drills,
-        args.seed,          # main_seed for drill-pattern RNG
-        args.n_bodies,
-    )
-
-    with mp.Pool(args.workers, initializer=_worker_init, initargs=init_args) as pool:
-        for map_idx, data, _dt in pool.imap_unordered(
-            _generate_one, pending, chunksize=2
-        ):
-            current_batch.append((map_idx, data))
-            completed_count += 1
-
-            now = time.perf_counter()
-            if now - last_report >= 10 or completed_count == len(pending):
-                elapsed   = now - t0
-                rate      = completed_count / elapsed if elapsed > 0 else 0
-                remaining = len(pending) - completed_count
-                eta       = remaining / rate if rate > 0 else 0
-                print(
-                    f"    {completed_count:>6d}/{len(pending)}"
-                    f"  ({rate:.1f} maps/s, ETA {eta/60:.1f} min)"
-                )
-                last_report = now
-
-            # Flush a full shard
-            if len(current_batch) >= args.shard_size:
-                start = shard_seq * args.shard_size
-                end   = (shard_seq + 1) * args.shard_size - 1
-                shard_path = args.out_dir / f"maps_{start:05d}_{end:05d}.h5"
-                _write_hdf5_shard(
-                    shard_path, current_batch, pool_config,
-                    list(rock_vocab.keys()), list(fm_vocab.keys()),
-                )
-                current_batch = []
-                shard_seq += 1
-
-    # Flush the final partial shard (if any)
-    if current_batch:
-        first_idx = min(x[0] for x in current_batch)
-        last_idx  = max(x[0] for x in current_batch)
-        shard_path = args.out_dir / f"maps_{first_idx:05d}_{last_idx:05d}.h5"
-        _write_hdf5_shard(
-            shard_path, current_batch, pool_config,
-            list(rock_vocab.keys()), list(fm_vocab.keys()),
+    # ── Phase-based parallel generation ───────────────────────────────────
+    t0_total = time.perf_counter()
+    for ph_start, ph_n, max_ore_bodies, min_ore_bodies, shard_prefix in phase_defs:
+        if ph_n == 0:
+            continue
+        pending = [i for i in range(ph_start, ph_start + ph_n) if i not in completed]
+        if not pending:
+            print(f"  [{shard_prefix}] all {ph_n} maps already written")
+            continue
+        print(
+            f"  [{shard_prefix}] generating {len(pending)} maps"
+            f"  (ore bodies: min={min_ore_bodies}, max={max_ore_bodies})"
+        )
+        _generate_phase(
+            pending, ph_start, shard_prefix, args, pool_config,
+            rock_vocab, fm_vocab, max_ore_bodies, min_ore_bodies, n_x, n_y, variables,
         )
 
     total_shards = len(list(args.out_dir.glob("maps_*.h5")))
-    print(f"\n  done in {(time.perf_counter() - t0) / 60:.1f} min")
+    print(f"\n  done in {(time.perf_counter() - t0_total) / 60:.1f} min")
     print(f"  pool -> {args.out_dir}  ({args.n_maps} maps, {total_shards} shards)")
 
 

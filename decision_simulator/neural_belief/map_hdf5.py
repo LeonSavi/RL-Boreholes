@@ -206,6 +206,7 @@ class HDF5MapDirectory:
             priority = (
                 sorted(d.glob("maps_stratified_*.h5"))
                 + sorted(d.glob("maps_0_and_1_orebodies_*.h5"))
+                + sorted(d.glob("maps_2_and_3_orebodies_*.h5"))
                 + [p for cls in range(n_orebodies + 1)
                    for p in sorted(d.glob(f"maps_{cls}_orebodies_*.h5"))]
             )
@@ -252,6 +253,25 @@ class HDF5MapDirectory:
             rocks_arrays=all_rocks if all_rocks else None,
         )
 
+    def _select_files(self, n_total: int, n_orebodies: int) -> list[Path]:
+        """Return the minimal set of shard files needed for this request.
+
+        Avoids reading all shards when a smaller subset is sufficient:
+          - n_orebodies=1, n_total < 2000 : only the 0+1-body shards
+          - n_orebodies=1, n_total < 3000 : 0+1-body + 2+3-body shards
+          - otherwise                     : full priority list
+        """
+        d = self.directory
+        files_01 = sorted(d.glob("maps_0_and_1_orebodies_*.h5"))
+        files_23 = (sorted(d.glob("maps_2_and_3_orebodies_*.h5"))
+                    + sorted(d.glob("maps_2_orebodies_*.h5")))
+
+        if n_orebodies == 1 and n_total < 2000 and files_01:
+            return files_01
+        if n_orebodies == 1 and n_total < 3000 and (files_01 or files_23):
+            return files_01 + files_23
+        return self._priority_files(n_orebodies)
+
     def load_map_data(
         self,
         n_train_maps: int,
@@ -278,7 +298,7 @@ class HDF5MapDirectory:
                 f"n_orebodies must be an integer 1, 2, or 3; got {n_orebodies!r}"
             )
 
-        files = self._priority_files(n_orebodies)
+        files = self._select_files(n_train_maps + n_val_maps, n_orebodies)
         if not files:
             raise FileNotFoundError(
                 f"No HDF5 shards found in '{self.directory}' for n_orebodies={n_orebodies}. "

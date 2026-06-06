@@ -71,6 +71,8 @@ from .helpers import (
     validate_e2e_map_by_drill_bins,
     validate_e2e_map_by_step,
     validate_no_ore_e2e_map,
+    save_e2e_map_val_plots,
+    save_sequential_val_plots,
 )
 from ..training_configs import OreOnlyNullConfig
 
@@ -487,6 +489,18 @@ def train_ore_only_null_encoder(
             f"\n  unc_corr     : {final_val['val_unc_corr']:.4f}"
             f"\n  top10_ratio  : {final_val['val_unc_top10_ratio']:.4f}"
         )
+
+    if plot_dir is not None:
+        if cfg.use_sequential_dataset:
+            save_sequential_val_plots(
+                ore_wrapper, val_ds, normalizer, run_dir, device,
+                n_sequences=cfg.n_val_plots,
+            )
+        else:
+            save_e2e_map_val_plots(
+                ore_wrapper, val_ds, normalizer, run_dir, device,
+                n_plots=cfg.n_val_plots,
+            )
 
     if verbose:
         print(
