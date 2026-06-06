@@ -1,33 +1,31 @@
 """Training pipeline for CatVarEncoder.
 
 Parallel companion to train_variable_aware_patch_borehole_uncertainty_transformer.py.
-Extends that pipeline by loading per-depth rock-type and formation categorical labels
-from labels_NNNNN.npz files (produced by 4_pull_maps.py / 4b_pull_maps_formation.py)
-and passing them into the model alongside the continuous borehole variables.
+Extends that pipeline by loading per-depth rock-type labels from labels_NNNNN.npz
+files (produced by generate_training_maps.py) and passing them into the model
+alongside the continuous borehole variables.
 
 Differences from the uncertainty variant
 -----------------------------------------
-* Dataset class is CatVarE2EMapDataset, which stores rock_ids and formation_ids
-  per sample in addition to the standard continuous borehole fields.
-* Collate function is collate_cat_var_e2e_map, which pads rock_ids and formation_ids
-  to max_K alongside the standard fields.
-* Model is CatVarEncoder, which accepts (boreholes, rock_ids, formation_ids, ...).
+* Dataset class is CatVarE2EMapDataset, which stores rock_ids per sample in addition
+  to the standard continuous borehole fields.
+* Collate function is collate_cat_var_e2e_map, which pads rock_ids to max_K.
+* Model is CatVarEncoder, which accepts (boreholes, rock_ids, ...).
 * Training function accepts a labels_dir argument pointing to the directory that
-  contains labels_vocab.pkl and labels_NNNNN.npz files (same dir as boreholes_NNNNN.npy).
-  When labels_dir is None the dataset falls back to zero-label tensors so the model
-  can still be exercised without label files (labels will be all-zero → 'other' class).
+  contains labels_vocab.pkl and labels_NNNNN.npz files.
+  When labels_dir is None the dataset falls back to zero-label tensors (all 'other').
+  n_rock_types is inferred automatically from labels_vocab.pkl.
 
 Label loading
 -------------
-labels_NNNNN.npz (produced by _encode_labels in 4_pull_maps.py) stores:
-  rocks      : (n_x*n_y, D)  int8  — rock-type vocab indices
-  formations : (n_x*n_y, D)  int8  — formation vocab indices
+labels_NNNNN.npz stores:
+  rocks : (n_x*n_y, D)  int8  — rock-type vocab indices
 
-Both share flat borehole-location indexing: flat_idx = i * n_y + j,
+Flat borehole-location indexing: flat_idx = i * n_y + j,
 matching the borehole_arrays layout in NpzMap.
 
-The vocab is in labels_vocab.pkl: {"rocks": {name: int, ...}, "formations": {...}}.
-n_rock_types and n_formations in the model config must match len(vocab[...]).
+The vocab is in labels_vocab.pkl: {"rocks": {name: int, ...}}.
+n_rock_types is read from len(vocab["rocks"]) automatically.
 
 Training objective
 ------------------
@@ -85,16 +83,15 @@ from ..training_configs import CatVarConfig
 
 
 class CatVarE2EMapDataset(Dataset):
-    """Pre-generated (partial observation → full map) pairs with categorical labels.
+    """Pre-generated (partial observation → full map) pairs with rock-type labels.
 
-    Extends E2EMapDataset by storing per-borehole rock_ids and formation_ids
-    alongside the continuous borehole fields.  Each sample dict gains:
+    Extends E2EMapDataset by storing per-borehole rock_ids alongside the continuous
+    borehole fields.  Each sample dict gains:
 
-        rock_ids      (K, D)  np.ndarray int64 — rock-type vocab indices
-        formation_ids (K, D)  np.ndarray int64 — formation vocab indices
+        rock_ids  (K, D)  np.ndarray int64 — rock-type vocab indices
 
-    When no labels_dir is provided (or the npz files are absent), both arrays
-    default to zeros so the model sees only the 'other'/unknown category.
+    When no labels_dir is provided (or the npz file is absent), rock_ids defaults to
+    zeros so the model sees only the 'other'/unknown category.
     """
 
     def __init__(self, samples: list[dict]) -> None:
@@ -134,7 +131,7 @@ class CatVarE2EMapDataset(Dataset):
         cfg        : CatVarConfig training configuration
         labels_dir : directory containing labels_vocab.pkl and labels_NNNNN.npz.
                      If None or the file does not exist for a given map index,
-                     rock_ids and formation_ids default to zeros (all 'other').
+                     rock_ids defaults to zeros (all 'other').
         verbose    : print progress every 10 maps
         is_val     : use val-specific sample counts and a shifted RNG seed
         """
@@ -164,21 +161,20 @@ class CatVarE2EMapDataset(Dataset):
 
             target_ore = cache.targets[map_idx]  # (n_x, n_y)
 
-            # Load rock/formation labels for this map index.
-            # labels_NNNNN.npz contains rocks (n_x*n_y, D) int8 and
-            # formations (n_x*n_y, D) int8 using the same flat index as bh_arr.
+            # Load rock labels — prefer rocks already in the NpzMap cache (loaded
+            # from the HDF5 rocks dataset), fall back to separate labels_NNNNN.npz.
             rock_labels: np.ndarray | None = None
-            form_labels: np.ndarray | None = None
-            if labels_dir is not None:
+            if cache.rocks_arrays is not None and map_idx < len(cache.rocks_arrays):
+                rock_labels = cache.rocks_arrays[map_idx].astype(np.int64)  # (n_x*n_y, D)
+            elif labels_dir is not None:
                 npz_path = Path(labels_dir) / f"labels_{map_idx:05d}.npz"
                 if npz_path.exists():
                     lbl = np.load(npz_path)
                     rock_labels = lbl["rocks"].astype(np.int64)    # (n_x*n_y, D)
-                    form_labels = lbl["formations"].astype(np.int64)
                 elif verbose and map_idx == 0:
                     print(
                         f"  [CatVarE2EMapDataset] labels file not found: {npz_path}"
-                        "  — rock_ids and formation_ids will be zero (all 'other')."
+                        "  — rock_ids will be zero (all 'other')."
                     )
 
             def _append(chosen_idx: np.ndarray, sequence_id: int = 0) -> None:
@@ -192,24 +188,22 @@ class CatVarE2EMapDataset(Dataset):
                 )
                 positions_k = np.stack([grid_pos[i, j] for i, j in drill_locs])
 
-                if rock_labels is not None:
-                    rock_ids_k = np.stack([rock_labels[fid] for fid in flat_ids])  # (K, D)
-                    form_ids_k = np.stack([form_labels[fid] for fid in flat_ids])
-                else:
-                    rock_ids_k = np.zeros((K, n_depth), dtype=np.int64)
-                    form_ids_k = np.zeros((K, n_depth), dtype=np.int64)
+                rock_ids_k = (
+                    np.stack([rock_labels[fid] for fid in flat_ids])  # (K, D)
+                    if rock_labels is not None
+                    else np.zeros((K, n_depth), dtype=np.int64)
+                )
 
                 samples.append(
                     {
-                        "boreholes":     drill_bhs,
-                        "rock_ids":      rock_ids_k,
-                        "formation_ids": form_ids_k,
-                        "ore_vals":      ore_vals_k,
-                        "positions":     positions_k,
-                        "target_map":    target_ore.copy(),
-                        "drill_count":   K,
-                        "map_idx":       map_idx,
-                        "sequence_id":   sequence_id,
+                        "boreholes":  drill_bhs,
+                        "rock_ids":   rock_ids_k,
+                        "ore_vals":   ore_vals_k,
+                        "positions":  positions_k,
+                        "target_map": target_ore.copy(),
+                        "drill_count": K,
+                        "map_idx":    map_idx,
+                        "sequence_id": sequence_id,
                     }
                 )
 
@@ -240,10 +234,7 @@ class CatVarE2EMapDataset(Dataset):
 
 
 def collate_cat_var_e2e_map(batch: list[dict]) -> dict:
-    """Pad variable-length K sequences to max_K, including rock_ids and formation_ids.
-
-    Extends collate_e2e_map by also padding the two label tensors.
-    """
+    """Pad variable-length K sequences to max_K, including rock_ids."""
     max_K = max(s["boreholes"].shape[0] for s in batch)
     B = len(batch)
     V, D = batch[0]["boreholes"].shape[1], batch[0]["boreholes"].shape[2]
@@ -251,7 +242,6 @@ def collate_cat_var_e2e_map(batch: list[dict]) -> dict:
 
     boreholes_pad  = np.zeros((B, max_K, V, D),   dtype=np.float32)
     rock_pad       = np.zeros((B, max_K, D),       dtype=np.int64)
-    form_pad       = np.zeros((B, max_K, D),       dtype=np.int64)
     ore_pad        = np.zeros((B, max_K),          dtype=np.float32)
     pos_pad        = np.zeros((B, max_K, 2),       dtype=np.float32)
     padding_mask   = np.ones((B, max_K),           dtype=bool)   # True = padded
@@ -262,7 +252,6 @@ def collate_cat_var_e2e_map(batch: list[dict]) -> dict:
         K = s["boreholes"].shape[0]
         boreholes_pad[i, :K] = s["boreholes"]
         rock_pad[i, :K]      = s["rock_ids"]
-        form_pad[i, :K]      = s["formation_ids"]
         ore_pad[i, :K]       = s["ore_vals"]
         pos_pad[i, :K]       = s["positions"]
         padding_mask[i, :K]  = False
@@ -270,14 +259,13 @@ def collate_cat_var_e2e_map(batch: list[dict]) -> dict:
         drill_counts[i]      = s.get("drill_count", K)
 
     return {
-        "boreholes":     torch.from_numpy(boreholes_pad),
-        "rock_ids":      torch.from_numpy(rock_pad),
-        "formation_ids": torch.from_numpy(form_pad),
-        "ore_vals":      torch.from_numpy(ore_pad),
-        "positions":     torch.from_numpy(pos_pad),
-        "padding_mask":  torch.from_numpy(padding_mask),
-        "target_map":    torch.from_numpy(target_maps),
-        "drill_counts":  torch.from_numpy(drill_counts),
+        "boreholes":    torch.from_numpy(boreholes_pad),
+        "rock_ids":     torch.from_numpy(rock_pad),
+        "ore_vals":     torch.from_numpy(ore_pad),
+        "positions":    torch.from_numpy(pos_pad),
+        "padding_mask": torch.from_numpy(padding_mask),
+        "target_map":   torch.from_numpy(target_maps),
+        "drill_counts": torch.from_numpy(drill_counts),
     }
 
 
@@ -291,16 +279,14 @@ class _OreWrapper(nn.Module):
 
     Allows reusing validation helpers from helpers/ that expect a model whose
     forward() returns a single (B, 1, n_x, n_y) tensor.  The helpers receive
-    only the standard borehole batch dict, so rock_ids / formation_ids must
-    be captured from outer scope via the closure.
+    only the standard borehole batch dict, so rock_ids must be captured
+    from outer scope via the closure.
     """
 
     def __init__(self, model: CatVarEncoder) -> None:
         super().__init__()
         self._model = model
-        # Populated each forward call from the batch dict stored by the caller.
         self._rock_ids: torch.Tensor | None = None
-        self._form_ids: torch.Tensor | None = None
 
     def forward(
         self,
@@ -310,13 +296,10 @@ class _OreWrapper(nn.Module):
         padding_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         rock_ids = self._rock_ids
-        form_ids = self._form_ids
         if rock_ids is None:
-            # Fallback: zero labels (all 'other') if not set
             B, K, D = boreholes.shape[0], boreholes.shape[1], boreholes.shape[3]
             rock_ids = torch.zeros(B, K, D, dtype=torch.long, device=boreholes.device)
-            form_ids = torch.zeros_like(rock_ids)
-        pred_ore, _ = self._model(boreholes, rock_ids, form_ids, ore_vals, positions, padding_mask)
+        pred_ore, _ = self._model(boreholes, rock_ids, ore_vals, positions, padding_mask)
         return pred_ore
 
 
@@ -341,13 +324,12 @@ def _validate_cat_var(
         for batch in val_loader:
             bh  = batch["boreholes"].to(device)
             rid = batch["rock_ids"].to(device)
-            fid = batch["formation_ids"].to(device)
             ov  = batch["ore_vals"].to(device)
             pos = batch["positions"].to(device)
             pm  = batch["padding_mask"].to(device)
             tgt = batch["target_map"].to(device)
 
-            pred_ore_norm, pred_unc_norm = model(bh, rid, fid, ov, pos, pm)
+            pred_ore_norm, pred_unc_norm = model(bh, rid, ov, pos, pm)
 
             pred = normalizer.inverse_tensor(pred_ore_norm)
             tgt_raw = normalizer.inverse_tensor(tgt)
@@ -459,19 +441,15 @@ def train_cat_var_encoder(
         sample_map = train_ds.samples[0]["target_map"]
         cfg.n_x, cfg.n_y = int(sample_map.shape[0]), int(sample_map.shape[1])
 
-    # ---- optionally read vocab to set n_rock_types / n_formations -------------
+    # ---- read vocab to set n_rock_types --------------------------------------
     if labels_dir is not None:
         vocab_path = Path(labels_dir) / "labels_vocab.pkl"
         if vocab_path.exists():
             with open(vocab_path, "rb") as f:
                 vocabs = pickle.load(f)
             cfg.n_rock_types = len(vocabs.get("rocks", {})) or cfg.n_rock_types
-            cfg.n_formations = len(vocabs.get("formations", {})) or cfg.n_formations
             if verbose:
-                print(
-                    f"  label vocab   : {cfg.n_rock_types} rocks, "
-                    f"{cfg.n_formations} formations  ({vocab_path})"
-                )
+                print(f"  label vocab   : {cfg.n_rock_types} rock types  ({vocab_path})")
 
     # ---- target normalisation ------------------------------------------------
     normalizer = TargetNormalizer(mode=cfg.norm_mode)
@@ -520,7 +498,6 @@ def train_cat_var_encoder(
         print(f"  model params  : {n_params:,}")
         print(f"  n_variables   : {cfg.n_variables}")
         print(f"  n_rock_types  : {cfg.n_rock_types}")
-        print(f"  n_formations  : {cfg.n_formations}")
         print(f"  patch_size    : {cfg.bh_patch_size}")
         print(f"  n_patches     : {n_patches}")
         print(f"  bh_tokens/bh  : {n_bh_tokens} + 1 CLS = {n_bh_tokens + 1}")
@@ -542,13 +519,12 @@ def train_cat_var_encoder(
         for batch in train_loader:
             bh  = batch["boreholes"].to(device)
             rid = batch["rock_ids"].to(device)
-            fid = batch["formation_ids"].to(device)
             ov  = batch["ore_vals"].to(device)
             pos = batch["positions"].to(device)
             pm  = batch["padding_mask"].to(device)
             tgt = batch["target_map"].to(device)
 
-            pred_ore, pred_uncertainty = model(bh, rid, fid, ov, pos, pm)
+            pred_ore, pred_uncertainty = model(bh, rid, ov, pos, pm)
 
             ore_loss = F.mse_loss(pred_ore, tgt)
             loss = ore_loss
@@ -643,7 +619,7 @@ def train_cat_var_encoder(
     # ---- ore-only adapter for existing drill-bin / step / no-ore helpers -----
     ore_wrapper = _OreWrapper(model)
 
-    # Build a val_loader that also sets rock/formation IDs on the wrapper
+    # Build a val_loader that also sets rock IDs on the wrapper
     def _ore_only_val_loader():
         for batch in DataLoader(
             val_ds,
@@ -652,9 +628,7 @@ def train_cat_var_encoder(
             collate_fn=collate_cat_var_e2e_map,
         ):
             ore_wrapper._rock_ids = batch["rock_ids"].to(device)
-            ore_wrapper._form_ids = batch["formation_ids"].to(device)
-            yield {k: v for k, v in batch.items()
-                   if k not in ("rock_ids", "formation_ids")}
+            yield {k: v for k, v in batch.items() if k != "rock_ids"}
 
     # ---- drill-bin metrics ---------------------------------------------------
     bin_metrics = validate_e2e_map_by_drill_bins(

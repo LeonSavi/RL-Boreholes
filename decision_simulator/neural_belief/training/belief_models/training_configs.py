@@ -287,7 +287,7 @@ class CatVarConfig(BaseE2ETrainingConfig):
     Extends BaseE2ETrainingConfig with:
     - bh_patch_size  : depth patch size (encoder creates one token per (variable, patch) pair)
     - n_rock_types   : rock-type vocab size — must match labels_vocab.pkl from 4_pull_maps.py
-    - n_formations   : formation vocab size — same source
+    - n_rock_types is inferred automatically from labels_vocab.pkl
     - uncertainty_weight : weight for the uncertainty MSE loss term
 
     The training objective mirrors the uncertainty variant:
@@ -298,10 +298,10 @@ class CatVarConfig(BaseE2ETrainingConfig):
 
     bh_patch_size: int = 20
 
-    # Vocabulary sizes — must agree with the dataset's labels_vocab.pkl.
-    # Index 0 is reserved for 'other'/unknown in both vocabularies.
-    n_rock_types: int = 20
-    n_formations: int = 40
+    # Rock-type vocabulary size — inferred automatically from labels_vocab.pkl at
+    # training time; do not set manually unless running without a labels_dir.
+    # Index 0 is reserved for 'other'/unknown.
+    n_rock_types: int = 1
 
     # Uncertainty head
     use_uncertainty_head: bool = True

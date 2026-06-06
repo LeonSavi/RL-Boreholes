@@ -42,6 +42,7 @@ from .belief_models.training_configs import (
     PatchBoreholeCLSConfig,
     VariableAwarePatchBoreholeConfig,
     VariableAwarePatchBoreholeUncertaintyConfig,
+    CatVarConfig,
 )
 from .belief_models.map_encoders.train_unet_belief import (
     train_neural_belief,
@@ -79,6 +80,12 @@ from .belief_models.end_to_end.train_guided_exploration_belief import (
     GuidedTrainingStats,
     train_guided_exploration_belief,
     load_guided_belief_checkpoint,
+)
+from .belief_models.end_to_end.train_cat_var_encoder import (
+    CatVarE2EMapDataset,
+    collate_cat_var_e2e_map,
+    train_cat_var_encoder,
+    load_cat_var_checkpoint,
 )
 
 # Shared validation utilities re-exported for backward compatibility
@@ -135,6 +142,12 @@ __all__ = [
     "GuidedTrainingStats",
     "train_guided_exploration_belief",
     "load_guided_belief_checkpoint",
+    # Categorical variable encoder (rock-type labels)
+    "CatVarConfig",
+    "CatVarE2EMapDataset",
+    "collate_cat_var_e2e_map",
+    "train_cat_var_encoder",
+    "load_cat_var_checkpoint",
     # Shared utilities
     "build_training_config",
     "load_model_encoder_checkpoint",

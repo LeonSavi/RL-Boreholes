@@ -1,43 +1,43 @@
 """CatVarEncoder — variable-aware patch borehole belief model with categorical labels.
 
 Extends the uncertainty-head variant of the variable-aware patch borehole transformer
-by also accepting per-depth rock-type and formation categorical labels.
+by also accepting per-depth rock-type categorical labels.
 
-Why categorical embeddings instead of extra numeric channels?
--------------------------------------------------------------
-Rock types and geological formations are *categorical* — their integer IDs carry no
-ordinal meaning (ID 3 is not "more rock" than ID 2).  Inserting them as extra
-continuous channels would impose a false numeric ordering and distort the encoder.
-Instead, nn.Embedding layers map each vocab index to a learned dense vector in the
-same space as the continuous tokens, so the transformer can attend to geological
-context without numeric bias.
+Why a soft one-hot projection instead of a raw numeric channel?
+---------------------------------------------------------------
+Rock types are *categorical* — their integer IDs carry no ordinal meaning (ID 3 is not
+"more rock" than ID 2).  Inserting them as an extra numeric channel would impose a false
+ordering and distort the encoder.  Instead, each vocab index is converted to a soft
+one-hot distribution over a patch window, then projected via a learned linear layer to
+the same bh_d_model space as the continuous tokens.
 
-How categorical patch embeddings are computed
----------------------------------------------
-Each depth position carries one rock-type ID and one formation ID.  These are
-embedded to dense vectors, then mean-pooled over each depth-patch window, giving
-one rock embedding and one formation embedding per patch.  Those patch embeddings
-are broadcast to all V continuous variable tokens that belong to the same patch and
-summed in, realising the formula:
+How rock patch tokens are computed
+-----------------------------------
+Each depth position carries one rock-type ID.  The ID is one-hot encoded, mean-pooled
+over each depth-patch window, and projected to bh_d_model, giving one rock token per
+patch.  That token is assembled alongside the V continuous variable tokens:
 
     token(v, p) = continuous_patch_proj(v, p)
                 + variable_embedding(v)
                 + depth_position_embedding(p)
-                + rock_patch_embedding(p)
-                + formation_patch_embedding(p)
+
+    token(rock, p) = rock_proj(mean_pool_one_hot(rock_ids, p))
+                   + rock_type_embedding   (token type V)
+                   + depth_position_embedding(p)
 
 How this model differs from VariableAwarePatchBoreholeUncertaintyEndToEndMapBeliefTransformer
 ---------------------------------------------------------------------------------------------
-* Config type is CatVarEndToEndConfig (adds n_rock_types, n_formations).
-* Borehole encoder is CatVarBoreholeTransformerEncoder (adds rock_embed, form_embed).
+* Config type is CatVarEndToEndConfig (adds n_rock_types; inferred from labels_vocab.pkl).
+* Borehole encoder is CatVarBoreholeTransformerEncoder (adds rock_proj).
 * encode_categorical_boreholes() is used instead of encode_boreholes().
-* All public methods take rock_ids and formation_ids in addition to boreholes.
+* All public methods take rock_ids in addition to boreholes.
 * The map-transformer pipeline (SpatialProjectionLayer, MapBeliefEncoder,
   OreReconstructionHead, UncertaintyHead) is unchanged.
 
 Architecture
 ------------
   CatVarBoreholeTransformerEncoder  — (B,K,V,D)+(B,K,D)+(B,K,D) → (B,K,latent_dim)
+                                      seq_len = 1 + (n_variables+2) * n_patches
   SpatialProjectionLayer            — scatter latents onto grid tokens
   MapBeliefEncoder                  — transformer over grid tokens
   OreReconstructionHead             — ore map (B,1,n_x,n_y)
@@ -51,26 +51,25 @@ Training objective (implemented in train_cat_var_encoder.py)
 
 Public interface
 ----------------
-forward(boreholes, rock_ids, formation_ids, ore_vals, positions, padding_mask=None)
+forward(boreholes, rock_ids, ore_vals, positions, padding_mask=None)
     -> (pred_ore, pred_uncertainty)   both (B, 1, n_x, n_y)
 
-encode(boreholes, rock_ids, formation_ids, ore_vals, positions, padding_mask=None)
+encode(boreholes, rock_ids, ore_vals, positions, padding_mask=None)
     -> latent  (B, d_model)
 
-forward_with_latent(boreholes, rock_ids, formation_ids, ore_vals, positions, padding_mask=None)
+forward_with_latent(boreholes, rock_ids, ore_vals, positions, padding_mask=None)
     -> (pred_ore, pred_uncertainty, latent)
 
-encode_borehole_with_attention(borehole, rock_ids, formation_ids)
+encode_borehole_with_attention(borehole, rock_ids)
     -> (latent, attn_weights)
 
 Input (forward)
 ---------------
-boreholes     : (B, K, V, D)  padded standardised raw boreholes
-rock_ids      : (B, K, D)     int64 rock-type vocab indices (0 = other/unknown)
-formation_ids : (B, K, D)     int64 formation vocab indices (0 = other/unknown)
-ore_vals      : (B, K)        observed ore values  (0 at padding)
-positions     : (B, K, 2)     normalised [0,1] (x, y) of drilled cells
-padding_mask  : (B, K) bool   True at zero-padded rows
+boreholes    : (B, K, V, D)  padded standardised raw boreholes
+rock_ids     : (B, K, D)     int64 rock-type vocab indices (0 = other/unknown)
+ore_vals     : (B, K)        observed ore values  (0 at padding)
+positions    : (B, K, 2)     normalised [0,1] (x, y) of drilled cells
+padding_mask : (B, K) bool   True at zero-padded rows
 
 Output
 ------
@@ -130,14 +129,13 @@ class CatVarEncoder(nn.Module):
         self,
         boreholes: torch.Tensor,
         rock_ids: torch.Tensor,
-        formation_ids: torch.Tensor,
         ore_vals: torch.Tensor,
         positions: torch.Tensor,
         padding_mask: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Full pipeline returning (ore_map, uncertainty_map, map_belief_latent)."""
         latents = encode_categorical_boreholes(
-            self.bh_encoder, boreholes, rock_ids, formation_ids,
+            self.bh_encoder, boreholes, rock_ids,
             padding_mask, self.cfg.latent_dim,
         )
         tokens = self.spatial_projection(ore_vals, positions, latents, padding_mask)
@@ -154,21 +152,19 @@ class CatVarEncoder(nn.Module):
         self,
         boreholes: torch.Tensor,
         rock_ids: torch.Tensor,
-        formation_ids: torch.Tensor,
         ore_vals: torch.Tensor,
         positions: torch.Tensor,
         padding_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Predict ore map and uncertainty from raw drilled boreholes + geological labels.
+        """Predict ore map and uncertainty from raw drilled boreholes + rock-type labels.
 
         Parameters
         ----------
-        boreholes     : (B, K, V, D)
-        rock_ids      : (B, K, D)  int64 rock-type vocab indices
-        formation_ids : (B, K, D)  int64 formation vocab indices
-        ore_vals      : (B, K)
-        positions     : (B, K, 2)
-        padding_mask  : (B, K) bool
+        boreholes    : (B, K, V, D)
+        rock_ids     : (B, K, D)  int64 rock-type vocab indices
+        ore_vals     : (B, K)
+        positions    : (B, K, 2)
+        padding_mask : (B, K) bool
 
         Returns
         -------
@@ -176,7 +172,7 @@ class CatVarEncoder(nn.Module):
         pred_uncertainty : (B, 1, n_x, n_y)  — non-negative (softplus)
         """
         ore_map, uncertainty_map, _ = self._forward_all(
-            boreholes, rock_ids, formation_ids, ore_vals, positions, padding_mask
+            boreholes, rock_ids, ore_vals, positions, padding_mask
         )
         return ore_map, uncertainty_map
 
@@ -184,7 +180,6 @@ class CatVarEncoder(nn.Module):
         self,
         boreholes: torch.Tensor,
         rock_ids: torch.Tensor,
-        formation_ids: torch.Tensor,
         ore_vals: torch.Tensor,
         positions: torch.Tensor,
         padding_mask: torch.Tensor | None = None,
@@ -196,7 +191,7 @@ class CatVarEncoder(nn.Module):
         latent : (B, d_model)
         """
         _, _, latent = self._forward_all(
-            boreholes, rock_ids, formation_ids, ore_vals, positions, padding_mask
+            boreholes, rock_ids, ore_vals, positions, padding_mask
         )
         return latent
 
@@ -204,7 +199,6 @@ class CatVarEncoder(nn.Module):
         self,
         boreholes: torch.Tensor,
         rock_ids: torch.Tensor,
-        formation_ids: torch.Tensor,
         ore_vals: torch.Tensor,
         positions: torch.Tensor,
         padding_mask: torch.Tensor | None = None,
@@ -218,16 +212,15 @@ class CatVarEncoder(nn.Module):
         latent           : (B, d_model)
         """
         return self._forward_all(
-            boreholes, rock_ids, formation_ids, ore_vals, positions, padding_mask
+            boreholes, rock_ids, ore_vals, positions, padding_mask
         )
 
     def encode_borehole_with_attention(
         self,
         borehole: torch.Tensor,
         rock_ids: torch.Tensor,
-        formation_ids: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """Encode a single borehole (or batch) with categorical labels and return
+        """Encode a single borehole (or batch) with rock-type labels and return
         latent plus per-layer attention weights.
 
         Runs only the borehole encoder with attention capture enabled; the rest of
@@ -235,34 +228,30 @@ class CatVarEncoder(nn.Module):
 
         Parameters
         ----------
-        borehole      : (V, D) or (B, V, D) — standardised raw borehole tensor
-        rock_ids      : (D,)   or (B, D)    — int64 rock-type vocab indices
-        formation_ids : (D,)   or (B, D)    — int64 formation vocab indices
+        borehole  : (V, D) or (B, V, D) — standardised raw borehole tensor
+        rock_ids  : (D,)   or (B, D)    — int64 rock-type vocab indices
 
         Returns
         -------
         latent       : (B, latent_dim)
         attn_weights : (n_layers, B, n_heads, seq_len, seq_len) or None
-                       seq_len = 1 + n_variables * n_patches (CLS token first).
+                       seq_len = 1 + (n_variables + 1) * n_patches (CLS token first).
                        None when bh_n_layers == 0.
 
         Example
         -------
-        >>> latent, attn_weights = model.encode_borehole_with_attention(
-        ...     borehole, rock_ids, formation_ids
-        ... )
+        >>> latent, attn_weights = model.encode_borehole_with_attention(borehole, rock_ids)
         >>> from decision_simulator.neural_belief.models.belief_models.borehole_encoder_components import (
-        ...     extract_cls_attention, plot_cls_attention,
+        ...     extract_cls_attention_patch_major, plot_cls_attention,
         ... )
         >>> enc = model.bh_encoder
-        >>> cls_attn = extract_cls_attention(attn_weights, enc.cfg.n_variables, enc.n_patches)
-        >>> plot_cls_attention(cls_attn, var_names=["rhob", "gr_api", "dt_us_ft", "nphi", "res_deep_log"])
+        >>> cls_attn = extract_cls_attention_patch_major(attn_weights, enc.cfg.n_variables, enc.n_patches)
+        >>> plot_cls_attention(cls_attn, var_names=["rhob", "gr_api", "dt_us_ft", "nphi", "res_deep_log", "rock"])
         """
         if borehole.dim() == 2:
             borehole = borehole.unsqueeze(0)
             rock_ids = rock_ids.unsqueeze(0)
-            formation_ids = formation_ids.unsqueeze(0)
-        return self.bh_encoder(borehole, rock_ids, formation_ids, return_attention=True)
+        return self.bh_encoder(borehole, rock_ids, return_attention=True)
 
 
 # ---------------------------------------------------------------------------
@@ -282,8 +271,7 @@ if __name__ == "__main__":
         n_variables=5,
         n_depth=440,
         bh_patch_size=20,
-        n_rock_types=20,
-        n_formations=40,
+        n_rock_types=12,
         n_x=32,
         n_y=32,
     )
@@ -291,24 +279,34 @@ if __name__ == "__main__":
     model.eval()
 
     B, K, V, D = 2, 4, 5, 440
-    boreholes     = torch.randn(B, K, V, D)
-    rock_ids      = torch.randint(0, 20, (B, K, D))
-    formation_ids = torch.randint(0, 40, (B, K, D))
-    ore_vals      = torch.rand(B, K)
-    positions     = torch.rand(B, K, 2)
+    boreholes = torch.randn(B, K, V, D)
+    rock_ids  = torch.randint(0, 12, (B, K, D))
+    ore_vals  = torch.rand(B, K)
+    positions = torch.rand(B, K, 2)
 
     with torch.no_grad():
-        pred_ore, pred_unc = model(boreholes, rock_ids, formation_ids, ore_vals, positions)
+        pred_ore, pred_unc = model(boreholes, rock_ids, ore_vals, positions)
 
     assert pred_ore.shape == (B, 1, 32, 32), f"pred_ore shape: {pred_ore.shape}"
     assert pred_unc.shape == (B, 1, 32, 32), f"pred_unc shape: {pred_unc.shape}"
 
     with torch.no_grad():
-        latent = model.encode(boreholes, rock_ids, formation_ids, ore_vals, positions)
+        latent = model.encode(boreholes, rock_ids, ore_vals, positions)
 
     assert latent.shape == (B, cfg.d_model), f"latent shape: {latent.shape}"
+
+    # Verify borehole encoder sequence length: 1 + (V+1) * n_patches
+    enc = model.bh_encoder
+    n_patches = enc.n_patches                          # 22 with patch_size=20, n_depth=440
+    expected_seq = 1 + (5 + 1) * n_patches             # 133
+    with torch.no_grad():
+        _, attn = enc(boreholes[0], rock_ids[0], return_attention=True)
+    assert attn[0].shape[-1] == expected_seq, (
+        f"seq_len mismatch: got {attn[0].shape[-1]}, expected {expected_seq}"
+    )
 
     print("CatVarEncoder shape test passed.")
     print(f"  pred_ore:  {tuple(pred_ore.shape)}")
     print(f"  pred_unc:  {tuple(pred_unc.shape)}")
     print(f"  latent:    {tuple(latent.shape)}")
+    print(f"  bh seq_len: {attn[0].shape[-1]}  (1 + (5+1)×{n_patches})")

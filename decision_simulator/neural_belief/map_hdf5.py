@@ -87,6 +87,8 @@ class HDF5MapStore:
             borehole_arrays: list[np.ndarray] = []
             targets: list[np.ndarray] = []
             drill_patterns = []
+            rocks_arrays: list[np.ndarray] = []
+            has_rocks = "rocks" in hf
             for pos in positions:
                 borehole_arrays.append(hf["boreholes"][pos].astype(np.float32))
                 targets.append(hf["yield_target"][pos].astype(np.float32))
@@ -97,6 +99,8 @@ class HDF5MapStore:
                         hf["drill_counts"][pos],
                     )
                 )
+                if has_rocks:
+                    rocks_arrays.append(hf["rocks"][pos])  # keep as int8
 
         return NpzMap(
             borehole_arrays=borehole_arrays,
@@ -105,6 +109,7 @@ class HDF5MapStore:
             cfg=dataclasses.replace(stored_cfg, n_maps=len(positions)),
             n_x=n_x,
             n_y=n_y,
+            rocks_arrays=rocks_arrays if rocks_arrays else None,
         )
 
     def load_map_data(
@@ -192,17 +197,21 @@ class HDF5MapDirectory:
     def _priority_files(self, n_orebodies: int) -> list[Path]:
         d = self.directory
         if n_orebodies == 1:
-            return (
+            priority = (
                 sorted(d.glob("maps_0_and_1_orebodies_*.h5"))
                 + sorted(d.glob("maps_0_orebodies_*.h5"))
                 + sorted(d.glob("maps_1_orebodies_*.h5"))
             )
-        return (
-            sorted(d.glob("maps_stratified_*.h5"))
-            + sorted(d.glob("maps_0_and_1_orebodies_*.h5"))
-            + [p for cls in range(n_orebodies + 1)
-               for p in sorted(d.glob(f"maps_{cls}_orebodies_*.h5"))]
-        )
+        else:
+            priority = (
+                sorted(d.glob("maps_stratified_*.h5"))
+                + sorted(d.glob("maps_0_and_1_orebodies_*.h5"))
+                + [p for cls in range(n_orebodies + 1)
+                   for p in sorted(d.glob(f"maps_{cls}_orebodies_*.h5"))]
+            )
+        # Fall back to numeric-range shards produced by generate_training_maps.py
+        # e.g. maps_00000_00499.h5, maps_00500_00999.h5, …
+        return priority or sorted(d.glob("maps_[0-9][0-9][0-9][0-9][0-9]_*.h5"))
 
     def _load_by_positions(
         self,
@@ -218,6 +227,7 @@ class HDF5MapDirectory:
         all_bh: list[np.ndarray] = []
         all_targets: list[np.ndarray] = []
         all_drills: list = []
+        all_rocks: list[np.ndarray] = []
         cfg = None
         n_x = n_y = None
 
@@ -226,6 +236,8 @@ class HDF5MapDirectory:
             all_bh.extend(nm.borehole_arrays)
             all_targets.extend(nm.targets)
             all_drills.extend(nm.drill_patterns)
+            if nm.rocks_arrays is not None:
+                all_rocks.extend(nm.rocks_arrays)
             if cfg is None:
                 cfg = nm.cfg
                 n_x, n_y = nm.n_x, nm.n_y
@@ -237,6 +249,7 @@ class HDF5MapDirectory:
             cfg=dataclasses.replace(cfg, n_maps=len(indices)),
             n_x=n_x,
             n_y=n_y,
+            rocks_arrays=all_rocks if all_rocks else None,
         )
 
     def load_map_data(

@@ -1,32 +1,45 @@
-"""Generate belief map pool for neural-belief training.
+"""Generate formation-based belief map pool for neural-belief training.
 
-Maps are generated in parallel and stored as per-map npz files.
-Re-running with a larger ``--n-maps`` appends only the missing files (resume-safe).
-Convert the resulting pool to HDF5 shards with ``colab_npz_to_hdf5_full.py``.
+Uses FormationMapGenerator (variables drawn from a formation-indexed bank)
+instead of the rock-indexed MapGenerator.  Maps are generated in parallel and
+written directly to HDF5 shards, matching the exact structure expected by
+HDF5MapStore / HDF5MapDirectory (decision_simulator/neural_belief/map_hdf5.py).
+
+Re-running with the same --out-dir resumes from the last completed shard
+(completed map indices are recovered from the map_index dataset in each
+existing shard).
 
 Output layout
 -------------
     <out-dir>/
-        config.pkl              pool metadata
-        labels_vocab.pkl        {rocks: {name: idx}, formations: {name: idx}}
-        map_00000.npz           per-map arrays
-        map_00001.npz
+        config.pkl
+        labels_vocab.pkl
+        maps_00000_00499.h5     one shard = --shard-size maps (default 500)
+        maps_00500_00999.h5
         ...
 
-Per-map npz keys
-----------------
-    boreholes     : (n_x*n_y, V, D) float32 — raw (unstandardised) variables
-    yield_target  : (n_x, n_y)      float32 — max-pooled yield field
-    rocks         : (n_x*n_y, D)    int8    — rock-type vocab indices
-    formations    : (n_x*n_y, D)    int8    — formation vocab indices
-    drill_locs    : (S, max_drills, 2) int16
-    drill_ore_vals: (S, max_drills)    float32
-    drill_counts  : (S,)               int16
+HDF5 shard structure (per shard, N maps)
+-----------------------------------------
+    Attributes:
+        n_maps, pool_n_x, pool_n_y, pool_samples_per_map, pool_min_drills,
+        pool_max_drills, pool_seed, created_utc, file_type, class_counts,
+        variables (utf-8), rock_vocab (utf-8), formation_vocab (utf-8)
+    Datasets:
+        boreholes      (N, n_x*n_y, V, D) float32
+        yield_target   (N, n_x, n_y)       float32
+        rocks          (N, n_x*n_y, D)     int8
+        formations     (N, n_x*n_y, D)     int8
+        drill_locs     (N, S, max_drills, 2) int16
+        drill_ore_vals (N, S, max_drills)  float32
+        drill_counts   (N, S)              int16
+        n_bodies       (N,)                int8
+        map_index      (N,)                int32
+        filenames      (N,)                str
 
 Usage
 -----
     python generate_training_maps.py
-    python generate_training_maps.py --n-maps 500 --workers 8 --out-dir data/belief_maps
+    python generate_training_maps.py --n-maps 5000 --workers 8 --out-dir data/formation_maps
 """
 
 from __future__ import annotations
@@ -37,15 +50,18 @@ import os
 import pickle
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
+import h5py
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from simulator.distributions import DistributionBank, DiscoveryPrior
+from simulator.formation_distributions import FormationDistributionBank
+from simulator.distributions import DiscoveryPrior
 from simulator.formation_geometry import FormationGeometry
-from simulator.map_generator import MapGenerator, SimConfig
+from simulator.map_generator import FormationMapGenerator, SimConfig
 
 # ---------------------------------------------------------------------------
 # Worker globals (populated in each worker process by _worker_init)
@@ -53,7 +69,6 @@ from simulator.map_generator import MapGenerator, SimConfig
 
 _WORKER_GEN = None
 _WORKER_VARS = None
-_WORKER_OUT = None
 _WORKER_ROCK_VOCAB: dict[str, int] | None = None
 _WORKER_FM_VOCAB: dict[str, int] | None = None
 _WORKER_N_X: int = 0
@@ -68,7 +83,6 @@ def _worker_init(
     bank_path,
     geom_path,
     prior_path,
-    out_dir,
     variables,
     worker_seed_base,
     rock_vocab,
@@ -81,19 +95,19 @@ def _worker_init(
     main_seed,
     n_ore_bodies,
 ):
-    global _WORKER_GEN, _WORKER_VARS, _WORKER_OUT
+    global _WORKER_GEN, _WORKER_VARS
     global _WORKER_ROCK_VOCAB, _WORKER_FM_VOCAB
     global _WORKER_N_X, _WORKER_N_Y
     global _WORKER_SAMPLES_PER_MAP, _WORKER_MIN_DRILLS, _WORKER_MAX_DRILLS
     global _WORKER_SEED
 
-    bank = DistributionBank.load(bank_path)
+    bank = FormationDistributionBank.load(bank_path)
     geom = FormationGeometry.load(geom_path)
     prior = DiscoveryPrior.load(prior_path)
     seed = worker_seed_base + os.getpid()
-    _WORKER_GEN = MapGenerator(bank, geom, SimConfig(n_ore_bodies=n_ore_bodies), seed=seed, prior=prior)
+    cfg = SimConfig() if n_ore_bodies is None else SimConfig(max_ore_bodies=n_ore_bodies)
+    _WORKER_GEN = FormationMapGenerator(bank, geom, cfg, seed=seed, prior=prior)
     _WORKER_VARS = list(variables)
-    _WORKER_OUT = Path(out_dir)
     _WORKER_ROCK_VOCAB = rock_vocab
     _WORKER_FM_VOCAB = fm_vocab
     _WORKER_N_X = n_x
@@ -110,17 +124,25 @@ def _worker_init(
 
 
 def _build_vocabs(
-    bank: DistributionBank,
+    bank: FormationDistributionBank,
     geom: FormationGeometry,
 ) -> tuple[dict[str, int], dict[str, int]]:
+    """Build {rocks, formations} string→index maps.
+
+    Rocks are sourced from FormationGeometry (the rock Markov-chain pool is
+    what actually appears in generated columns; FormationDistributionBank does
+    not index by rock type).  Formations are sourced from both the bank and
+    the geometry to cover the full set.
+    """
     rocks_seen: set[str] = {"other"}
-    rocks_seen.update(getattr(bank, "rock_types", []) or [])
-    rocks_seen.update(k[0] for k in getattr(bank, "cells", {}).keys())
+    for stats in geom.formations.values():
+        rocks_seen.update(getattr(stats, "facies", {}).keys() or [])
     rocks = ["other"] + sorted(r for r in rocks_seen if r != "other")
     rock_vocab = {r: i for i, r in enumerate(rocks)}
 
-    fms_seen: set[str] = set(getattr(geom, "formations", {}) or {})
-    fms_seen.add("other")
+    fms_seen: set[str] = {"other"}
+    fms_seen.update(getattr(bank, "formations", []) or [])
+    fms_seen.update(getattr(geom, "formations", {}) or {})
     formations = ["other"] + sorted(f for f in fms_seen if f != "other")
     fm_vocab = {f: i for i, f in enumerate(formations)}
     return rock_vocab, fm_vocab
@@ -143,12 +165,8 @@ def _encode_labels(arr: np.ndarray, vocab: dict[str, int]) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 
-def _generate_one(map_idx: int) -> tuple[int, float]:
-    """Generate and save one map.  Skipped if the output file already exists."""
-    out_path = _WORKER_OUT / f"map_{map_idx:05d}.npz"
-    if out_path.exists():
-        return map_idx, 0.0
-
+def _generate_one(map_idx: int) -> tuple[int, dict, float]:
+    """Generate one map and return its arrays (no disk I/O in the worker)."""
     t0 = time.perf_counter()
     m = next(_WORKER_GEN)
     n_x, n_y = _WORKER_N_X, _WORKER_N_Y
@@ -167,7 +185,7 @@ def _generate_one(map_idx: int) -> tuple[int, float]:
     rocks = _encode_labels(np.asarray(m["rock_types"]), _WORKER_ROCK_VOCAB)
     formations = _encode_labels(np.asarray(m["formations"]), _WORKER_FM_VOCAB)
 
-    # Drill patterns — seeded deterministically per map so they are reproducible
+    # Drill patterns — seeded deterministically per map
     all_locations = [(i, j) for i in range(n_x) for j in range(n_y)]
     rng = np.random.default_rng(_WORKER_SEED * 100003 + map_idx)
 
@@ -188,19 +206,140 @@ def _generate_one(map_idx: int) -> tuple[int, float]:
             drill_locs_arr[s, k] = [r, c]
             drill_ore_arr[s, k] = float(yield_target[r, c])
 
-    np.savez_compressed(
-        out_path,
-        boreholes=bh,
-        yield_target=yield_target,
-        rocks=rocks,
-        formations=formations,
-        drill_locs=drill_locs_arr,
-        drill_ore_vals=drill_ore_arr,
-        drill_counts=drill_counts_arr,
-        n_bodies=np.int8(len(m["bodies"])),
+    return map_idx, {
+        "boreholes": bh,
+        "yield_target": yield_target,
+        "rocks": rocks,
+        "formations": formations,
+        "drill_locs": drill_locs_arr,
+        "drill_ore_vals": drill_ore_arr,
+        "drill_counts": drill_counts_arr,
+        "n_bodies": np.int8(len(m["bodies"])),
+    }, time.perf_counter() - t0
+
+
+# ---------------------------------------------------------------------------
+# HDF5 shard writer
+# ---------------------------------------------------------------------------
+
+_COMPRESS_KWARGS: dict = {"compression": "gzip", "compression_opts": 1, "shuffle": True}
+
+
+def _write_hdf5_shard(
+    out_path: Path,
+    batch: list[tuple[int, dict]],
+    pool_config: dict,
+    rock_vocab: dict[str, int],
+    fm_vocab: dict[str, int],
+) -> None:
+    """Write a sorted batch of (map_idx, arrays) to a single HDF5 shard.
+
+    The shard structure exactly matches the output of colab_npz_to_hdf5_full.py
+    and is readable by HDF5MapStore / HDF5MapDirectory.
+    """
+    batch.sort(key=lambda x: x[0])
+    map_indices = [x[0] for x in batch]
+    maps = [x[1] for x in batch]
+    N = len(batch)
+
+    n_bodies_arr = np.array([int(m["n_bodies"]) for m in maps], dtype=np.int8)
+    class_counts = np.array(
+        [(n_bodies_arr == c).sum() for c in range(4)], dtype=np.int32
     )
 
-    return map_idx, time.perf_counter() - t0
+    def _chunk1(shape: tuple) -> tuple:
+        return (1, *shape[1:])
+
+    with h5py.File(out_path, "w") as hf:
+        # ── Attributes ────────────────────────────────────────────────────
+        hf.attrs["n_maps"]               = N
+        hf.attrs["pool_n_x"]             = pool_config["n_x"]
+        hf.attrs["pool_n_y"]             = pool_config["n_y"]
+        hf.attrs["pool_samples_per_map"] = pool_config["samples_per_map"]
+        hf.attrs["pool_min_drills"]      = pool_config["min_drills"]
+        hf.attrs["pool_max_drills"]      = pool_config["max_drills"]
+        hf.attrs["pool_seed"]            = pool_config["seed"]
+        hf.attrs["created_utc"]          = datetime.now(timezone.utc).isoformat()
+        hf.attrs["file_type"]            = "formation"
+        hf.attrs["class_counts"]         = class_counts
+        hf.attrs["variables"] = np.array(
+            [s.encode("utf-8") for s in pool_config["variables"]]
+        )
+        hf.attrs["rock_vocab"] = np.array(
+            [s.encode("utf-8") for s in rock_vocab]
+        )
+        hf.attrs["formation_vocab"] = np.array(
+            [s.encode("utf-8") for s in fm_vocab]
+        )
+
+        # ── Index datasets ─────────────────────────────────────────────────
+        hf.create_dataset(
+            "n_bodies",  data=n_bodies_arr,                          **_COMPRESS_KWARGS
+        )
+        hf.create_dataset(
+            "map_index", data=np.array(map_indices, dtype=np.int32), **_COMPRESS_KWARGS
+        )
+        fn_ds = hf.create_dataset(
+            "filenames", (N,), dtype=h5py.string_dtype(encoding="utf-8")
+        )
+        for i, idx in enumerate(map_indices):
+            fn_ds[i] = f"map_{idx:05d}"
+
+        # ── Data datasets (chunked, one map per chunk) ─────────────────────
+        bh_shape  = (N, *maps[0]["boreholes"].shape)
+        yt_shape  = (N, *maps[0]["yield_target"].shape)
+        ro_shape  = (N, *maps[0]["rocks"].shape)
+        fm_shape  = (N, *maps[0]["formations"].shape)
+        dl_shape  = (N, *maps[0]["drill_locs"].shape)
+        dov_shape = (N, *maps[0]["drill_ore_vals"].shape)
+        dc_shape  = (N, *maps[0]["drill_counts"].shape)
+
+        def _ds(name: str, shape: tuple, dtype) -> h5py.Dataset:
+            return hf.create_dataset(
+                name, shape=shape, dtype=dtype,
+                chunks=_chunk1(shape), **_COMPRESS_KWARGS
+            )
+
+        bh_ds  = _ds("boreholes",      bh_shape,  np.float32)
+        yt_ds  = _ds("yield_target",   yt_shape,  np.float32)
+        ro_ds  = _ds("rocks",          ro_shape,  np.int8)
+        fm_ds  = _ds("formations",     fm_shape,  np.int8)
+        dl_ds  = _ds("drill_locs",     dl_shape,  np.int16)
+        dov_ds = _ds("drill_ore_vals", dov_shape, np.float32)
+        dc_ds  = _ds("drill_counts",   dc_shape,  np.int16)
+
+        for i, m in enumerate(maps):
+            bh_ds[i]  = m["boreholes"]
+            yt_ds[i]  = m["yield_target"]
+            ro_ds[i]  = m["rocks"]
+            fm_ds[i]  = m["formations"]
+            dl_ds[i]  = m["drill_locs"]
+            dov_ds[i] = m["drill_ore_vals"]
+            dc_ds[i]  = m["drill_counts"]
+
+    size_mb = out_path.stat().st_size / 1024 ** 2
+    print(
+        f"    wrote {out_path.name}"
+        f"  ({N} maps, dist={class_counts.tolist()}, {size_mb:.1f} MB)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Resume helper
+# ---------------------------------------------------------------------------
+
+
+def _find_completed_maps(out_dir: Path) -> set[int]:
+    """Return all map indices already stored in existing HDF5 shards."""
+    done: set[int] = set()
+    for h5 in sorted(out_dir.glob("maps_*.h5")):
+        try:
+            with h5py.File(h5, "r") as hf:
+                if "map_index" in hf:
+                    done.update(int(i) for i in hf["map_index"][:])
+        except Exception:
+            pass
+    return done
 
 
 # ---------------------------------------------------------------------------
@@ -210,45 +349,55 @@ def _generate_one(map_idx: int) -> tuple[int, float]:
 
 def main() -> None:
     p = argparse.ArgumentParser(
-        description="Generate belief map pool for neural-belief training."
+        description="Generate formation-based belief map pool for neural-belief training."
     )
-    p.add_argument("--out-dir", type=Path, default=Path("C://dataset_complete"))
-    p.add_argument("--n-maps", type=int, default=1000)
+    p.add_argument("--out-dir", type=Path, default=Path("C://dataset_formation"))
+    p.add_argument("--n-maps", type=int, default=10000)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--workers", type=int, default=os.cpu_count())
+    p.add_argument("--shard-size", type=int, default=500,
+                   help="number of maps per HDF5 shard (default 500)")
     p.add_argument(
-        "--samples-per-map", type=int, default=20, help="drill patterns stored per map"
+        "--samples-per-map", type=int, default=20,
+        help="drill patterns stored per map",
     )
     p.add_argument("--min-drills", type=int, default=1)
     p.add_argument("--max-drills", type=int, default=15)
-    p.add_argument("--bank", type=Path, default=Path("data/clean/distributions.pkl"))
     p.add_argument(
-        "--geom", type=Path, default=Path("data/clean/formation_geometry.pkl")
+        "--bank", type=Path,
+        default=Path("data/clean/formation_distributions.pkl"),
     )
-    p.add_argument("--prior", type=Path, default=Path("data/clean/discovery_prior.pkl"))
+    p.add_argument(
+        "--geom", type=Path,
+        default=Path("data/clean/formation_geometry.pkl"),
+    )
+    p.add_argument(
+        "--prior", type=Path,
+        default=Path("data/clean/discovery_prior.pkl"),
+    )
     p.add_argument(
         "--n-bodies", type=int, default=None,
-        help="fix ore body count per map (0-3); omit for random 0-3",
+        help="cap ore body count per map (0-3); omit to use SimConfig default (2)",
     )
     args = p.parse_args()
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
-    sim_cfg = SimConfig(n_ore_bodies=args.n_bodies)
+    sim_cfg = SimConfig() if args.n_bodies is None else SimConfig(max_ore_bodies=args.n_bodies)
     n_x, n_y = sim_cfg.n_x, sim_cfg.n_y
     variables = list(sim_cfg.variables)
 
-    vocab_path = args.out_dir / "labels_vocab.pkl"
+    vocab_path  = args.out_dir / "labels_vocab.pkl"
     config_path = args.out_dir / "config.pkl"
 
-    # Build or load label vocabs
+    # ── Build or load label vocabs ─────────────────────────────────────────
     if vocab_path.exists():
         with open(vocab_path, "rb") as f:
             vocabs = pickle.load(f)
         rock_vocab = vocabs["rocks"]
-        fm_vocab = vocabs["formations"]
+        fm_vocab   = vocabs["formations"]
         print(f"  loaded label vocab from {vocab_path}")
     else:
-        bank = DistributionBank.load(args.bank)
+        bank = FormationDistributionBank.load(args.bank)
         geom = FormationGeometry.load(args.geom)
         rock_vocab, fm_vocab = _build_vocabs(bank, geom)
         with open(vocab_path, "wb") as f:
@@ -259,49 +408,48 @@ def main() -> None:
         )
         del bank, geom
 
-    # Write config (read by colab_npz_to_hdf5_full.py during HDF5 conversion)
+    # ── Write / update pool config ─────────────────────────────────────────
+    pool_config = {
+        "cache_version": "2",
+        "variables": variables,
+        "n_maps": args.n_maps,
+        "seed": args.seed,
+        "samples_per_map": args.samples_per_map,
+        "min_drills": args.min_drills,
+        "max_drills": args.max_drills,
+        "n_x": n_x,
+        "n_y": n_y,
+    }
     with open(config_path, "wb") as f:
-        pickle.dump(
-            {
-                "cache_version": "2",
-                "variables": variables,
-                "n_maps": args.n_maps,
-                "seed": args.seed,
-                "samples_per_map": args.samples_per_map,
-                "min_drills": args.min_drills,
-                "max_drills": args.max_drills,
-                "n_x": n_x,
-                "n_y": n_y,
-            },
-            f,
-        )
+        pickle.dump(pool_config, f)
 
-    # Determine which map indices still need to be generated
-    pending = [
-        i
-        for i in range(args.n_maps)
-        if not (args.out_dir / f"map_{i:05d}.npz").exists()
-    ]
+    # ── Resume: find which maps are already in existing shards ─────────────
+    completed = _find_completed_maps(args.out_dir)
+    pending   = [i for i in range(args.n_maps) if i not in completed]
     if not pending:
-        print(f"  all {args.n_maps} maps already exist in {args.out_dir}")
+        print(f"  all {args.n_maps} maps already written to {args.out_dir}")
         return
     skipped = args.n_maps - len(pending)
     print(
         f"  generating {len(pending)} maps with {args.workers} workers"
-        + (f" (skipping {skipped} already saved)" if skipped else "")
+        + (f" (skipping {skipped} already in shards)" if skipped else "")
     )
 
-    # Parallel generation
+    # ── Parallel generation ────────────────────────────────────────────────
+    # Workers return arrays; main process batches them into HDF5 shards.
     t0 = time.perf_counter()
-    completed = 0
-    last_report = t0
+    completed_count = 0
+    last_report     = t0
+    current_batch: list[tuple[int, dict]] = []
+    n_existing_shards = len(list(args.out_dir.glob("maps_*.h5")))
+    shard_seq = n_existing_shards  # next shard sequence number
+
     init_args = (
         str(args.bank),
         str(args.geom),
         str(args.prior),
-        str(args.out_dir),
         variables,
-        args.seed * 7919,  # worker_seed_base
+        args.seed * 7919,   # worker_seed_base
         rock_vocab,
         fm_vocab,
         n_x,
@@ -309,41 +457,54 @@ def main() -> None:
         args.samples_per_map,
         args.min_drills,
         args.max_drills,
-        args.seed,  # main_seed for drill-pattern RNG
+        args.seed,          # main_seed for drill-pattern RNG
         args.n_bodies,
     )
+
     with mp.Pool(args.workers, initializer=_worker_init, initargs=init_args) as pool:
-        for idx, dt in pool.imap_unordered(_generate_one, pending, chunksize=4):
-            completed += 1
+        for map_idx, data, _dt in pool.imap_unordered(
+            _generate_one, pending, chunksize=2
+        ):
+            current_batch.append((map_idx, data))
+            completed_count += 1
+
             now = time.perf_counter()
-            if now - last_report >= 10 or completed == len(pending):
-                elapsed = now - t0
-                rate = completed / elapsed if elapsed > 0 else 0
-                remaining = len(pending) - completed
-                eta = remaining / rate if rate > 0 else 0
+            if now - last_report >= 10 or completed_count == len(pending):
+                elapsed   = now - t0
+                rate      = completed_count / elapsed if elapsed > 0 else 0
+                remaining = len(pending) - completed_count
+                eta       = remaining / rate if rate > 0 else 0
                 print(
-                    f"    {completed:>6d}/{len(pending)}"
-                    f"  ({rate:.1f} maps/s, ETA {eta / 60:.1f} min)"
+                    f"    {completed_count:>6d}/{len(pending)}"
+                    f"  ({rate:.1f} maps/s, ETA {eta/60:.1f} min)"
                 )
                 last_report = now
 
-    print(f"\n  done in {(time.perf_counter() - t0) / 60:.1f} min")
-    print(f"  pool -> {args.out_dir}  ({args.n_maps} maps)")
+            # Flush a full shard
+            if len(current_batch) >= args.shard_size:
+                start = shard_seq * args.shard_size
+                end   = (shard_seq + 1) * args.shard_size - 1
+                shard_path = args.out_dir / f"maps_{start:05d}_{end:05d}.h5"
+                _write_hdf5_shard(
+                    shard_path, current_batch, pool_config,
+                    list(rock_vocab.keys()), list(fm_vocab.keys()),
+                )
+                current_batch = []
+                shard_seq += 1
 
-    # Write a flat index so colab_npz_to_hdf5_full.py can stratify by body count
-    # without opening every map file.
-    index_path = args.out_dir / "n_bodies_index.npy"
-    index = np.array(
-        [int(np.load(args.out_dir / f"map_{i:05d}.npz")["n_bodies"])
-         for i in range(args.n_maps)],
-        dtype=np.int8,
-    )
-    np.save(index_path, index)
-    unique, counts = np.unique(index, return_counts=True)
-    print("  ore-body distribution:")
-    for u, c in zip(unique, counts):
-        print(f"    {u} bodies: {c} maps ({c/args.n_maps:.1%})")
-    print(f"  index -> {index_path}")
+    # Flush the final partial shard (if any)
+    if current_batch:
+        first_idx = min(x[0] for x in current_batch)
+        last_idx  = max(x[0] for x in current_batch)
+        shard_path = args.out_dir / f"maps_{first_idx:05d}_{last_idx:05d}.h5"
+        _write_hdf5_shard(
+            shard_path, current_batch, pool_config,
+            list(rock_vocab.keys()), list(fm_vocab.keys()),
+        )
+
+    total_shards = len(list(args.out_dir.glob("maps_*.h5")))
+    print(f"\n  done in {(time.perf_counter() - t0) / 60:.1f} min")
+    print(f"  pool -> {args.out_dir}  ({args.n_maps} maps, {total_shards} shards)")
 
 
 if __name__ == "__main__":

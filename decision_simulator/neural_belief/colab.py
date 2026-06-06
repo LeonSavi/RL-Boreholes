@@ -51,6 +51,10 @@ from .training import (
     GuidedE2EMapDataset,
     train_guided_exploration_belief,
     load_guided_belief_checkpoint,
+    CatVarConfig,
+    CatVarE2EMapDataset,
+    train_cat_var_encoder,
+    load_cat_var_checkpoint,
 )
 from .training.belief_models.end_to_end.train_guided_exploration_belief import _load_guide_model
 
@@ -101,6 +105,7 @@ _DEBUG_PATCH: dict = {**_DEBUG_E2E, "bh_patch_size": 10}
 _DEBUG_CLS: dict = {**_DEBUG_E2E, "bh_patch_size": 10}
 _DEBUG_VAR_AWARE: dict = {**_DEBUG_E2E, "bh_patch_size": 10}
 _DEBUG_VAR_AWARE_UNCERTAINTY: dict = {**_DEBUG_E2E, "bh_patch_size": 10}
+_DEBUG_CAT_VAR: dict = {**_DEBUG_E2E, "bh_patch_size": 10}
 
 # Fields present in NeuralBeliefTrainingConfig but not in MapBeliefTrainingConfig.
 # These are silently dropped when building a transformer config from **overrides.
@@ -924,9 +929,10 @@ def train_end_to_end_from_colab(
     use_sequential_dataset: bool = False,
     n_sequences_per_map: int = 3,
     prefix_steps: list[int] | None = None,
-    bh_encoder_model: Literal["cnn", "patch", "cls", "variable_aware", "variable_aware_uncertainty"] = "cnn",
+    bh_encoder_model: Literal["cnn", "patch", "cls", "variable_aware", "variable_aware_uncertainty", "cat_var_encoder"] = "cnn",
     guided_training: bool = False,
     guide_ckpt_path: str | Path | None = None,
+    labels_dir: str | Path | None = None,
     **overrides,
 ) -> tuple[object, list[dict]]:
     """Train the end-to-end map belief transformer from a Colab notebook.
@@ -999,9 +1005,15 @@ def train_end_to_end_from_colab(
         ``"cls"``                        — depth-patch tokenisation + learned CLS-token pooling
         ``"variable_aware"``             — one token per (variable, depth patch) + variable embedding + CLS pooling
         ``"variable_aware_uncertainty"`` — same as ``"variable_aware"`` with a parallel uncertainty head that predicts per-cell prediction error
+        ``"cat_var_encoder"``            — same as ``"variable_aware_uncertainty"`` but also embeds per-depth rock-type labels via a soft one-hot projection
 
-        When ``"patch"``, ``"cls"``, ``"variable_aware"``, or ``"variable_aware_uncertainty"``, pass
-        ``bh_patch_size=N`` in ``**overrides`` to control the patch size (default 20).
+        When ``"patch"``, ``"cls"``, ``"variable_aware"``, ``"variable_aware_uncertainty"``, or
+        ``"cat_var_encoder"``, pass ``bh_patch_size=N`` in ``**overrides`` to control the patch size (default 20).
+    labels_dir
+        Directory containing ``labels_vocab.pkl`` and ``labels_NNNNN.npz`` files produced by
+        ``generate_training_maps.py``.  Only used when ``bh_encoder_model="cat_var_encoder"``.
+        If ``None``, rock IDs default to zero (the ``"other"`` / unknown category).
+        ``n_rock_types`` is inferred automatically from ``labels_vocab.pkl`` in this directory.
     **overrides
         Any field of the selected training config by name.  Common overrides:
 
@@ -1061,7 +1073,11 @@ def train_end_to_end_from_colab(
     is_cls = bh_encoder_model == "cls"
     is_var_aware = bh_encoder_model == "variable_aware"
     is_var_aware_uncertainty = bh_encoder_model == "variable_aware_uncertainty"
-    if is_var_aware_uncertainty:
+    is_cat_var = bh_encoder_model == "cat_var_encoder"
+    if is_cat_var:
+        cfg_class = CatVarConfig
+        debug_defaults = _DEBUG_CAT_VAR if debug else {}
+    elif is_var_aware_uncertainty:
         cfg_class = VariableAwarePatchBoreholeUncertaintyConfig
         debug_defaults = _DEBUG_VAR_AWARE_UNCERTAINTY if debug else {}
     elif is_var_aware:
@@ -1127,8 +1143,10 @@ def train_end_to_end_from_colab(
 
     print(f"\nnorm_stats_from  : {norm_stats_from}")
     print(f"bh_encoder_model : {bh_encoder_model}")
-    if is_patch or is_cls or is_var_aware or is_var_aware_uncertainty:
+    if is_patch or is_cls or is_var_aware or is_var_aware_uncertainty or is_cat_var:
         print(f"bh_patch_size    : {cfg.bh_patch_size}")
+    if is_cat_var:
+        print(f"labels_dir       : {labels_dir}")
     print(f"map_pool_path    : {resolved_pool}")
     print(f"n_orebodies      : {n_orebodies}")
     print(f"n_train_maps     : {cfg.n_train_maps}  n_val_maps: {cfg.n_val_maps}")
@@ -1146,7 +1164,14 @@ def train_end_to_end_from_colab(
         print(f"guide model      : {resolved_guide_path or 'heuristic (distance-from-drills)'}")
     print(f"Training config  :\n{cfg}\n")
 
-    is_cnn = not (is_patch or is_cls or is_var_aware or is_var_aware_uncertainty)
+    is_cnn = not (is_patch or is_cls or is_var_aware or is_var_aware_uncertainty or is_cat_var)
+
+    # Resolve labels_dir once — used for both dataset building and vocab inference.
+    _resolved_labels: Path | None = None
+    if is_cat_var and labels_dir is not None:
+        _resolved_labels = Path(labels_dir)
+        if not _resolved_labels.is_absolute():
+            _resolved_labels = root / _resolved_labels
 
     if guided_training and is_cnn:
         # train_guided_exploration_belief builds datasets internally from the caches,
@@ -1177,15 +1202,39 @@ def train_end_to_end_from_colab(
         )
     else:
         print("Building training dataset ...")
-        train_ds = E2EMapDataset.from_cache(
-            train_cache, resources, cfg, verbose=True, is_val=False
-        )
-        print("Building validation dataset ...")
-        val_ds = E2EMapDataset.from_cache(
-            val_cache, resources, cfg, verbose=True, is_val=True
-        )
+        if is_cat_var:
+            train_ds = CatVarE2EMapDataset.from_cache(
+                train_cache, resources, cfg, labels_dir=_resolved_labels, verbose=True, is_val=False
+            )
+            print("Building validation dataset ...")
+            val_ds = CatVarE2EMapDataset.from_cache(
+                val_cache, resources, cfg, labels_dir=_resolved_labels, verbose=True, is_val=True
+            )
+        else:
+            train_ds = E2EMapDataset.from_cache(
+                train_cache, resources, cfg, verbose=True, is_val=False
+            )
+            print("Building validation dataset ...")
+            val_ds = E2EMapDataset.from_cache(
+                val_cache, resources, cfg, verbose=True, is_val=True
+            )
 
-    if is_var_aware_uncertainty:
+    if is_cat_var:
+        trained_model, _, run_dir = train_cat_var_encoder(
+            resources=resources,
+            cfg=cfg,
+            device=device,
+            checkpoint_dir=ckpt_dir,
+            labels_dir=_resolved_labels,
+            plot_dir=ckpt_dir,
+            verbose=True,
+            train_ds=train_ds,
+            val_ds=val_ds,
+        )
+        _, _, _, history = load_cat_var_checkpoint(
+            run_dir / "cat_var_best.pt", device=device
+        )
+    elif is_var_aware_uncertainty:
         trained_model, _, run_dir = train_variable_aware_patch_uncertainty_borehole_transformer(
             resources=resources,
             cfg=cfg,

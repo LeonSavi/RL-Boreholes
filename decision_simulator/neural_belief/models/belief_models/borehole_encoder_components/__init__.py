@@ -5,7 +5,7 @@ from .components import (
     PatchBoreholeCLSTransformerEncoder,
     VariableAwarePatchBoreholeTransformerEncoder,
 )
-from .attention_utils import extract_cls_attention, plot_cls_attention
+from .attention_utils import extract_cls_attention, extract_cls_attention_patch_major, plot_cls_attention
 
 __all__ = [
     "BoreholeTransformerEncoder",
@@ -14,5 +14,6 @@ __all__ = [
     "PatchBoreholeCLSTransformerEncoder",
     "VariableAwarePatchBoreholeTransformerEncoder",
     "extract_cls_attention",
+    "extract_cls_attention_patch_major",
     "plot_cls_attention",
 ]

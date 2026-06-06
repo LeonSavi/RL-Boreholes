@@ -104,24 +104,22 @@ def encode_categorical_boreholes(
     bh_encoder: nn.Module,
     boreholes: torch.Tensor,
     rock_ids: torch.Tensor,
-    formation_ids: torch.Tensor,
     padding_mask: torch.Tensor | None,
     latent_dim: int,
 ) -> torch.Tensor:
-    """Encode boreholes with categorical rock/formation context, skipping padded rows.
+    """Encode boreholes with rock-type context, skipping padded rows.
 
     Companion to encode_boreholes() for use with CatVarBoreholeTransformerEncoder,
-    which requires three inputs per borehole: the continuous variable tensor plus
-    per-depth rock-type and formation integer IDs.
+    which requires two inputs per borehole: the continuous variable tensor plus
+    per-depth rock-type integer IDs.
 
     Parameters
     ----------
-    bh_encoder    : CatVarBoreholeTransformerEncoder (or compatible)
-    boreholes     : (B, K, V, D)
-    rock_ids      : (B, K, D) int64 rock-type vocab indices
-    formation_ids : (B, K, D) int64 formation vocab indices
-    padding_mask  : (B, K) bool — True at padded positions; None if no padding
-    latent_dim    : output embedding size
+    bh_encoder   : CatVarBoreholeTransformerEncoder (or compatible)
+    boreholes    : (B, K, V, D)
+    rock_ids     : (B, K, D) int64 rock-type vocab indices
+    padding_mask : (B, K) bool — True at padded positions; None if no padding
+    latent_dim   : output embedding size
 
     Returns
     -------
@@ -132,15 +130,13 @@ def encode_categorical_boreholes(
         not_padded = ~padding_mask                        # (B, K) bool
         bh_valid   = boreholes[not_padded]               # (N_valid, V, D)
         rock_valid = rock_ids[not_padded]                # (N_valid, D)
-        form_valid = formation_ids[not_padded]           # (N_valid, D)
-        lat_valid  = bh_encoder(bh_valid, rock_valid, form_valid)
+        lat_valid  = bh_encoder(bh_valid, rock_valid)
         lat = torch.zeros(B, K, latent_dim, device=boreholes.device, dtype=lat_valid.dtype)
         lat[not_padded] = lat_valid
     else:
         bh_flat   = boreholes.reshape(B * K, *boreholes.shape[2:])
         rock_flat = rock_ids.reshape(B * K, rock_ids.shape[2])
-        form_flat = formation_ids.reshape(B * K, formation_ids.shape[2])
-        lat = bh_encoder(bh_flat, rock_flat, form_flat).reshape(B, K, latent_dim)
+        lat = bh_encoder(bh_flat, rock_flat).reshape(B, K, latent_dim)
     return lat
 
 

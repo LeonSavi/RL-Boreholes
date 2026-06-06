@@ -42,6 +42,40 @@ def extract_cls_attention(
     return cls_attn.reshape(*cls_attn.shape[:-1], n_variables, n_patches)
 
 
+def extract_cls_attention_patch_major(
+    attn_weights: torch.Tensor,
+    n_variables: int,
+    n_patches: int,
+) -> torch.Tensor:
+    """Extract and reshape CLS-token attention for CatVarBoreholeTransformerEncoder.
+
+    Handles the patch-major token ordering where each patch contributes V+1 tokens:
+    [var_0, var_1, ..., var_V-1, rock].
+
+    Parameters
+    ----------
+    attn_weights : (n_layers, B, n_heads, seq_len, seq_len)
+        Raw attention weights from CatVarBoreholeTransformerEncoder called with
+        return_attention=True.
+        seq_len = 1 + (n_variables + 1) * n_patches  (CLS token first).
+    n_variables  : number of continuous geological variables V
+    n_patches    : number of depth patches P
+
+    Returns
+    -------
+    cls_attn : (n_layers, B, n_heads, n_variables + 1, n_patches)
+        Attention from the CLS token to each (token_type, depth-patch) pair.
+        Axis -2: token type [var_0, ..., var_V-1, rock].
+        Axis -1: depth patch index.
+    """
+    n_token_types = n_variables + 1
+    # Row 0 is the CLS query; columns 1: are the patch-major content tokens.
+    cls_row = attn_weights[:, :, :, 0, 1:]                    # (..., n_patches * n_token_types)
+    # Patch-major reshape: (…, n_patches, n_token_types) then transpose last two dims
+    cls_row = cls_row.view(*cls_row.shape[:-1], n_patches, n_token_types)
+    return cls_row.permute(0, 1, 2, 4, 3)                     # (…, n_token_types, n_patches)
+
+
 def plot_cls_attention(
     cls_attn: torch.Tensor,
     layer_idx: int = -1,

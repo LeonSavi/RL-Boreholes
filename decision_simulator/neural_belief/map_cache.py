@@ -37,6 +37,7 @@ class NpzMap:
     cfg: BeliefDatasetConfig
     n_x: int
     n_y: int
+    rocks_arrays: list[np.ndarray] | None = None  # each (n_boreholes, D) int8, or None if unavailable
 
     @property
     def pool_size(self) -> int:
