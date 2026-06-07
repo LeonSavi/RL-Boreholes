@@ -28,6 +28,7 @@ Outputs:
 """
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 
 import numpy as np
@@ -36,13 +37,6 @@ import matplotlib.pyplot as plt
 from scipy.stats import ks_2samp
 
 from simulator.distributions import DistributionBank
-
-BANK_PATH    = Path("data/clean/distributions.pkl")
-PARQUET_PATH = Path("data/clean/samples.parquet")
-OUT_DIR      = Path("plots")
-OVERLAY_DIR  = Path("plots/bank_per_formation_overlays")
-OUT_CSV      = Path("plots/analysis/bank_per_formation_ks.csv")
-OUT_HEATMAP  = Path("plots/bank_per_formation_ks.png")
 
 VARIABLES   = ["rhob", "gr_api", "dt_us_ft", "nphi", "res_deep_log"]
 N_DRAWS     = 5000
@@ -56,17 +50,17 @@ FORMATIONS = ["CK", "KN", "ZE", "RO", "DC", "RB", "SL", "SG"]
 DEPTHS_M   = [1000, 1500, 2000, 2500, 3000, 3500]
 
 
-def real_window(df, formation, rock, lo, hi):
+def real_window(df, formation, rock, lo, hi, depth_col):
     sub = df[
         (df["formation"] == formation)
         & (df["rock_type_fine"] == rock)
-        & (df["depth"] >= lo)
-        & (df["depth"] < hi)
+        & (df[depth_col] >= lo)
+        & (df[depth_col] < hi)
     ]
     if not len(sub):
         return pd.DataFrame()
     return sub.pivot_table(
-        index=["dataset", "borehole", "depth"],
+        index=["dataset", "borehole", depth_col],
         columns="measurement", values="value", aggfunc="mean",
     ).reset_index()
 
@@ -123,8 +117,35 @@ def make_overlay(formation, rock, depth, truth, synth, out: Path,
 
 
 def main() -> None:
-    bank = DistributionBank.load(BANK_PATH)
-    df = pd.read_parquet(PARQUET_PATH)
+    p = argparse.ArgumentParser()
+    p.add_argument("--bank", type=Path,
+                   default=Path("data/clean/distributions.pkl"))
+    p.add_argument("--parquet", type=Path,
+                   default=Path("data/clean/samples.parquet"))
+    p.add_argument("--use-burial", action="store_true",
+                   help="filter real data by `burial_depth_m` instead "
+                        "of `depth`. Use this for the post-burial run.")
+    p.add_argument("--out-suffix", default="",
+                   help="suffix appended to output filenames so two runs "
+                        "(pre-burial baseline + post-burial corrected) "
+                        "can write distinct files. Example: '_pre_burial'.")
+    args = p.parse_args()
+
+    depth_col = "burial_depth_m" if args.use_burial else "depth"
+    print(f"using depth column: {depth_col}")
+    print(f"bank: {args.bank}")
+    print(f"parquet: {args.parquet}")
+
+    out_csv = Path(f"plots/analysis/bank_per_formation_ks{args.out_suffix}.csv")
+    out_heatmap = Path(f"plots/bank_per_formation_ks{args.out_suffix}.png")
+
+    bank = DistributionBank.load(args.bank)
+    df = pd.read_parquet(args.parquet)
+    if depth_col not in df.columns:
+        raise ValueError(
+            f"parquet {args.parquet} missing column {depth_col!r}. "
+            f"Available: {[c for c in df.columns if 'depth' in c.lower()]}"
+        )
     df = df[df["measurement"].isin(VARIABLES)]
     print(f"bank: {len(bank.cells)} populated cells")
 
@@ -141,7 +162,8 @@ def main() -> None:
         for rock in rocks:
             for d in DEPTHS_M:
                 truth = real_window(df, fm, rock,
-                                    d - TRUTH_W / 2, d + TRUTH_W / 2)
+                                    d - TRUTH_W / 2, d + TRUTH_W / 2,
+                                    depth_col=depth_col)
                 if len(truth) < MIN_TRUTH_N:
                     continue
                 synth = bank.sample(rock, float(d), n=N_DRAWS, rng=rng,
@@ -167,9 +189,9 @@ def main() -> None:
                     problem_cells.append((fm, rock, d, truth, synth, ks_per_var))
 
     out = pd.DataFrame(rows)
-    OUT_CSV.parent.mkdir(parents=True, exist_ok=True)
-    out.to_csv(OUT_CSV, index=False)
-    print(f"\nwrote {OUT_CSV}")
+    out_csv.parent.mkdir(parents=True, exist_ok=True)
+    out.to_csv(out_csv, index=False)
+    print(f"\nwrote {out_csv}")
 
     # ---- heatmap: rows=(formation, rock, depth), cols=variables -------
     pivot = (out.dropna(subset=["ks"])
@@ -199,21 +221,38 @@ def main() -> None:
                  f"(10 m bins, TVD)\nRed cells (KS>={PROBLEM_KS}) "
                  f"are 'problem cells'.")
     fig.tight_layout()
-    OUT_HEATMAP.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(OUT_HEATMAP, dpi=140, bbox_inches="tight")
-    print(f"wrote {OUT_HEATMAP}")
+    out_heatmap.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_heatmap, dpi=140, bbox_inches="tight")
+    print(f"wrote {out_heatmap}")
 
     # ---- overlay panels for problem cells -------------------------------
+    overlay_dir = Path(f"plots/bank_per_formation_overlays{args.out_suffix}")
     print(f"\n{len(problem_cells)} problem cells (KS >= {PROBLEM_KS} in any "
           f"variable). Rendering overlays...")
     if problem_cells:
-        OVERLAY_DIR.mkdir(parents=True, exist_ok=True)
+        overlay_dir.mkdir(parents=True, exist_ok=True)
         for fm, rock, d, truth, synth, ks_per_var in problem_cells:
-            out_png = OVERLAY_DIR / f"{fm}_{rock}_{int(d)}m.png"
+            out_png = overlay_dir / f"{fm}_{rock}_{int(d)}m.png"
             make_overlay(fm, rock, d, truth, synth, out_png, ks_per_var)
             print(f"  wrote {out_png}")
     else:
         print("  none. Bank is formation-consistent at the probe panel.")
+
+    # ---- aggregate summary for cross-run comparison ----
+    finite = out.dropna(subset=["ks"])
+    if len(finite):
+        n_cells = len(finite)
+        med = float(finite["ks"].median())
+        p75 = float(finite["ks"].quantile(0.75))
+        p95 = float(finite["ks"].quantile(0.95))
+        n_prob = int((finite["ks"] >= PROBLEM_KS).sum())
+        print(f"\n=== summary{args.out_suffix} ===")
+        print(f"  cells:        {n_cells}")
+        print(f"  median KS:    {med:.4f}")
+        print(f"  P75 KS:       {p75:.4f}")
+        print(f"  P95 KS:       {p95:.4f}")
+        print(f"  problem cells (KS>={PROBLEM_KS}): {n_prob} "
+              f"({100*n_prob/n_cells:.1f}%)")
 
 
 if __name__ == "__main__":

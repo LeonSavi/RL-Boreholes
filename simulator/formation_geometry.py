@@ -283,11 +283,12 @@ def _empirical_run_lengths(
     chain's natural run length (DC and SL exhibit this).
     """
     out: dict[str, list[int]] = {r: [] for r in rocks}
-    work = df[["borehole", "depth", "rock_type_fine"]].copy()
+    work = df[["borehole", "burial_depth_m", "rock_type_fine"]].copy()
     work["rock_type_fine"] = work["rock_type_fine"].astype(str)
     work = work[work["rock_type_fine"].isin(rocks)]
-    work = work.sort_values(["borehole", "depth"], kind="mergesort")
-    work["_bin"] = np.floor(work["depth"].to_numpy() / bin_step_m).astype(np.int64)
+    work = work.sort_values(["borehole", "burial_depth_m"], kind="mergesort")
+    work["_bin"] = np.floor(
+        work["burial_depth_m"].to_numpy() / bin_step_m).astype(np.int64)
     work = work.drop_duplicates(["borehole", "_bin"], keep="first")
     for _, well_df in work.groupby("borehole"):
         seq = well_df["rock_type_fine"].tolist()
@@ -344,13 +345,14 @@ def _fit_transition_matrix(
     counts = np.zeros((n, n), dtype=np.float64)
     n_obs = 0
 
-    # Vectorise per well: bin depths, drop dupes, shift to get pairs, count
-    # only where consecutive bins differ by exactly one step.
-    work = df[["borehole", "depth", "rock_type_fine"]].copy()
+    # Vectorise per well: bin burial depths, drop dupes, shift to get
+    # pairs, count only where consecutive bins differ by exactly one step.
+    work = df[["borehole", "burial_depth_m", "rock_type_fine"]].copy()
     work["rock_type_fine"] = work["rock_type_fine"].astype(str)
     work = work[work["rock_type_fine"].isin(idx)]
-    work = work.sort_values(["borehole", "depth"], kind="mergesort")
-    work["_bin"] = np.floor(work["depth"].to_numpy() / bin_step_m).astype(np.int64)
+    work = work.sort_values(["borehole", "burial_depth_m"], kind="mergesort")
+    work["_bin"] = np.floor(
+        work["burial_depth_m"].to_numpy() / bin_step_m).astype(np.int64)
     work = work.drop_duplicates(subset=["borehole", "_bin"], keep="first")
     work["_prev_bin"] = work.groupby("borehole")["_bin"].shift(1)
     work["_prev_rock"] = work.groupby("borehole")["rock_type_fine"].shift(1)
@@ -439,10 +441,16 @@ class FormationGeometry:
     ) -> "FormationGeometry":
         df = pd.read_parquet(parquet_path)
         df = df[df["dataset"] == "NLOG"]
-        df = df.drop_duplicates(subset=["dataset", "borehole", "depth"],
+        if "burial_depth_m" not in df.columns:
+            raise ValueError(
+                "samples.parquet is missing `burial_depth_m`. Run "
+                "scripts/data_prep/attach_water_depth.py followed by "
+                "scripts/data_prep/apply_datum_correction.py first."
+            )
+        df = df.drop_duplicates(subset=["dataset", "borehole", "burial_depth_m"],
                                  keep="first")
 
-        well_max_depth = df.groupby("borehole")["depth"].max()
+        well_max_depth = df.groupby("borehole")["burial_depth_m"].max()
         in_window = well_max_depth[
             (well_max_depth >= min_well_depth) &
             (well_max_depth <= max_well_depth)
@@ -546,8 +554,8 @@ class FormationGeometry:
             well_compositions: list[dict[str, float]] = []
 
             for borehole, well_df in sub.groupby("borehole"):
-                top = float(well_df["depth"].min())
-                bot = float(well_df["depth"].max())
+                top = float(well_df["burial_depth_m"].min())
+                bot = float(well_df["burial_depth_m"].max())
                 tops.append(top)
                 thicks.append(bot - top)
 

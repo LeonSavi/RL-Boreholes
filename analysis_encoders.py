@@ -87,14 +87,27 @@ def encode_with_ae(model, values: np.ndarray, stats, variables, device,
 
 def encode_with_jepa(model, values: np.ndarray, stats, variables, device,
                      batch_size: int = 256) -> np.ndarray:
-    """Pass (N, V, D) → JEPA target-encoder mean-pooled, return (N, dim)."""
+    """Pass (N, V, D) → JEPA target-encoder mean-pooled, return (N, dim).
+
+    Appends a normalised absolute-depth row when the checkpoint was
+    trained with `include_depth=True` so the input matches the encoder's
+    expected channel count.
+    """
     std = standardise(values, stats, variables)
     std = np.nan_to_num(std, nan=0.0).astype(np.float32)
+    include_depth = getattr(model.cfg, "include_depth", False)
+    if include_depth:
+        depth_row = (
+            torch.linspace(0.0, 1.0, model.cfg.n_depth, device=device)
+            .view(1, 1, -1)
+        )
     latents = []
     model.eval()
     with torch.no_grad():
         for i in range(0, len(std), batch_size):
             x = torch.from_numpy(std[i:i + batch_size]).to(device)
+            if include_depth:
+                x = torch.cat([x, depth_row.expand(x.size(0), 1, -1)], dim=1)
             tokens = model.target_encoder(x)              # (B, T, D)
             z = tokens.mean(dim=1).cpu().numpy()
             latents.append(z)

@@ -42,7 +42,7 @@ class SimConfig:
     n_x: int = 32
     n_y: int = 32
     n_depth: int = 440          # 10 m per cell × 4400 m
-    max_depth: float = 4400.0   # captures 90% of NLOG positive wells
+    max_depth: float = 4400.0   # captures 99.6% of NLOG discovery rows
  
     variables: tuple[str, ...] = (
         # pef removed: only 6% of NLOG wells log it, so the encoder spent
@@ -84,7 +84,10 @@ class SimConfig:
     facies_persistence: float = 0.85
 
     # ----- ore-body parameters -----
-    ore_depth_window: tuple[float, float] = (1600.0, 4400.0)
+    # Window tightened to match the discovery distribution: 1200m
+    # (~P10 of NLOG hc+ rows) to 4100m (~P99 = 4109m). Was
+    # (1600, 4400) which over-weighted the deep Carboniferous tail.
+    ore_depth_window: tuple[float, float] = (1200.0, 4100.0)
     n_ore_candidates: int = 30
     ore_softmax_temperature: float = 1.0
     ore_radius_xy_range: tuple[float, float] = (3.0, 8.0)

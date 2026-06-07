@@ -182,6 +182,8 @@ class DistributionBank:
         min_samples_per_cell: int = 30,
         kde_bandwidth: str | float = "scott",
         row_filter: str | None = None,
+        max_expand_m: float = 50.0,
+        expand_step_m: float = 1.0,
     ) -> "DistributionBank":
         """Fit all per-cell distributions from the cleaned samples parquet.
 
@@ -205,17 +207,27 @@ class DistributionBank:
         if "formation" not in df.columns:
             raise ValueError("samples.parquet needs `formation` column "
                              "for the per-(rock, formation, depth) bank")
-        # wide pivot so each row is (borehole, depth) with all variables
-        # as columns — lets us compute correlations
+        # wide pivot so each row is (borehole, burial_depth_m) with
+        # all variables as columns — lets us compute correlations.
+        # We key on burial_depth_m (depth below ground / sea floor) so
+        # offshore wells aren't binned by their MSL-relative depth,
+        # which would put water-column rows in the same bin as onshore
+        # buried rock.
+        if "burial_depth_m" not in df.columns:
+            raise ValueError(
+                "samples.parquet is missing `burial_depth_m`. Run "
+                "scripts/data_prep/attach_water_depth.py followed by "
+                "scripts/data_prep/apply_datum_correction.py first."
+            )
         wide = df.pivot_table(
-            index=["dataset", "borehole", "depth", "rock_type_fine", "formation"],
+            index=["dataset", "borehole", "burial_depth_m", "rock_type_fine", "formation"],
             columns="measurement",
             values="value",
             aggfunc="mean",
         ).reset_index()
 
         wide["depth_bin"] = pd.cut(
-            wide["depth"],
+            wide["burial_depth_m"],
             bins=depth_bins,
             labels=list(range(len(depth_bins) - 1)),
             include_lowest=True,
@@ -252,22 +264,55 @@ class DistributionBank:
         total_cells = 0
         per_rock = 0
         t_start = time.time()
-        # iterate over (rock, formation, bin) triples; many will have
-        # too few samples and get skipped (handled at sample-time by the
-        # nearest-cell fallback, which tries same-formation other-bin
-        # first, then any-formation nearest-bin).
+        # iterate over (rock, formation, bin) triples.
+        # If a cell's native 10m window has fewer than
+        # min_samples_per_cell samples, we adaptively widen the window
+        # symmetrically by `expand_step_m` at a time up to
+        # `max_expand_m`, gathering more (rock, formation) data from
+        # adjacent depths. This replaces the previous "skip and rely
+        # on nearest-cell fallback at sample time" behaviour with a
+        # smoother, classical adaptive-bandwidth KDE: cells in dense
+        # regions stay narrow (no smoothing); cells in sparse regions
+        # smooth gradually with their immediate neighbours instead of
+        # snapping to whatever filled bin is closest (which can be
+        # 100+ m away for rare rocks).
+        # Cells whose widened window still doesn't reach the threshold
+        # at ±max_expand_m are still skipped; sample-time falls back
+        # to nearest-cell for those.
+        exp_hist = {"0 (native)": 0, "1-10 m": 0, "11-25 m": 0,
+                    "26-50 m": 0, "skipped (>max)": 0}
+        n_expand_steps = max(1, int(round(max_expand_m / expand_step_m)))
         for rock in bank.rock_types:
             per_rock = 0
             for formation in bank.formations:
+                # cache the (rock, formation) slice + its burial-depth
+                # numpy array once per (rock, formation) — every per-bin
+                # widening pass then runs as a fast numpy mask on this.
+                rf = wide[
+                    (wide["rock_type_fine"] == rock)
+                    & (wide["formation"] == formation)
+                ]
+                if len(rf) == 0:
+                    continue
+                depth_col = "burial_depth_m" if "burial_depth_m" in rf.columns else "depth"
+                depths_rf = rf[depth_col].to_numpy()
                 for bin_idx in range(len(depth_bins) - 1):
                     lo, hi = depth_bins[bin_idx], depth_bins[bin_idx + 1]
-                    sub = wide[
-                        (wide["rock_type_fine"] == rock)
-                        & (wide["formation"] == formation)
-                        & (wide["depth_bin"] == bin_idx)
-                    ]
+                    sub = rf[rf["depth_bin"] == bin_idx]
+                    expansion = 0.0
                     if len(sub) < min_samples_per_cell:
-                        continue
+                        admitted = False
+                        for k in range(1, n_expand_steps + 1):
+                            ext = k * expand_step_m
+                            mask = (depths_rf >= lo - ext) & (depths_rf < hi + ext)
+                            if int(mask.sum()) >= min_samples_per_cell:
+                                sub = rf.iloc[np.where(mask)[0]]
+                                expansion = ext
+                                admitted = True
+                                break
+                        if not admitted:
+                            exp_hist["skipped (>max)"] += 1
+                            continue
                     cell = cls._fit_cell(
                         rock, lo, hi, list(variables), sub, kde_bandwidth,
                         bounds=bank.empirical_bounds,
@@ -276,11 +321,24 @@ class DistributionBank:
                     bank.cells[(rock, formation, bin_idx)] = cell
                     total_cells += 1
                     per_rock += 1
+                    if expansion == 0:
+                        exp_hist["0 (native)"] += 1
+                    elif expansion <= 10:
+                        exp_hist["1-10 m"] += 1
+                    elif expansion <= 25:
+                        exp_hist["11-25 m"] += 1
+                    else:
+                        exp_hist["26-50 m"] += 1
             print(f"  {rock:18s}  {per_rock:>4d} populated cells across "
                   f"{len(bank.formations)} formations x "
                   f"{len(depth_bins)-1} bins")
 
         print(f"\nfitted {total_cells} cells in {time.time()-t_start:.0f}s")
+        print(f"adaptive widening histogram "
+              f"(threshold={min_samples_per_cell}, "
+              f"step={expand_step_m}m, cap={max_expand_m}m):")
+        for bucket, n in exp_hist.items():
+            print(f"  {bucket:>16s}: {n}")
         return bank
  
     @staticmethod
@@ -789,13 +847,19 @@ class DiscoveryPrior:
         if len(positive) == 0:
             raise ValueError("no rows with hc_discovery=True found in parquet")
 
-        # deduplicate to one row per (well, depth) — multi-variable rows
-        # would otherwise over-count the same physical cell
+        # deduplicate to one row per (well, burial_depth_m) — multi-
+        # variable rows would otherwise over-count the same physical cell
+        if "burial_depth_m" not in positive.columns:
+            raise ValueError(
+                "samples.parquet is missing `burial_depth_m`. Run "
+                "scripts/data_prep/attach_water_depth.py followed by "
+                "scripts/data_prep/apply_datum_correction.py first."
+            )
         positive = positive.drop_duplicates(
-            subset=["dataset", "borehole", "depth"], keep="first")
+            subset=["dataset", "borehole", "burial_depth_m"], keep="first")
 
         positive["depth_bin"] = pd.cut(
-            positive["depth"],
+            positive["burial_depth_m"],
             bins=list(depth_bins),
             labels=list(range(len(depth_bins) - 1)),
             include_lowest=True,

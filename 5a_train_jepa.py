@@ -69,6 +69,7 @@ def train_jepa(
     profile: bool = False,
     dataset_dir: Path | None = None,
     min_maps_warmup: int | None = None,
+    include_depth: bool = True,
 ) -> None:
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     print(f"device: {device}")
@@ -120,14 +121,33 @@ def train_jepa(
             gen, variables, stats, batch_size, device, maps_per_refill=8,
         )
 
+    effective_n_variables = len(variables) + (1 if include_depth else 0)
+    # Keep the canonical transformer 4× FFN ratio at any latent_dim.
+    # At d=128 this is 512 (no change vs the dataclass default); at d=256
+    # it becomes 1024, preventing the predictor's FF from degenerating to
+    # a 2× ratio that would bottleneck the per-token nonlinearity.
+    predictor_dim_ff = 4 * latent_dim
+    print(f"input channels: {effective_n_variables} "
+          f"({len(variables)} wireline"
+          f"{' + 1 depth' if include_depth else ''})  "
+          f"latent_dim={latent_dim}  predictor_dim_ff={predictor_dim_ff}")
     jepa_cfg = JEPAConfig(
-        n_variables=len(variables),
+        n_variables=effective_n_variables,
         n_depth=sim_cfg.n_depth,
         latent_dim=latent_dim,
+        predictor_dim_ff=predictor_dim_ff,
         context_keep_frac=context_keep_frac,
         target_window_frac=target_window_frac,
         ema_momentum=ema_momentum,
+        include_depth=include_depth,
     )
+    if include_depth:
+        depth_channel = (
+            torch.linspace(0.0, 1.0, sim_cfg.n_depth, device=device)
+            .view(1, 1, -1)
+        )
+    else:
+        depth_channel = None
     model = JEPAModel(jepa_cfg).to(device)
     opt = torch.optim.AdamW(
         # only the context encoder + predictor have gradients
@@ -199,7 +219,15 @@ def train_jepa(
     last_step = 0
     for step in range(1, steps + 1):
         last_step = step
-        x = next(batches)                                    # (B, V, D)
+        x = next(batches)                                    # (B, V_wire, D)
+        if depth_channel is not None:
+            x = torch.cat(
+                [x, depth_channel.expand(x.size(0), 1, -1)], dim=1
+            )                                                # (B, V_wire+1, D)
+        if step == 1:
+            print(f"  first batch shape: {tuple(x.shape)} "
+                  f"(expected (B, {effective_n_variables}, "
+                  f"{sim_cfg.n_depth}))")
         ctx_pos, tgt_pos = sample_context_target_positions(
             n_tokens=T_tokens, batch_size=x.size(0),
             cfg=jepa_cfg, rng=mask_rng,
@@ -316,6 +344,13 @@ def main():
                    help="block early-stopping until this many maps' worth "
                         "of batches have been consumed.  At batch_size=128 "
                         "and 32×32 maps, one map = 8 batches.")
+    p.add_argument("--include-depth", action=argparse.BooleanOptionalAction,
+                   default=True,
+                   help="append a normalised absolute-depth channel "
+                        "(depth/4400) as the 6th input row so the encoder "
+                        "sees absolute depth, not just token position. "
+                        "Disable with --no-include-depth for a 5-channel "
+                        "baseline ablation.")
     args = p.parse_args()
     # Resolve --dataset-dir: empty string = online generation, missing
     # directory = warn and fall back to online so a fresh checkout still works.
@@ -343,6 +378,7 @@ def main():
         profile=args.profile,
         dataset_dir=dataset_dir,
         min_maps_warmup=args.min_maps_warmup,
+        include_depth=args.include_depth,
     )
 
 

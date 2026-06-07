@@ -52,5 +52,9 @@ logs/
 # outputs live under plots/garcon/ and plots/analysis/)
 data/garcon/
 
+# bathymetry rasters (EMODnet / GEBCO) downloaded for offshore-datum
+# correction; large GeoTIFFs, not tracked.
+data/external/
+
 .claude/
 .tex/

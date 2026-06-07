@@ -46,14 +46,25 @@ from encoder.encoder_validations.latent_validation import (
 def encode_in_batches_jepa(
     model, values: np.ndarray, stats, variables, device, batch_size: int = 256,
 ) -> np.ndarray:
-    """Feed (N, V, D) values through model.embed() in batches."""
+    """Feed (N, V, D) values through model.embed() in batches.
+
+    If `model.cfg.include_depth` is True the encoder expects an extra
+    last-row channel carrying depth_idx / n_depth — appended here so
+    train-time and validation-time input shapes match.
+    """
     std = standardise(values, stats, variables)
     std = np.nan_to_num(std, nan=0.0).astype(np.float32)
+    include_depth = getattr(model.cfg, "include_depth", False)
+    if include_depth:
+        n_depth = model.cfg.n_depth
+        depth_row = torch.linspace(0.0, 1.0, n_depth, device=device).view(1, 1, -1)
     latents = []
     model.eval()
     with torch.no_grad():
         for i in range(0, len(std), batch_size):
             x = torch.from_numpy(std[i : i + batch_size]).to(device)
+            if include_depth:
+                x = torch.cat([x, depth_row.expand(x.size(0), 1, -1)], dim=1)
             z = model.embed(x).cpu().numpy()     # (B, D_latent)
             latents.append(z)
     return np.concatenate(latents, axis=0)
@@ -81,6 +92,8 @@ def main() -> None:
     model.eval()
     print(f"  variables: {variables}")
     print(f"  latent dim: {model.cfg.latent_dim}")
+    print(f"  n_variables: {model.cfg.n_variables}  "
+          f"(include_depth={getattr(model.cfg, 'include_depth', False)})")
 
     print(f"loading distributions: {args.distributions}")
     bank = DistributionBank.load(args.distributions)

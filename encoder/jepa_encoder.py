@@ -70,6 +70,12 @@ class JEPAConfig:
     min_target_dist_from_edge: float = 0.05
     # EMA momentum for target encoder
     ema_momentum: float = 0.996
+    # Input-layer augmentation: append a normalised absolute-depth channel
+    # (depth_idx / n_depth) as the last input row before the conv backbone.
+    # When True, callers must feed (B, n_variables, n_depth) tensors where
+    # the *last* row is the depth channel; n_variables therefore equals
+    # len(wireline_channels) + 1.
+    include_depth: bool = False
 
 
 class BoreholeConvBackbone(nn.Module):

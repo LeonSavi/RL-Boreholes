@@ -316,7 +316,7 @@ def sample_orebodies(
     prior: "DiscoveryPrior" | None = None,
     n_bodies: int | None = None,
     n_candidates: int = 30,
-    ore_depth_window: tuple[float, float] = (1600.0, 4400.0),
+    ore_depth_window: tuple[float, float] = (1200.0, 4100.0),
     yield_peak_range: tuple[float, float] = (0.5, 5.0),
     radius_xy_range: tuple[float, float] = (3.0, 8.0),
     radius_z_range: tuple[float, float] = (50.0, 200.0),  # API compat
