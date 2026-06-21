@@ -327,6 +327,95 @@ def plot_step_belief_grid(
     plt.close(fig)
 
 
+def plot_evolution_map(
+    steps: list[dict],
+    save_path: "Path | None" = None,
+    title: str = "",
+) -> None:
+    """Multi-row evolution grid: one row per selected step, 5 columns per row.
+
+    Each row renders the same 5 panels as plot_belief_sample:
+    observations | true ore | predicted ore | uncertainty | absolute error.
+    All rendering happens in a single pass — no intermediary files needed.
+
+    Parameters
+    ----------
+    steps     : list of dicts (one per selected step) with keys:
+                  step, sparse_ore_map, observation_mask, true_ore_map,
+                  predicted_ore_map, predicted_uncertainty_map (may be None)
+    save_path : if given, save PNG here; parent dir is created
+    title     : optional figure super-title
+    """
+    if not steps:
+        return
+
+    vmax = float(max(
+        max(s["true_ore_map"].max() for s in steps),
+        max(s["predicted_ore_map"].max() for s in steps),
+        1e-3,
+    ))
+
+    n_rows = len(steps)
+    fig, axes = plt.subplots(n_rows, 5, figsize=(20, 4 * n_rows), squeeze=False)
+    if title:
+        fig.suptitle(title, fontsize=13)
+
+    for col, ct in enumerate(
+        ["Observations", "True ore map", "Predicted ore map", "Predicted uncertainty", "Absolute error"]
+    ):
+        axes[0, col].set_title(ct, fontsize=10)
+
+    kw = dict(origin="lower", cmap="viridis")
+
+    for row, s in enumerate(steps):
+        step = s["step"]
+        sparse = s["sparse_ore_map"]
+        mask = s["observation_mask"]
+        true_ore = s["true_ore_map"]
+        pred_ore = s["predicted_ore_map"]
+        pred_unc = s["predicted_uncertainty_map"]
+        drill_rows, drill_cols = np.where(mask > 0)
+        n_drills = int(mask.sum())
+
+        ax = axes[row, 0]
+        im = ax.imshow(sparse.T, vmin=0, vmax=vmax, **kw)
+        ax.scatter(drill_rows, drill_cols, c="red", s=10, marker="x", linewidths=0.8)
+        fig.colorbar(im, ax=ax, fraction=0.046)
+        ax.set_ylabel(f"Step {step}\n({n_drills} drills)", fontsize=9)
+
+        ax = axes[row, 1]
+        im = ax.imshow(true_ore.T, vmin=0, vmax=vmax, **kw)
+        fig.colorbar(im, ax=ax, fraction=0.046)
+
+        ax = axes[row, 2]
+        im = ax.imshow(pred_ore.T, vmin=0, vmax=vmax, **kw)
+        ax.scatter(drill_rows, drill_cols, c="red", s=10, marker="x", linewidths=0.8)
+        fig.colorbar(im, ax=ax, fraction=0.046)
+
+        ax = axes[row, 3]
+        if pred_unc is not None:
+            im = ax.imshow(pred_unc.T, origin="lower", cmap="hot_r")
+            ax.scatter(drill_rows, drill_cols, c="blue", s=10, marker="x", linewidths=0.8)
+            fig.colorbar(im, ax=ax, fraction=0.046)
+        else:
+            ax.text(0.5, 0.5, "No uncertainty", ha="center", va="center",
+                    transform=ax.transAxes, fontsize=9, color="gray")
+            ax.axis("off")
+
+        ax = axes[row, 4]
+        abs_err = np.abs(pred_ore - true_ore)
+        im = ax.imshow(abs_err.T, origin="lower", vmin=0, vmax=vmax, cmap="Reds")
+        fig.colorbar(im, ax=ax, fraction=0.046)
+
+    fig.tight_layout()
+
+    if save_path is not None:
+        Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save_path, dpi=100, bbox_inches="tight")
+
+    plt.close(fig)
+
+
 def plot_policy_evolution(
     results: dict[str, dict],
     map_idx: int,

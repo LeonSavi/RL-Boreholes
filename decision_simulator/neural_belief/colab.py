@@ -110,6 +110,7 @@ _DEBUG_VAR_AWARE: dict = {**_DEBUG_E2E, "bh_patch_size": 10}
 _DEBUG_VAR_AWARE_UNCERTAINTY: dict = {**_DEBUG_E2E, "bh_patch_size": 10}
 _DEBUG_CAT_VAR: dict = {**_DEBUG_E2E, "bh_patch_size": 10}
 _DEBUG_ORE_ONLY_NULL: dict = {**_DEBUG_E2E, "bh_patch_size": 10}
+_DEBUG_PRECOMP_JEPA: dict = {**_DEBUG_MAP}
 
 # Fields present in NeuralBeliefTrainingConfig but not in MapBeliefTrainingConfig.
 # These are silently dropped when building a transformer config from **overrides.
@@ -933,7 +934,7 @@ def train_end_to_end_from_colab(
     use_sequential_dataset: bool = False,
     n_sequences_per_map: int = 3,
     prefix_steps: list[int] | None = None,
-    bh_encoder_model: Literal["cnn", "patch", "cls", "variable_aware", "variable_aware_uncertainty", "cat_var_encoder", "ore_only_null"] = "cnn",
+    bh_encoder_model: Literal["cnn", "patch", "cls", "variable_aware", "variable_aware_uncertainty", "cat_var_encoder", "ore_only_null", "precomp_jepa"] = "cnn",
     guided_training: bool = False,
     guide_ckpt_path: str | Path | None = None,
     labels_dir: str | Path | None = None,
@@ -1054,12 +1055,15 @@ def train_end_to_end_from_colab(
     if not resolved_pool.is_absolute():
         resolved_pool = root / resolved_pool
 
+    _is_precomp_jepa_early = bh_encoder_model == "precomp_jepa"
+    _effective_encoder = "jepa" if _is_precomp_jepa_early else norm_stats_from
     print(
-        f"\nLoading norm stats from '{norm_stats_from}' checkpoint "
-        "(encoder is not used — model trains its own borehole encoder) …"
+        f"\nLoading norm stats from '{_effective_encoder}' checkpoint "
+        + ("(JEPA encoder will be used for borehole encoding)" if _is_precomp_jepa_early
+           else "(encoder is not used — model trains its own borehole encoder) …")
     )
-    resources, _ = load_decision_resources(
-        borehole_encoder=norm_stats_from,
+    resources, _jepa_latent_dim = load_decision_resources(
+        borehole_encoder=_effective_encoder,
         jepa_path=jepa_path,
         ae_path=ae_path,
         distributions_path=distributions,
@@ -1082,7 +1086,11 @@ def train_end_to_end_from_colab(
     is_var_aware_uncertainty = bh_encoder_model == "variable_aware_uncertainty"
     is_cat_var = bh_encoder_model == "cat_var_encoder"
     is_ore_only_null = bh_encoder_model == "ore_only_null"
-    if is_ore_only_null:
+    is_precomp_jepa = bh_encoder_model == "precomp_jepa"
+    if is_precomp_jepa:
+        cfg_class = MapBeliefTrainingConfig
+        debug_defaults = _DEBUG_PRECOMP_JEPA if debug else {}
+    elif is_ore_only_null:
         cfg_class = OreOnlyNullConfig
         debug_defaults = _DEBUG_ORE_ONLY_NULL if debug else {}
     elif is_cat_var:
@@ -1177,7 +1185,7 @@ def train_end_to_end_from_colab(
         print(f"guide model      : {resolved_guide_path or 'heuristic (distance-from-drills)'}")
     print(f"Training config  :\n{cfg}\n")
 
-    is_cnn = not (is_patch or is_cls or is_var_aware or is_var_aware_uncertainty or is_cat_var or is_ore_only_null)
+    is_cnn = not (is_patch or is_cls or is_var_aware or is_var_aware_uncertainty or is_cat_var or is_ore_only_null or is_precomp_jepa)
 
     # Resolve labels_dir once — used for both dataset building and vocab inference.
     _resolved_labels: Path | None = None
@@ -1223,6 +1231,24 @@ def train_end_to_end_from_colab(
             val_ds = CatVarE2EMapDataset.from_cache(
                 val_cache, resources, cfg, labels_dir=_resolved_labels, verbose=True, is_val=True
             )
+        elif is_precomp_jepa:
+            train_ds = train_cache.build_geo_train_maps(
+                resources, device,
+                n_sequences_per_map=cfg.n_sequences_per_map,
+                max_drills=cfg.max_drills,
+                prefix_steps=prefix_steps or cfg.prefix_steps,
+                seed=cfg.seed,
+                verbose=True,
+            )
+            print("Building validation dataset ...")
+            val_ds = val_cache.build_geo_train_maps(
+                resources, device,
+                n_sequences_per_map=cfg.n_sequences_per_map,
+                max_drills=cfg.max_drills,
+                prefix_steps=prefix_steps or cfg.prefix_steps,
+                seed=cfg.seed + 1,
+                verbose=True,
+            )
         else:
             train_ds = E2EMapDataset.from_cache(
                 train_cache, resources, cfg, verbose=True, is_val=False
@@ -1232,7 +1258,25 @@ def train_end_to_end_from_colab(
                 val_cache, resources, cfg, verbose=True, is_val=True
             )
 
-    if is_ore_only_null:
+    if is_precomp_jepa:
+        _normalizer = TargetNormalizer(mode=cfg.norm_mode)
+        _normalizer.fit(train_ds.targets.numpy())
+        train_ds.apply_target_normalizer(_normalizer)
+        val_ds.apply_target_normalizer(_normalizer)
+        trained_model, _ = train_map_belief(
+            cfg=cfg,
+            device=device,
+            checkpoint_dir=ckpt_dir,
+            plot_dir=ckpt_dir,
+            verbose=True,
+            train_ds=train_ds,
+            val_ds=val_ds,
+            normalizer=_normalizer,
+        )
+        _, _, _, history = load_map_belief_checkpoint(
+            ckpt_dir / "map_belief_best.pt", device=device
+        )
+    elif is_ore_only_null:
         trained_model, _, run_dir = train_ore_only_null_encoder(
             resources=resources,
             cfg=cfg,

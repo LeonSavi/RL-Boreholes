@@ -54,7 +54,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 
 from decision_simulator.resources import DecisionSimulationResources
-from ....map_cache import NpzMap
+from ....map_hdf5 import MapPool
 from ....training_utils import TargetNormalizer
 from ....training_utils import (
     DRILL_BINS,
@@ -193,8 +193,8 @@ def train_ore_only_null_encoder(
     verbose: bool = True,
     train_ds: CatVarE2EMapDataset | None = None,
     val_ds: CatVarE2EMapDataset | None = None,
-    train_cache: NpzMap | None = None,
-    val_cache: NpzMap | None = None,
+    train_cache: MapPool | None = None,
+    val_cache: MapPool | None = None,
 ) -> tuple[OreOnlyNullEncoder, TargetNormalizer, Path]:
     """Train OreOnlyNullEncoder.
 
@@ -219,7 +219,7 @@ def train_ore_only_null_encoder(
     verbose        : print per-epoch metrics
     train_ds / val_ds : pre-built CatVarE2EMapDataset instances (preferred).
                      If None, train_cache / val_cache must be provided instead.
-    train_cache / val_cache : NpzMap caches used to build datasets when train_ds
+    train_cache / val_cache : MapPool caches used to build datasets when train_ds
                      / val_ds are not supplied.
 
     Returns

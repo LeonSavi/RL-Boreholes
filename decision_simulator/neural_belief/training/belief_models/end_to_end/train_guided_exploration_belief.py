@@ -56,7 +56,7 @@ from scipy.ndimage import binary_erosion
 from torch.utils.data import DataLoader, Dataset
 
 from decision_simulator.resources import DecisionSimulationResources
-from ....map_cache import NpzMap
+from ....map_hdf5 import MapPool
 from ....models.belief_models.borehole_encoders.autoencoder import standardise
 from ....models.belief_models.end_to_end.end_to_end_map_belief_transformer import (
     EndToEndMapBeliefTransformer,
@@ -505,7 +505,7 @@ class GuidedE2EMapDataset(E2EMapDataset):
     @classmethod
     def from_cache_guided(
         cls,
-        cache: NpzMap,
+        cache: MapPool,
         resources: DecisionSimulationResources,
         cfg: GuidedExplorationConfig,
         guide_model: nn.Module | None,
@@ -766,8 +766,8 @@ def train_guided_exploration_belief(
     cfg: GuidedExplorationConfig,
     device: str,
     checkpoint_dir: Path,
-    train_cache: NpzMap,
-    val_cache: NpzMap,
+    train_cache: MapPool,
+    val_cache: MapPool,
     plot_dir: Path | None = None,
     verbose: bool = True,
 ) -> tuple[EndToEndMapBeliefTransformer, TargetNormalizer]:
@@ -783,8 +783,8 @@ def train_guided_exploration_belief(
     cfg             : guided-curriculum training configuration
     device          : torch device string
     checkpoint_dir  : directory for saved checkpoints
-    train_cache     : NpzMap for training maps (pre-loaded)
-    val_cache       : NpzMap for validation maps (pre-loaded)
+    train_cache     : MapPool for training maps (pre-loaded)
+    val_cache       : MapPool for validation maps (pre-loaded)
     plot_dir        : if given, save validation + trajectory plots here
     verbose         : print per-epoch metrics
     """

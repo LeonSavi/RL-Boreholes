@@ -528,6 +528,7 @@ def generate_map_formation(
         radius_xy_range=config.ore_radius_xy_range,
         radius_z_range=config.ore_radius_z_range,
         yield_peak_range=config.ore_yield_peak_range,
+        max_bodies=config.max_ore_bodies,
     )
 
     return {

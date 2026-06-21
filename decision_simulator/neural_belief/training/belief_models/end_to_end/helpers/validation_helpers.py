@@ -46,7 +46,8 @@ def validate_e2e_map(
             pm = batch["padding_mask"].to(device)
             tgt = batch["target_map"].to(device)
 
-            pred_norm = model(bh, ov, pos, pm)
+            out = model(bh, ov, pos, pm)
+            pred_norm = out[0] if isinstance(out, tuple) else out
             pred = normalizer.inverse_tensor(pred_norm)
             tgt_raw = normalizer.inverse_tensor(tgt)
 
@@ -86,7 +87,8 @@ def validate_e2e_map_by_drill_bins(
             pm = batch["padding_mask"].to(device)
             tgt = batch["target_map"].to(device)
 
-            pred_norm = model(bh, ov, pos, pm)
+            out = model(bh, ov, pos, pm)
+            pred_norm = out[0] if isinstance(out, tuple) else out
             all_pred.append(normalizer.inverse_tensor(pred_norm).cpu())
             all_tgt.append(normalizer.inverse_tensor(tgt).cpu())
             all_counts.append(batch["drill_counts"])
@@ -134,7 +136,8 @@ def validate_no_ore_e2e_map(
             pm = batch["padding_mask"].to(device)
             tgt = batch["target_map"].to(device)
 
-            pred_norm = model(bh, ov, pos, pm)
+            out = model(bh, ov, pos, pm)
+            pred_norm = out[0] if isinstance(out, tuple) else out
             pred = normalizer.inverse_tensor(pred_norm)
             tgt_raw = normalizer.inverse_tensor(tgt)
 
@@ -184,7 +187,8 @@ def validate_e2e_map_by_step(
             pm = batch["padding_mask"].to(device)
             tgt = batch["target_map"].to(device)
 
-            pred_norm = model(bh, ov, pos, pm)
+            out = model(bh, ov, pos, pm)
+            pred_norm = out[0] if isinstance(out, tuple) else out
             pred = normalizer.inverse_tensor(pred_norm).cpu()
             tgt_raw = normalizer.inverse_tensor(tgt).cpu()
 

@@ -50,7 +50,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 
 from decision_simulator.resources import DecisionSimulationResources
-from ....map_cache import NpzMap
+from ....map_hdf5 import MapPool
 from ....models.belief_models.borehole_encoders.autoencoder import standardise
 from ....models.belief_models.end_to_end.end_to_end_map_belief_transformer import (
     EndToEndMapBeliefTransformer,
@@ -111,13 +111,13 @@ class E2EMapDataset(Dataset):
     @classmethod
     def from_cache(
         cls,
-        cache: NpzMap,
+        cache: MapPool,
         resources: DecisionSimulationResources,
         cfg: E2EMapBeliefConfig,
         verbose: bool = True,
         is_val: bool = False,
     ) -> "E2EMapDataset":
-        """Build the dataset from a pre-loaded NpzMap.
+        """Build the dataset from a pre-loaded MapPool.
 
         For each map, samples ``samples_per_map`` random drill configurations
         (or sequential prefix slices when ``use_sequential_dataset=True``).

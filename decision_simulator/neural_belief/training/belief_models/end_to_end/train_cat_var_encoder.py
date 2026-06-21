@@ -22,7 +22,7 @@ labels_NNNNN.npz stores:
   rocks : (n_x*n_y, D)  int8  — rock-type vocab indices
 
 Flat borehole-location indexing: flat_idx = i * n_y + j,
-matching the borehole_arrays layout in NpzMap.
+matching the borehole_arrays layout in MapPool.
 
 The vocab is in labels_vocab.pkl: {"rocks": {name: int, ...}}.
 n_rock_types is read from len(vocab["rocks"]) automatically.
@@ -55,7 +55,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 
 from decision_simulator.resources import DecisionSimulationResources
-from ....map_cache import NpzMap
+from ....map_hdf5 import MapPool
 from ....models.belief_models.borehole_encoders.autoencoder import standardise
 from ....training_utils import TargetNormalizer
 from ....training_utils import (
@@ -117,14 +117,14 @@ class CatVarE2EMapDataset(Dataset):
     @classmethod
     def from_cache(
         cls,
-        cache: NpzMap,
+        cache: MapPool,
         resources: DecisionSimulationResources,
         cfg: CatVarConfig,
         labels_dir: Path | None = None,
         verbose: bool = True,
         is_val: bool = False,
     ) -> "CatVarE2EMapDataset":
-        """Build dataset from a pre-loaded NpzMap, optionally loading label files.
+        """Build dataset from a pre-loaded MapPool, optionally loading label files.
 
         Parameters
         ----------
@@ -163,7 +163,7 @@ class CatVarE2EMapDataset(Dataset):
 
             target_ore = cache.targets[map_idx]  # (n_x, n_y)
 
-            # Load rock labels — prefer rocks already in the NpzMap cache (loaded
+            # Load rock labels — prefer rocks already in the MapPool cache (loaded
             # from the HDF5 rocks dataset), fall back to separate labels_NNNNN.npz.
             rock_labels: np.ndarray | None = None
             if cache.rocks_arrays is not None and map_idx < len(cache.rocks_arrays):
@@ -301,8 +301,7 @@ class _OreWrapper(nn.Module):
         rock_ids = self._rock_ids
         if rock_ids is None or rock_ids.shape[:2] != torch.Size([B, K]):
             rock_ids = torch.zeros(B, K, D, dtype=torch.long, device=boreholes.device)
-        pred_ore, _ = self._model(boreholes, rock_ids, ore_vals, positions, padding_mask)
-        return pred_ore
+        return self._model(boreholes, rock_ids, ore_vals, positions, padding_mask)
 
 
 # ---------------------------------------------------------------------------
@@ -382,8 +381,8 @@ def train_cat_var_encoder(
     verbose: bool = True,
     train_ds: CatVarE2EMapDataset | None = None,
     val_ds: CatVarE2EMapDataset | None = None,
-    train_cache: NpzMap | None = None,
-    val_cache: NpzMap | None = None,
+    train_cache: MapPool | None = None,
+    val_cache: MapPool | None = None,
 ) -> tuple[CatVarEncoder, TargetNormalizer, Path]:
     """Train CatVarEncoder.
 
@@ -406,7 +405,7 @@ def train_cat_var_encoder(
     verbose        : print per-epoch metrics
     train_ds / val_ds : pre-built CatVarE2EMapDataset instances (preferred).
                      If None, train_cache / val_cache must be provided instead.
-    train_cache / val_cache : NpzMap caches used to build datasets when train_ds
+    train_cache / val_cache : MapPool caches used to build datasets when train_ds
                      / val_ds are not supplied.
 
     Returns

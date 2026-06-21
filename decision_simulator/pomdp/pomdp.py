@@ -177,158 +177,406 @@ def run_fixed_budget_episode(
 
 
 if __name__ == "__main__":
+    import argparse
+    import csv
     import datetime
+    import json
+    import os
+    from concurrent.futures import ProcessPoolExecutor
     from pathlib import Path
 
-    from simulator.map_generator import MapGenerator, SimConfig
-    from decision_simulator.resources import load_decision_resources
-    from decision_simulator.neural_belief.training.belief_models.end_to_end.train_variable_aware_patch_borehole_uncertainty_transformer import (
-        load_variable_aware_patch_uncertainty_borehole_checkpoint,
-    )
-    from decision_simulator.utils.plotting import (
-        plot_belief_sample,
-        plot_step_belief_grid,
-        plot_policy_evolution,
-        plot_policy_map_evolution,
-    )
-    from decision_simulator.pomdp.policies.random_policy import RandomPolicy
-    from decision_simulator.pomdp.policies.greedy_yield_policy import GreedyYieldPolicy
-    from decision_simulator.pomdp.policies.uncertainty_policy import UncertaintyPolicy
-    from decision_simulator.pomdp.policies.hybrid_policy import HybridPolicy
+    import h5py
+    import numpy as np
+    import torch
 
-    CHECKPOINT = Path(__file__).parent / "beliefs" / "variable_aware_patch_uncertainty_guided.pt"
-    DEVICE = "cuda"
-    DRILLING_BUDGET = 11  # 1 initial + 10 policy steps
-    SELECTED_STEPS = [1, 2, 3, 5, 8, 10]  # Fibonacci-like steps + final
-    N_MAPS = 10
-    PLOT_DIR = Path(__file__).parent.parent / "plots"
+    import dataclasses
+
+    from decision_simulator.neural_belief.map_hdf5 import HDF5MapStore, MapPool
+    from decision_simulator.neural_belief.training.belief_models.end_to_end.train_cat_var_encoder import (
+        load_cat_var_checkpoint,
+    )
+    from decision_simulator.neural_belief.training.belief_models.end_to_end.train_ore_only_null_encoder import (
+        load_ore_only_null_checkpoint,
+    )
+    from decision_simulator.pomdp.beliefs.belief_state import BeliefState
+    from decision_simulator.pomdp.observations.borehole_observations import (
+        BoreholeObservationState,
+    )
+    from decision_simulator.pomdp.policies.greedy_yield_policy import GreedyYieldPolicy
+    from decision_simulator.pomdp.policies.random_policy import RandomPolicy
+    from decision_simulator.pomdp.policies.uncertainty_policy import UncertaintyPolicy
+    from decision_simulator.resources import load_decision_resources
+    from decision_simulator.utils.evaluate_policies import run_evaluation, _orebody_dir_name
+    from decision_simulator.utils.plotting import plot_evolution_map
+
+    # ── Argument parsing ──────────────────────────────────────────────────────
+
+    BELIEFS_DIR = Path(__file__).parent / "beliefs"
+    # Base results directory: decision_simulator/results/
+    PLOT_DIR = Path(__file__).parent.parent / "results"
+    SELECTED_STEPS = {1, 2, 3, 5, 8, 10}
+
+    p = argparse.ArgumentParser(
+        description="Run POMDP episodes using the cat_var or ore_only_null encoder."
+    )
+    p.add_argument(
+        "--model",
+        choices=["cat_var", "ore_only_null"],
+        required=True,
+        help="End-to-end encoder to evaluate.",
+    )
+    p.add_argument(
+        "--checkpoint",
+        type=Path,
+        default=None,
+        help=(
+            "Path to the model checkpoint. "
+            "Defaults to beliefs/cat_var_best_500.pt or beliefs/ore_only_null_best_500.pt "
+            "(beliefs/cat_var_best_multiple_1000.pt or beliefs/ore_only_null_multiple_1000.pt "
+            "when --multiple is set)."
+        ),
+    )
+    p.add_argument(
+        "--map-dir",
+        type=Path,
+        default=Path("C:/validation_datasets/One_orebody"),
+        help="Directory containing pre-generated HDF5 map shards (default: C:/validation_datasets/One_orebody).",
+    )
+    p.add_argument(
+        "--multiple",
+        action="store_true",
+        default=False,
+        help=(
+            "Switch to Two-orebody mode: sets the default map directory to "
+            "C:/validation_datasets/Two_orebodies and uses the _multiple_1000 checkpoints."
+        ),
+    )
+    p.add_argument(
+        "--n-maps",
+        type=int,
+        default=20,
+        help="Number of maps to evaluate (default: 20).",
+    )
+    p.add_argument(
+        "--budget",
+        type=int,
+        default=11,
+        help="Total drilling budget including the initial drill (default: 11).",
+    )
+    p.add_argument(
+        "--device",
+        default="cuda",
+        help="Torch device string (default: cuda).",
+    )
+    args = p.parse_args()
+
+    if args.multiple and args.map_dir == Path("C:/validation_datasets/One_orebody"):
+        args.map_dir = Path("C:/validation_datasets/Two_orebodies")
+
+    if args.checkpoint is None:
+        if args.multiple:
+            args.checkpoint = BELIEFS_DIR / (
+                "cat_var_best_multiple_1000.pt" if args.model == "cat_var" else "ore_only_null_multiple_1000.pt"
+            )
+        else:
+            args.checkpoint = BELIEFS_DIR / (
+                "cat_var_best_500.pt" if args.model == "cat_var" else "ore_only_null_best_500.pt"
+            )
+
+    # Short label used in directory names: cat_var or only_ore
+    model_label = "cat_var" if args.model == "cat_var" else "only_ore"
+
+    orebody_folder = "multiple_orebodies" if args.multiple else "single_orebody"
 
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    print("Loading resources...")
-    resources, _ = load_decision_resources(borehole_encoder="jepa", device=DEVICE)
+    # All outputs land under:
+    #   decision_simulator/results/{orebody_folder}/{model_label}/{timestamp}/
+    run_dir = PLOT_DIR / orebody_folder / model_label / timestamp
 
-    print(f"Loading belief model from {CHECKPOINT}...")
-    model, _, normalizer, _ = load_variable_aware_patch_uncertainty_borehole_checkpoint(
-        CHECKPOINT, device=DEVICE
+    # CSVs land in a prediction_summaries subfolder of the run directory:
+    #   decision_simulator/results/{orebody_folder}/{model_label}/{timestamp}/prediction_summaries/
+    csv_dir = run_dir / "prediction_summaries"
+    csv_dir.mkdir(parents=True, exist_ok=True)
+
+    # ── Internal helpers (imported from helpers.py) ───────────────────────────
+
+    from decision_simulator.pomdp.helpers import (
+        HDF5DrillEnv as _HDF5DrillEnv,
+        CatVarUpdater as _CatVarUpdater,
+        OreOnlyNullUpdater as _OreOnlyNullUpdater,
     )
 
-    updater = NeuralBeliefUpdater(model, normalizer, DEVICE)
+    # ── Load resources and model ──────────────────────────────────────────────
 
-    for map_idx in range(N_MAPS):
+    print("Loading resources...")
+    resources, _ = load_decision_resources(borehole_encoder="jepa", device=args.device)
+
+    print(f"Loading {args.model} checkpoint: {args.checkpoint}")
+    if args.model == "cat_var":
+        model, _, normalizer, _ = load_cat_var_checkpoint(
+            args.checkpoint, device=args.device
+        )
+    else:
+        model, _, normalizer, _ = load_ore_only_null_checkpoint(
+            args.checkpoint, device=args.device
+        )
+    model.eval()
+
+    # ── Load maps from HDF5 ───────────────────────────────────────────────────
+
+    print(f"Loading {args.n_maps} maps from {args.map_dir}...")
+    shard_files = (
+        sorted(args.map_dir.glob("maps_0_and_1_orebodies_*.h5"))
+        or sorted(args.map_dir.glob("maps_stratified_*.h5"))
+        or sorted(args.map_dir.glob("maps_[0-9][0-9][0-9][0-9][0-9]_*.h5"))
+    )
+    if not shard_files:
+        raise FileNotFoundError(
+            f"No HDF5 shards found in {args.map_dir}. "
+            "Run generate_training_maps.py first."
+        )
+    _pools: list[MapPool] = []
+    _n_bodies_chunks: list[np.ndarray] = []
+    _n_remaining = args.n_maps
+    for _sf in shard_files:
+        if _n_remaining <= 0:
+            break
+        with h5py.File(_sf, "r") as _hf:
+            _n_in_shard = int(_hf.attrs["n_maps"])
+            _n_from_this = min(_n_remaining, _n_in_shard)
+            _n_bodies_chunks.append(_hf["n_bodies"][:_n_from_this])
+        _pools.append(HDF5MapStore(_sf).load_subset(list(range(_n_from_this))))
+        _n_remaining -= _n_from_this
+
+    if len(_pools) == 1:
+        npz_map = _pools[0]
+    else:
+        _p0 = _pools[0]
+        npz_map = MapPool(
+            borehole_arrays=[b for _p in _pools for b in _p.borehole_arrays],
+            targets=[t for _p in _pools for t in _p.targets],
+            drill_patterns=[d for _p in _pools for d in _p.drill_patterns],
+            cfg=dataclasses.replace(_p0.cfg, n_maps=args.n_maps),
+            n_x=_p0.n_x,
+            n_y=_p0.n_y,
+            rocks_arrays=[r for _p in _pools if _p.rocks_arrays for r in _p.rocks_arrays] or None,
+        )
+    _n_bodies_arr = np.concatenate(_n_bodies_chunks)
+    print(
+        f"  Loaded {npz_map.pool_size} maps  "
+        f"(n_x={npz_map.n_x}, n_y={npz_map.n_y}, "
+        f"rocks={'yes' if npz_map.rocks_arrays else 'no'})"
+    )
+
+    # ── CSV field names ───────────────────────────────────────────────────────
+
+    _STEP_FIELDS = [
+        "policy", "step", "loc_i", "loc_j",
+        "true_ore", "predicted_ore", "predicted_uncertainty",
+        "total_predicted_ore", "total_true_ore", "top_ore",
+    ]
+    _SUMMARY_FIELDS = ["map_idx", "policy", "total_true_ore", "best_observed_ore"]
+    all_summary_rows: list[dict] = []
+    all_step_rows: list[dict] = []
+    # Track orebody count per map_idx for summary grouping
+    _map_n_bodies: dict[int, int] = {}
+
+    # Deferred plot task list — filled during the POMDP loop, rendered in parallel
+    # at the end.  Each entry is a kwargs dict matching the target function's signature.
+    evo_map_tasks: list[dict] = []         # → plot_evolution_map(**kw)
+    _evo_map_counts: dict[str, int] = {}   # maps saved per policy
+    _EVO_MAP_LIMIT = 50
+
+    # ── Main evaluation loop ──────────────────────────────────────────────────
+
+    for map_idx in range(npz_map.pool_size):
         print(f"\n{'#' * 60}")
-        print(f"Map {map_idx:02d} / {N_MAPS - 1}")
+        print(f"Map {map_idx:02d} / {npz_map.pool_size - 1}")
         print(f"{'#' * 60}")
 
-        n_ore_bodies = int(np.random.default_rng(map_idx).integers(0, 2))
-        gen = MapGenerator(
-            resources.distribution_bank,
-            resources.formation_geometry,
-            SimConfig(n_ore_bodies=n_ore_bodies),
-            seed=map_idx,
-            prior=resources.discovery_prior,
-        )
-        true_map = next(gen)
-        env = DrillingEnvironment(true_map, resources)
-        true_ore_map = env.get_true_ore_map()
-        center = (env.n_x // 2, env.n_y // 2)
-        print(f"  n_ore_bodies: {n_ore_bodies}  Initial drill: center cell {center}")
+        n_bodies_val = int(_n_bodies_arr[map_idx])
+        _map_n_bodies[map_idx] = n_bodies_val
 
+        rocks_arr = npz_map.rocks_arrays[map_idx] if npz_map.rocks_arrays else None
+        env = _HDF5DrillEnv(
+            bh_raw=npz_map.borehole_arrays[map_idx],
+            target=npz_map.targets[map_idx],
+            rocks=rocks_arr,
+            n_x=npz_map.n_x,
+            n_y=npz_map.n_y,
+            norm_stats=resources.norm_stats,
+            variable_names=resources.variable_names,
+        )
+        center = (env.n_x // 2, env.n_y // 2)
+        true_ore_map = env.get_true_ore_map()
+        top10_threshold = float(np.percentile(true_ore_map, 90))
+
+        map_rows: list[dict] = []
         map_results: dict[str, dict] = {}
-        # step_beliefs[policy_name][n_drills] = BeliefState computed from n_drills observations
-        step_beliefs: dict[str, dict[int, BeliefState]] = {}
-        CAPTURE_DRILLS = {2, 3}
 
         policy_list = [
-            ("random",       RandomPolicy(seed=42)),
-            ("greedy_yield", GreedyYieldPolicy()),
-            ("uncertainty",  UncertaintyPolicy()),
-            ("hybrid",       HybridPolicy(alpha=1.0, beta=0.5)),
+            ("uncertainty", UncertaintyPolicy()),
+            ("greedy",      GreedyYieldPolicy()),
+            ("random",      RandomPolicy(seed=42 + map_idx)),
         ]
 
         for policy_name, policy in policy_list:
             print(f"\n  Policy: {policy_name}")
 
-            captured: dict[int, BeliefState] = {}
-            step_beliefs[policy_name] = captured
+            policy_plot_dir = run_dir / "plots" / policy_name
+            policy_plot_dir.mkdir(parents=True, exist_ok=True)
+            collected_steps: list[dict] = []
 
-            # Capture loop variables for the closure
-            def make_step_callback(
-                name: str,
-                m_idx: int,
-                t_ore: np.ndarray,
-                store: dict,
-            ) -> StepCallback:
-                def callback(step: int, belief_state: BeliefState, obs_state: BoreholeObservationState) -> None:
-                    save_path = (
-                        PLOT_DIR / name / timestamp
-                        / f"map_{m_idx:02d}_step_{step:02d}.png"
+            if args.model == "cat_var":
+                updater = _CatVarUpdater(model, normalizer, args.device, env)
+            else:
+                updater = _OreOnlyNullUpdater(model, normalizer, args.device, env)
+
+            def make_step_callback(store: list, t_ore: np.ndarray) -> StepCallback:
+                def callback(
+                    step: int,
+                    belief_state: BeliefState,
+                    obs_state: BoreholeObservationState,
+                ) -> None:
+                    if step not in SELECTED_STEPS:
+                        return
+                    store.append(
+                        dict(
+                            step=step,
+                            sparse_ore_map=obs_state.get_sparse_ore_map(),
+                            observation_mask=obs_state.get_observed_mask(),
+                            true_ore_map=t_ore.copy(),
+                            predicted_ore_map=belief_state.predicted_ore_map.copy(),
+                            predicted_uncertainty_map=(
+                                belief_state.predicted_uncertainty_map.copy()
+                                if belief_state.predicted_uncertainty_map is not None
+                                else None
+                            ),
+                        )
                     )
-                    plot_belief_sample(
-                        sparse_ore_map=obs_state.get_sparse_ore_map(),
-                        observation_mask=obs_state.get_observed_mask(),
-                        true_ore_map=t_ore,
-                        predicted_ore_map=belief_state.predicted_ore_map,
-                        predicted_uncertainty_map=belief_state.predicted_uncertainty_map,
-                        save_path=save_path,
-                        title=f"{name} | Map {m_idx:02d} | Step {step:02d}",
-                        timestamp=timestamp,
-                    )
-                    # belief_state at step k was computed from k observations
-                    n_drills = int(belief_state.observed_mask.sum())
-                    if n_drills in CAPTURE_DRILLS:
-                        store[n_drills] = belief_state
                 return callback
 
             result = run_fixed_budget_episode(
                 environment=env,
                 belief_updater=updater,
                 policy=policy,
-                drilling_budget=DRILLING_BUDGET,
+                drilling_budget=args.budget,
                 initial_locations=[center],
-                step_callback=make_step_callback(policy_name, map_idx, true_ore_map, captured),
+                step_callback=make_step_callback(collected_steps, true_ore_map),
             )
             map_results[policy_name] = result
 
             total_true = result["total_true_ore"]
-            print(f"    {'step':>4}  {'loc':>8}  {'true_ore':>8}  {'pred_ore':>8}  {'pred_unc':>8}  {'total_pred':>10}  {'total_true':>10}")
+            print(
+                f"    {'step':>4}  {'loc':>8}  {'true_ore':>8}  "
+                f"{'pred_ore':>8}  {'pred_unc':>8}  "
+                f"{'total_pred':>10}  {'total_true':>10}"
+            )
             for row in result["step_history"]:
+                i_loc, j_loc = row["location"]
                 print(
-                    f"    {row['step']:>4}  "
-                    f"{str(row['location']):>8}  "
+                    f"    {row['step']:>4}  ({i_loc:2d},{j_loc:2d})  "
                     f"{row['ore_value']:>8.4f}  "
                     f"{row['predicted_ore']:>8.4f}  "
                     f"{row['predicted_uncertainty']:>8.4f}  "
                     f"{row['total_predicted_ore']:>10.4f}  "
                     f"{total_true:>10.4f}"
                 )
+                map_rows.append(
+                    {
+                        "policy":                policy_name,
+                        "step":                  row["step"],
+                        "loc_i":                 i_loc,
+                        "loc_j":                 j_loc,
+                        "true_ore":              round(row["ore_value"], 3),
+                        "predicted_ore":         round(row["predicted_ore"], 3),
+                        "predicted_uncertainty": round(row["predicted_uncertainty"], 3),
+                        "total_predicted_ore":   round(row["total_predicted_ore"], 3),
+                        "total_true_ore":        round(total_true, 3),
+                        "top_ore":               row["ore_value"] >= top10_threshold,
+                    }
+                )
             print(f"    Total true ore: {total_true:.4f}")
 
-            evo_grid_path = (
-                PLOT_DIR / policy_name / timestamp
-                / f"map_{map_idx:02d}_evolution.png"
+            all_summary_rows.append(
+                {
+                    "map_idx":           map_idx,
+                    "policy":            policy_name,
+                    "total_true_ore":    round(total_true, 3),
+                    "best_observed_ore": round(result["final_best_observed_ore"], 3),
+                }
             )
-            plot_policy_map_evolution(
-                policy_name=policy_name,
-                step_plot_dir=PLOT_DIR,
-                map_idx=map_idx,
-                selected_steps=SELECTED_STEPS,
-                timestamp=timestamp,
-                save_path=evo_grid_path,
-            )
-            print(f"    Evolution grid saved -> {evo_grid_path}")
 
-        # 4×4 grid: rows=policies, cols=ore@2drills|unc@2drills|ore@3drills|unc@3drills
-        step_grid_path = (
-            PLOT_DIR / "step_belief_grid" / timestamp / f"map_{map_idx:02d}_step_grid.png"
-        )
-        plot_step_belief_grid(
-            step_beliefs, map_idx, drill_counts=(2, 3),
-            timestamp=timestamp, save_path=step_grid_path,
-        )
-        print(f"\n  Step belief grid saved -> {step_grid_path}")
+            if _evo_map_counts.get(policy_name, 0) < _EVO_MAP_LIMIT:
+                evo_map_tasks.append(
+                    dict(
+                        steps=collected_steps,
+                        save_path=policy_plot_dir / f"map_{map_idx:02d}_evolution.png",
+                        title=f"{policy_name} | Map {map_idx:02d}",
+                    )
+                )
+                _evo_map_counts[policy_name] = _evo_map_counts.get(policy_name, 0) + 1
 
-        # Line plot: predicted vs true total ore over steps for all policies
-        evo_path = PLOT_DIR / "evolution" / timestamp / f"map_{map_idx:02d}_evolution.png"
-        plot_policy_evolution(map_results, map_idx, save_path=evo_path)
-        print(f"  Policy comparison plot saved -> {evo_path}")
+        # Per-map CSV → prediction_summaries/{orebody_dir}/maps/
+        orebody_maps_dir = csv_dir / _orebody_dir_name(n_bodies_val) / "maps"
+        orebody_maps_dir.mkdir(parents=True, exist_ok=True)
+        map_csv_path = orebody_maps_dir / f"map_{map_idx:02d}.csv"
+        with open(map_csv_path, "w", newline="") as fh:
+            writer = csv.DictWriter(fh, fieldnames=_STEP_FIELDS)
+            writer.writeheader()
+            writer.writerows(map_rows)
+        print(f"\n  Results CSV -> {map_csv_path}")
+        all_step_rows.extend({**row, "map_idx": map_idx, "n_bodies": n_bodies_val} for row in map_rows)
+
+    # ── Summary CSV ───────────────────────────────────────────────────────────
+
+    # ── Summary CSVs (one per orebody group) ─────────────────────────────────
+    from collections import defaultdict as _dd
+    _summary_by_orebody: dict[int, list[dict]] = _dd(list)
+    for _row in all_summary_rows:
+        _summary_by_orebody[_map_n_bodies[_row["map_idx"]]].append(_row)
+    for _nb, _rows in sorted(_summary_by_orebody.items()):
+        _rows.sort(key=lambda r: (r["policy"], r["map_idx"]))
+        _summary_dir = csv_dir / _orebody_dir_name(_nb)
+        _summary_dir.mkdir(parents=True, exist_ok=True)
+        _summary_path = _summary_dir / "summary.csv"
+        with open(_summary_path, "w", newline="") as fh:
+            writer = csv.DictWriter(fh, fieldnames=_SUMMARY_FIELDS)
+            writer.writeheader()
+            writer.writerows(_rows)
+        print(f"\nSummary ({_orebody_dir_name(_nb)}) -> {_summary_path}")
+
+    # ── Policy evaluation metrics ─────────────────────────────────────────────
+    print("\nRunning policy evaluation...")
+    run_evaluation(all_step_rows, csv_dir)
+
+    # ── Metadata JSON ─────────────────────────────────────────────────────────
+    metadata = {
+        "timestamp": timestamp,
+        "n_maps": npz_map.pool_size,
+        "model_file": args.checkpoint.name,
+        "model_label": model_label,
+        "orebody_folder": orebody_folder,
+        "policies": [name for name, _ in policy_list],
+        "budget": args.budget,
+        "grid_size": [npz_map.n_x, npz_map.n_y],
+        "dataset_path": str(shard_files[0]),
+        "created_at": datetime.datetime.now().isoformat(),
+    }
+    metadata_path = run_dir / "metadata.json"
+    with open(metadata_path, "w") as fh:
+        json.dump(metadata, fh, indent=2)
+    print(f"Metadata -> {metadata_path}")
+
+    # ── Parallel plot rendering ───────────────────────────────────────────────
+    # Uses ProcessPoolExecutor so each worker has its own matplotlib instance
+    # (matplotlib is not thread-safe).
+
+    n_workers = min(os.cpu_count() or 4, 8)
+    print(f"\nRendering {len(evo_map_tasks)} evolution maps with {n_workers} workers...")
+
+    with ProcessPoolExecutor(max_workers=n_workers) as pool:
+        [pool.submit(plot_evolution_map, **kw) for kw in evo_map_tasks]
+
+    print("All evolution maps rendered.")

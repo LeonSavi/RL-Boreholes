@@ -25,13 +25,175 @@ from __future__ import annotations
 
 import dataclasses
 from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path
 
 import h5py
 import numpy as np
+import torch
 
-from .datasets import BeliefDatasetConfig
-from .map_cache import NpzMap
+from .datasets import BeliefDatasetConfig, GeologicalBeliefDataset
+from .models import standardise
+from decision_simulator.resources import DecisionSimulationResources
+
+_DEFAULT_PREFIX_STEPS = [1, 2, 3, 5, 8, 10, 15]
+
+
+@dataclass
+class MapPool:
+    """In-memory container for map pool data loaded from HDF5 shards.
+
+    Created by :meth:`HDF5MapStore.load_subset` or :meth:`HDF5MapDirectory.load_map_data`.
+    """
+
+    borehole_arrays: list[np.ndarray]  # each (n_boreholes, V, D) float32, raw
+    targets: list[np.ndarray]          # each (n_x, n_y) float32
+    drill_patterns: list[list[tuple[list[tuple[int, int]], list[float]]]]
+    cfg: BeliefDatasetConfig
+    n_x: int
+    n_y: int
+    rocks_arrays: list[np.ndarray] | None = None  # each (n_boreholes, D) int8, or None
+
+    @property
+    def pool_size(self) -> int:
+        return len(self.borehole_arrays)
+
+    def encode_full_latent_map(
+        self,
+        borehole_array: np.ndarray,
+        resources: DecisionSimulationResources,
+        device: str,
+        batch_size: int = 256,
+    ) -> np.ndarray:
+        """Encode every borehole in a map in one batched pass.
+
+        Returns np.ndarray of shape ``(n_x, n_y, latent_dim)`` float32.
+        """
+        encoder_fn = getattr(resources, "borehole_encoder_fn", None)
+        if encoder_fn is None:
+            jepa = getattr(resources, "jepa_model", None)
+            if jepa is not None:
+                encoder_fn = jepa.embed
+
+        if encoder_fn is None:
+            return np.zeros((self.n_x, self.n_y, 0), dtype=np.float32)
+
+        bh_tensor = torch.from_numpy(borehole_array.astype(np.float32)).to(device)
+
+        chunks: list[np.ndarray] = []
+        for start in range(0, bh_tensor.shape[0], batch_size):
+            with torch.no_grad():
+                lat = encoder_fn(bh_tensor[start : start + batch_size])
+            chunks.append(lat.cpu().numpy())
+
+        latents = np.concatenate(chunks, axis=0)  # (n_x*n_y, latent_dim)
+        return latents.reshape(self.n_x, self.n_y, -1).astype(np.float32)
+
+    @staticmethod
+    def build_sample_input(
+        drill_locations: list[tuple[int, int]],
+        ore_values: list[float],
+        full_latent_map: np.ndarray,  # (n_x, n_y, latent_dim)
+    ) -> np.ndarray:
+        """Construct the ``(2 + latent_dim, n_x, n_y)`` model input from a drill pattern."""
+        n_x, n_y, latent_dim = full_latent_map.shape
+
+        sparse_ore = np.zeros((n_x, n_y), dtype=np.float32)
+        mask = np.zeros((n_x, n_y), dtype=np.float32)
+        jepa_map = np.zeros((n_x, n_y, latent_dim), dtype=np.float32)
+
+        for (i, j), ore_val in zip(drill_locations, ore_values):
+            sparse_ore[i, j] = float(ore_val)
+            mask[i, j] = 1.0
+            jepa_map[i, j] = full_latent_map[i, j]
+
+        return np.concatenate(
+            [
+                sparse_ore[np.newaxis],
+                mask[np.newaxis],
+                jepa_map.transpose(2, 0, 1),
+            ],
+            axis=0,
+        )
+
+    def build_geo_train_maps(
+        self,
+        resources: DecisionSimulationResources,
+        device: str,
+        n_sequences_per_map: int = 1,
+        max_drills: int = 15,
+        prefix_steps: list[int] | None = None,
+        seed: int = 42,
+        verbose: bool = False,
+        shuffle_latents: bool = False,
+        shuffle_seed: int = 0,
+    ) -> GeologicalBeliefDataset:
+        """Build a sequential prefix dataset from this map pool."""
+        if prefix_steps is None:
+            prefix_steps = _DEFAULT_PREFIX_STEPS
+
+        n_x, n_y = self.n_x, self.n_y
+        all_locs = [(i, j) for i in range(n_x) for j in range(n_y)]
+
+        all_inputs: list[np.ndarray] = []
+        all_targets: list[np.ndarray] = []
+        metadata_list: list[dict] = []
+        drill_count_list: list[int] = []
+
+        for map_idx, (bh_arr, target_ore) in enumerate(
+            zip(self.borehole_arrays, self.targets)
+        ):
+            bh_std = bh_arr.astype(np.float32)
+            if resources.norm_stats and resources.variable_names:
+                bh_std = standardise(
+                    bh_std, resources.norm_stats, resources.variable_names
+                )
+                bh_std = np.nan_to_num(bh_std, nan=0.0)
+
+            full_latent_map = self.encode_full_latent_map(bh_std, resources, device)
+
+            if shuffle_latents and full_latent_map.shape[2] > 0:
+                flat = full_latent_map.reshape(-1, full_latent_map.shape[2])
+                np.random.default_rng(shuffle_seed + map_idx).shuffle(flat)
+                full_latent_map = flat.reshape(n_x, n_y, -1)
+
+            for seq_id in range(n_sequences_per_map):
+                seq_seed = seed + map_idx * n_sequences_per_map + seq_id
+                perm = np.random.default_rng(seq_seed).permutation(len(all_locs))
+                sequence_locs = [all_locs[k] for k in perm[:max_drills]]
+
+                for step in prefix_steps:
+                    actual_step = min(step, len(sequence_locs))
+                    drill_locs = sequence_locs[:actual_step]
+                    ore_vals = [float(target_ore[i, j]) for i, j in drill_locs]
+
+                    inp = MapPool.build_sample_input(drill_locs, ore_vals, full_latent_map)
+                    all_inputs.append(inp)
+                    all_targets.append(target_ore[np.newaxis])
+                    metadata_list.append(
+                        {
+                            "map_id": map_idx,
+                            "sequence_id": seq_id,
+                            "step": actual_step,
+                            "n_drills": actual_step,
+                        }
+                    )
+                    drill_count_list.append(actual_step)
+
+            if verbose and (map_idx + 1) % 10 == 0:
+                print(
+                    f"  [encode] {map_idx + 1}/{len(self.borehole_arrays)} maps encoded"
+                )
+
+        inputs_t = torch.from_numpy(np.stack(all_inputs))
+        targets_t = torch.from_numpy(np.stack(all_targets))
+        drill_counts_t = torch.tensor(drill_count_list, dtype=torch.long)
+        return GeologicalBeliefDataset(
+            inputs_t,
+            targets_t,
+            drill_counts=drill_counts_t,
+            metadata=metadata_list,
+        )
 
 
 def unpack_drill_patterns(
@@ -66,10 +228,10 @@ class HDF5MapStore:
                 "Generate it with colab_npz_to_hdf5.py first."
             )
 
-    def load_subset(self, positions: list[int]) -> NpzMap:
+    def load_subset(self, positions: list[int]) -> MapPool:
         """Load maps at *positions* (row indices into the HDF5 shard).
 
-        Returns an in-memory :class:`NpzMap`.
+        Returns an in-memory :class:`MapPool`.
         """
         self._require_file()
 
@@ -102,7 +264,7 @@ class HDF5MapStore:
                 if has_rocks:
                     rocks_arrays.append(hf["rocks"][pos])  # keep as int8
 
-        return NpzMap(
+        return MapPool(
             borehole_arrays=borehole_arrays,
             targets=targets,
             drill_patterns=drill_patterns,
@@ -118,7 +280,7 @@ class HDF5MapStore:
         n_val_maps: int,
         n_orebodies: int,
         seed: int = 42,
-    ) -> tuple[NpzMap, NpzMap]:
+    ) -> tuple[MapPool, MapPool]:
         """Load train/val subsets stratified by ore body count.
 
         * ``n_orebodies=1`` — 50 % zero-body, 50 % one-body
@@ -218,7 +380,7 @@ class HDF5MapDirectory:
         self,
         indices: list[int],
         file_row_map: list[tuple[Path, int]],
-    ) -> NpzMap:
+    ) -> MapPool:
         """Load maps referenced by combined-index positions, grouped by file."""
         by_file: dict[Path, list[int]] = defaultdict(list)
         for combined_idx in indices:
@@ -243,7 +405,7 @@ class HDF5MapDirectory:
                 cfg = nm.cfg
                 n_x, n_y = nm.n_x, nm.n_y
 
-        return NpzMap(
+        return MapPool(
             borehole_arrays=all_bh,
             targets=all_targets,
             drill_patterns=all_drills,
@@ -278,7 +440,7 @@ class HDF5MapDirectory:
         n_val_maps: int,
         n_orebodies: int,
         seed: int = 42,
-    ) -> tuple[NpzMap, NpzMap]:
+    ) -> tuple[MapPool, MapPool]:
         """Load train/val subsets with the same stratified-sampling contract
         as :meth:`HDF5MapStore.load_map_data`, but spanning multiple shard files.
 

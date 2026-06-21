@@ -153,14 +153,10 @@ def _build_vocabs(
 
 def _encode_labels(arr: np.ndarray, vocab: dict[str, int]) -> np.ndarray:
     """Map a (nx, ny, nz) object array of strings to (nx*ny, nz) int8."""
-    import pandas as pd
-
+    other_idx = vocab.get("other", 0)
     nx, ny, nz = arr.shape
-    flat = arr.reshape(nx * ny, nz).astype(object)
-    cat = pd.Categorical(flat.ravel(), categories=list(vocab.keys()))
-    codes = cat.codes.copy()
-    codes[codes < 0] = vocab.get("other", 0)
-    return codes.reshape(nx * ny, nz).astype(np.int8)
+    _lookup = np.vectorize(lambda s: vocab.get(s, other_idx), otypes=[np.int8])
+    return _lookup(arr).reshape(nx * ny, nz)
 
 
 # ---------------------------------------------------------------------------
@@ -471,6 +467,15 @@ def main() -> None:
         "--n-bodies", type=int, default=None,
         help="cap ore body count per map (0-3); omit to use SimConfig default (2)",
     )
+    p.add_argument(
+        "--min-bodies", type=int, default=None,
+        help=(
+            "minimum ore body count per map; when set, bypasses the default "
+            "multi-phase structure and generates all --n-maps in a single phase "
+            "using --n-bodies as the max and this value as the min. "
+            "Example: --n-bodies 2 --min-bodies 0 produces maps with 0-2 ore bodies."
+        ),
+    )
     args = p.parse_args()
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -516,20 +521,29 @@ def main() -> None:
         pickle.dump(pool_config, f)
 
     # ── Phase definitions ──────────────────────────────────────────────────
-    # Phase 1: first 4 batches — only 0 or 1 ore body maps
-    # Phase 2: next 4 batches  — only 2 or 3 ore body maps (min_ore_bodies=2)
-    # Phase 3: remaining maps  — stratified (default ore body distribution)
-    _BATCHES_PER_PHASE = 4
-    phase1_n = min(_BATCHES_PER_PHASE * args.shard_size, args.n_maps)
-    phase2_n = min(_BATCHES_PER_PHASE * args.shard_size, max(0, args.n_maps - phase1_n))
-    phase3_n = max(0, args.n_maps - phase1_n - phase2_n)
+    if args.min_bodies is not None:
+        # Single-phase mode: all maps share one ore-body range.
+        # Used to produce dedicated datasets such as "0-2 ore bodies only".
+        phase_defs = [
+            # (global_start, count, max_ore_bodies, min_ore_bodies, shard_prefix)
+            (0, args.n_maps, args.n_bodies, args.min_bodies, "maps_stratified"),
+        ]
+    else:
+        # Default multi-phase structure:
+        # Phase 1: first 4 batches — only 0 or 1 ore body maps
+        # Phase 2: next 4 batches  — only 2 or 3 ore body maps (min_ore_bodies=2)
+        # Phase 3: remaining maps  — stratified (default ore body distribution)
+        _BATCHES_PER_PHASE = 4
+        phase1_n = min(_BATCHES_PER_PHASE * args.shard_size, args.n_maps)
+        phase2_n = min(_BATCHES_PER_PHASE * args.shard_size, max(0, args.n_maps - phase1_n))
+        phase3_n = max(0, args.n_maps - phase1_n - phase2_n)
 
-    phase_defs = [
-        # (global_start, count, max_ore_bodies, min_ore_bodies, shard_prefix)
-        (0,                       phase1_n, 1,            0, "maps_0_and_1_orebodies"),
-        (phase1_n,                phase2_n, 3,            2, "maps_2_and_3_orebodies"),
-        (phase1_n + phase2_n,     phase3_n, args.n_bodies, 0, "maps_stratified"),
-    ]
+        phase_defs = [
+            # (global_start, count, max_ore_bodies, min_ore_bodies, shard_prefix)
+            (0,                       phase1_n, 1,            0, "maps_0_and_1_orebodies"),
+            (phase1_n,                phase2_n, 3,            2, "maps_2_and_3_orebodies"),
+            (phase1_n + phase2_n,     phase3_n, args.n_bodies, 0, "maps_stratified"),
+        ]
 
     # ── Resume: find which maps are already in existing shards ─────────────
     completed = _find_completed_maps(args.out_dir)
