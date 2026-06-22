@@ -133,6 +133,13 @@ class MapBeliefTrainingConfig(BaseMapArchConfig):
     false_positive_weight: float = 0.1
     false_positive_threshold: float = 0.05
 
+    # --- Uncertainty head (mirrors CatVarConfig) ---
+    # When enabled, an UncertaintyHead is trained alongside the ore head with
+    #   uncertainty_loss = MSE(pred_uncertainty, |pred_ore.detach() - target|)
+    #   total_loss       = ore_loss + uncertainty_weight * uncertainty_loss
+    use_uncertainty_head: bool = True
+    uncertainty_weight: float = 0.1
+
     # --- Misc ---
     seed: int = 42
     borehole_encoder: str = "unknown"

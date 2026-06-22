@@ -51,6 +51,9 @@ from decision_simulator.neural_belief.training.belief_models.end_to_end.train_ca
 from decision_simulator.neural_belief.training.belief_models.end_to_end.train_ore_only_null_encoder import (
     load_ore_only_null_checkpoint,
 )
+from decision_simulator.neural_belief.training.belief_models.map_encoders.train_map_belief import (
+    load_map_belief_checkpoint,
+)
 from decision_simulator.pomdp.helpers import HDF5DrillEnv, make_updater
 from decision_simulator.pomdp.policies.greedy_yield_policy import GreedyYieldPolicy
 from decision_simulator.pomdp.policies.random_policy import RandomPolicy
@@ -210,7 +213,10 @@ def _run_one_start(
         total_true      = float(true_ore_map.sum())
         top10_threshold = float(np.percentile(true_ore_map, 90))
 
-        updater = make_updater(model_name, model, normalizer, device, env)
+        updater = make_updater(
+            model_name, model, normalizer, device, env,
+            resources=resources, map_pool=npz_map,
+        )
 
         policies = [
             ("uncertainty", UncertaintyPolicy()),
@@ -325,6 +331,12 @@ def main() -> None:
         default=BELIEFS_DIR / "ore_only_null_best_2000.pt",
         help="OreOnlyNullEncoder checkpoint. Single: ore_only_null_best_2000.pt; multi: ore_only_best_multi_2000.pt.",
     )
+    p.add_argument(
+        "--map-belief-checkpoint",
+        type=Path,
+        default=BELIEFS_DIR / "map_belief_best_2000.pt",
+        help="PreCompBHMapBeliefTransformer checkpoint (JEPA-latent map belief model).",
+    )
     p.add_argument("--map-dir",  type=Path, default=Path("C:/validation_datasets/One_orebody"))
     p.add_argument("--n-maps",   type=int,  default=1000)
     p.add_argument("--budget",   type=int,  default=11)
@@ -346,8 +358,9 @@ def main() -> None:
     resources, _ = load_decision_resources(borehole_encoder="jepa", device=args.device)
 
     model_variants = [
-        ("cat_var",       "cat_var",   args.cat_var_checkpoint, "cat_var"),
-        ("ore_only_null", "only_ore",  args.null_checkpoint,    "null"),
+        ("cat_var",       "cat_var",    args.cat_var_checkpoint,    "cat_var"),
+        ("ore_only_null", "only_ore",   args.null_checkpoint,       "null"),
+        ("map_belief",    "map_belief", args.map_belief_checkpoint, "map_belief"),
     ]
 
     cross_start_dfs: list[pd.DataFrame] = []
@@ -360,6 +373,8 @@ def main() -> None:
         print(f"Loading {ckpt_tag} checkpoint: {ckpt_path}")
         if model_name == "cat_var":
             model, _, normalizer, _ = load_cat_var_checkpoint(ckpt_path, device=args.device)
+        elif model_name == "map_belief":
+            model, _, normalizer, _ = load_map_belief_checkpoint(ckpt_path, device=args.device)
         else:
             model, _, normalizer, _ = load_ore_only_null_checkpoint(ckpt_path, device=args.device)
         model.eval()
@@ -400,9 +415,10 @@ def main() -> None:
             "budget":       args.budget,
             "grid_size":    [npz_map.n_x, npz_map.n_y],
             "dataset_path": dataset_path,
-            "cat_var_ckpt": str(args.cat_var_checkpoint),
-            "null_ckpt":    str(args.null_checkpoint),
-            "created_at":   datetime.datetime.now().isoformat(),
+            "cat_var_ckpt":    str(args.cat_var_checkpoint),
+            "null_ckpt":       str(args.null_checkpoint),
+            "map_belief_ckpt": str(args.map_belief_checkpoint),
+            "created_at":      datetime.datetime.now().isoformat(),
         }, fh, indent=2)
     print(f"Top-level metadata -> {run_root / 'metadata.json'}")
 

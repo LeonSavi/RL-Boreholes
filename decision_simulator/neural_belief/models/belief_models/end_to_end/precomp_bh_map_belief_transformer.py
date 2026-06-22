@@ -33,6 +33,7 @@ from ..map_encoder_components.components import (
     MapBeliefEncoder,
     OreReconstructionHead,
     SpatialTokenEmbedding,
+    UncertaintyHead,
 )
 from ..model_configs import MapBeliefConfig  # noqa: F401 — re-exported for callers
 
@@ -47,37 +48,44 @@ class PreCompBHMapBeliefTransformer(nn.Module):
       2. A full-map ore prediction via a per-cell reconstruction head, used
          for supervised pretraining with MSE loss.
 
-    The forward() method is a drop-in replacement for UNetBelief: it accepts
-    the same (B, 2 + latent_dim, n_x, n_y) input and returns (B, 1, n_x, n_y).
+    The forward() method accepts a (B, 2 + latent_dim, n_x, n_y) input and
+    returns a tuple (ore_map, uncertainty_map), both (B, 1, n_x, n_y) — mirroring
+    CatVarEncoder so that uncertainty-guided policies can be used downstream.
 
     For downstream tasks use encode() to obtain the map belief latent:
         latent = model.encode(x)   # (B, d_model)
 
-    To obtain both in a single forward pass (no recomputation) use:
-        ore_map, latent = model.forward_with_latent(x)
+    To obtain everything in a single forward pass (no recomputation) use:
+        ore_map, uncertainty_map, latent = model.forward_with_latent(x)
     """
 
     def __init__(self, cfg: MapBeliefConfig) -> None:
         super().__init__()
         self.cfg = cfg
-        self.token_embed = SpatialTokenEmbedding(cfg)
-        self.encoder     = MapBeliefEncoder(cfg)
-        self.ore_head    = OreReconstructionHead(cfg)
+        self.token_embed      = SpatialTokenEmbedding(cfg)
+        self.encoder          = MapBeliefEncoder(cfg)
+        self.ore_head         = OreReconstructionHead(cfg)
+        self.uncertainty_head = UncertaintyHead(cfg)
 
     def _forward_all(
         self, x: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Run the full pipeline and return (ore_map, map_belief_latent)."""
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Run the full pipeline and return (ore_map, uncertainty_map, latent).
+
+        The uncertainty head mirrors CatVarEncoder: a parallel per-cell MLP over
+        the same spatial transformer output as the ore head, softplus-activated
+        to be non-negative.  It is trained with
+        ``MSE(pred_uncertainty, |pred_ore.detach() - target|)``.
+        """
         n_x, n_y = x.shape[2], x.shape[3]
         tokens               = self.token_embed(x)
         cls_out, spatial_out = self.encoder(tokens)
         ore_map              = self.ore_head(spatial_out, n_x, n_y)
-        return ore_map, cls_out
+        uncertainty_map      = self.uncertainty_head(spatial_out, n_x, n_y)
+        return ore_map, uncertainty_map, cls_out
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Reconstruct the ore map from sparse observations.
-
-        Drop-in replacement for UNetBelief.forward().
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Reconstruct the ore map and uncertainty map from sparse observations.
 
         Parameters
         ----------
@@ -85,10 +93,11 @@ class PreCompBHMapBeliefTransformer(nn.Module):
 
         Returns
         -------
-        ore_map : (B, 1, n_x, n_y)
+        ore_map          : (B, 1, n_x, n_y)
+        uncertainty_map  : (B, 1, n_x, n_y)  — non-negative (softplus)
         """
-        ore_map, _ = self._forward_all(x)
-        return ore_map
+        ore_map, uncertainty_map, _ = self._forward_all(x)
+        return ore_map, uncertainty_map
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
         """Encode the partially observed map into a belief latent vector.
@@ -101,13 +110,13 @@ class PreCompBHMapBeliefTransformer(nn.Module):
         -------
         latent : (B, d_model)
         """
-        _, latent = self._forward_all(x)
+        _, _, latent = self._forward_all(x)
         return latent
 
     def forward_with_latent(
         self, x: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Return both the ore reconstruction and the map belief latent.
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return the ore reconstruction, uncertainty map, and map belief latent.
 
         Parameters
         ----------
@@ -115,8 +124,9 @@ class PreCompBHMapBeliefTransformer(nn.Module):
 
         Returns
         -------
-        ore_map : (B, 1, n_x, n_y)
-        latent  : (B, d_model)
+        ore_map         : (B, 1, n_x, n_y)
+        uncertainty_map : (B, 1, n_x, n_y)
+        latent          : (B, d_model)
         """
         return self._forward_all(x)
 

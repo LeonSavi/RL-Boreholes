@@ -10,6 +10,7 @@ from __future__ import annotations
 import numpy as np
 import torch
 
+from decision_simulator.neural_belief.map_hdf5 import MapPool
 from decision_simulator.neural_belief.models.belief_models.borehole_encoders.autoencoder import (
     standardise,
 )
@@ -154,14 +155,85 @@ class OreOnlyNullUpdater:
         return decode_belief(output, self.normalizer, obs_state, step)
 
 
+class MapBeliefUpdater:
+    """Belief updater for PreCompBHMapBeliefTransformer.
+
+    The model consumes a dense ``(2 + latent_dim, n_x, n_y)`` tensor:
+      * channel 0   : sparse observed RAW ore value (0 at unobserved cells)
+      * channel 1   : binary observation mask (1 = drilled)
+      * channels 2+ : pre-computed JEPA borehole latent (zeros at unobserved cells)
+
+    The full per-cell JEPA latent map is encoded once at construction (a single
+    batched pass over every borehole in the map) and reused across all update()
+    calls. This matches the training pipeline (MapPool.build_geo_train_maps).
+
+    This model has no uncertainty head, so the resulting BeliefState has
+    ``predicted_uncertainty_map=None`` and is incompatible with UncertaintyPolicy.
+    """
+
+    def __init__(
+        self,
+        model,
+        normalizer,
+        device: str,
+        env: HDF5DrillEnv,
+        resources,
+        map_pool: MapPool,
+    ) -> None:
+        self.model = model
+        self.normalizer = normalizer
+        self.device = device
+        self._env = env
+        model.eval()
+
+        # Standardise every borehole in the map, then JEPA-encode into a dense
+        # (n_x, n_y, latent_dim) latent map — identical to how the training
+        # dataset is built in MapPool.build_geo_train_maps.
+        bh_std = standardise(env._bh, env._norm_stats, env._variable_names)
+        bh_std = np.nan_to_num(bh_std, nan=0.0).astype(np.float32)
+        self._full_latent_map = map_pool.encode_full_latent_map(
+            bh_std, resources, device
+        )
+
+    def update(
+        self, obs_state: BoreholeObservationState, step: int | None = None
+    ) -> BeliefState:
+        # Scatter observed cells' RAW ore values, mask, and latents into the
+        # (2 + latent_dim, n_x, n_y) input. Inputs use raw ore values (training
+        # normalises only the target), and the model output is decoded back from
+        # normalised space by decode_belief.
+        x = MapPool.build_sample_input(
+            obs_state._positions,
+            obs_state.observed_ore_values,
+            self._full_latent_map,
+        )
+        x_t = torch.from_numpy(x).unsqueeze(0).to(self.device)
+
+        with torch.no_grad():
+            output = self.model(x_t)
+        return decode_belief(output, self.normalizer, obs_state, step)
+
+
 def make_updater(
     model_name: str,
     model,
     normalizer,
     device: str,
     env: HDF5DrillEnv,
-) -> CatVarUpdater | OreOnlyNullUpdater:
-    """Factory: return the correct updater class for the given model name."""
+    resources=None,
+    map_pool: MapPool | None = None,
+) -> CatVarUpdater | OreOnlyNullUpdater | MapBeliefUpdater:
+    """Factory: return the correct updater class for the given model name.
+
+    ``resources`` and ``map_pool`` are only required by the map_belief model,
+    which needs the JEPA encoder (from resources) to pre-compute borehole latents.
+    """
     if model_name == "cat_var":
         return CatVarUpdater(model, normalizer, device, env)
+    if model_name == "map_belief":
+        if resources is None or map_pool is None:
+            raise ValueError(
+                "make_updater('map_belief', ...) requires resources and map_pool."
+            )
+        return MapBeliefUpdater(model, normalizer, device, env, resources, map_pool)
     return OreOnlyNullUpdater(model, normalizer, device, env)

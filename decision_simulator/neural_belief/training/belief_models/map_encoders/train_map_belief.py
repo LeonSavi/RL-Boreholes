@@ -46,6 +46,30 @@ from ....models.belief_models.end_to_end.precomp_bh_map_belief_transformer impor
 from ..training_configs import MapBeliefTrainingConfig
 
 # ---------------------------------------------------------------------------
+# Validation wrapper
+# ---------------------------------------------------------------------------
+
+
+class _OreOnlyWrapper(nn.Module):
+    """Expose a single-tensor ``forward(x) -> ore_map`` for shared validation helpers.
+
+    ``PreCompBHMapBeliefTransformer.forward`` now returns
+    ``(ore_map, uncertainty_map)`` (mirroring CatVarEncoder), but the validation
+    utilities in ``training_utils`` expect ``model(x)`` to return just the
+    ``(B, 1, n_x, n_y)`` ore prediction. This thin wrapper drops the uncertainty
+    output. It shares parameters with the wrapped model (no copy), so it always
+    reflects the wrapped model's current weights.
+    """
+
+    def __init__(self, model: PreCompBHMapBeliefTransformer) -> None:
+        super().__init__()
+        self._model = model
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self._model(x)[0]
+
+
+# ---------------------------------------------------------------------------
 # Main training function
 # ---------------------------------------------------------------------------
 
@@ -116,6 +140,11 @@ def train_map_belief(
         model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay
     )
 
+    # Single-tensor view of the model for the shared validation helpers, which
+    # expect model(x) -> ore_map. Shares parameters with `model`, so it tracks
+    # weight updates (including the best-checkpoint reload below) automatically.
+    eval_model = _OreOnlyWrapper(model)
+
     if verbose:
         print(f"  model params  : {sum(p.numel() for p in model.parameters()):,}")
         print(f"  d_model       : {cfg.d_model}")
@@ -137,11 +166,23 @@ def train_map_belief(
         for x, y in train_loader:
             x, y = x.to(device), y.to(device)
 
-            pred = model(x)
-            loss = nn.functional.mse_loss(pred, y)  # MSE in normalised space
+            pred_ore, pred_uncertainty = model(x)
+            ore_loss = nn.functional.mse_loss(pred_ore, y)  # MSE in normalised space
+            loss = ore_loss
+
+            if cfg.use_uncertainty_head:
+                # Calibrate uncertainty to the ore head's absolute error, exactly
+                # as in CatVarEncoder training. Detach so the uncertainty target
+                # does not push gradients back through the ore head.
+                uncertainty_target = torch.abs(pred_ore.detach() - y)
+                uncertainty_loss = nn.functional.mse_loss(
+                    pred_uncertainty, uncertainty_target
+                )
+                loss = loss + cfg.uncertainty_weight * uncertainty_loss
+
             if cfg.use_false_positive_penalty:
                 loss = loss + cfg.false_positive_weight * false_positive_loss(
-                    pred, y, normalizer
+                    pred_ore, y, normalizer
                 )
 
             optimiser.zero_grad()
@@ -155,7 +196,7 @@ def train_map_belief(
             n_batches += 1
 
         train_mse_norm = train_loss_sum / n_batches
-        val_metrics = validate(model, val_loader, device, normalizer)
+        val_metrics = validate(eval_model, val_loader, device, normalizer)
 
         row = {"epoch": epoch, "train_mse_norm": train_mse_norm, **val_metrics}
         history.append(row)
@@ -227,7 +268,7 @@ def train_map_belief(
             from ..end_to_end.helpers import save_sequential_val_plots
 
             save_sequential_val_plots(
-                model,
+                eval_model,
                 val_ds,
                 normalizer,
                 plot_dir,
@@ -236,7 +277,7 @@ def train_map_belief(
             )
         else:
             save_val_plots(
-                model, val_ds, normalizer, plot_dir, device, n_plots=cfg.n_val_plots
+                eval_model, val_ds, normalizer, plot_dir, device, n_plots=cfg.n_val_plots
             )
 
     # ---- per-bin validation (best model) ----------------------------------------
@@ -249,7 +290,7 @@ def train_map_belief(
     model.load_state_dict(best_ckpt["state_dict"])
     model.eval()
 
-    bin_metrics = validate_by_drill_bins(model, val_ds, normalizer, device)
+    bin_metrics = validate_by_drill_bins(eval_model, val_ds, normalizer, device)
     if bin_metrics:
         if verbose:
             print("\nValidation metrics by drill count (best model, ore-value space):")
@@ -276,7 +317,7 @@ def train_map_belief(
     if cfg.use_sequential_dataset:
         from ..end_to_end.helpers import validate_by_step
 
-        step_metrics = validate_by_step(model, val_ds, normalizer, device)
+        step_metrics = validate_by_step(eval_model, val_ds, normalizer, device)
         if step_metrics:
             if verbose:
                 print("\nValidation metrics by step (best model, ore-value space):")
@@ -294,7 +335,7 @@ def train_map_belief(
 
     # ---- no-ore false-positive metrics -----------------------------------------
     no_ore_metrics = validate_no_ore(
-        model,
+        eval_model,
         val_loader,
         device,
         normalizer,
@@ -306,7 +347,7 @@ def train_map_belief(
         from ..end_to_end.helpers import validate_no_ore_by_step
 
         no_ore_step = validate_no_ore_by_step(
-            model,
+            eval_model,
             val_ds,
             normalizer,
             device,
