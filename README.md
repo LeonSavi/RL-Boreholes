@@ -5,6 +5,36 @@ observations. Built on NLOG (Dutch onshore + offshore wells) and LILY
 (global IODP ocean drilling). Intended use: an RL agent that picks
 where to drill next, given partial well-log observations.
 
+## Overview
+
+Choosing where to drill the next borehole is a sequential decision under
+uncertainty, and a learning agent needs a compact description of each borehole
+it observes. This project builds and validates that description: an encoder
+that maps one Dutch borehole, recorded as five wireline logs over depth, to a
+128-dimensional vector. The public Dutch archive holds only about 1,500 wells
+with usable logs, far too few to train a deep encoder directly without
+overfitting, so we fit a statistical simulator to the real wells and train the
+encoder on its output. The simulator has three components fitted independently
+from the real wells: a distribution bank of per-rock petrophysical statistics,
+a formation-geometry model of how rock layers stack with depth, and a discovery
+prior for where hydrocarbon accumulations are likely. A map generator combines
+them into three-dimensional volumes that yield unlimited synthetic boreholes.
+Validation against the real corpus shows close agreement: per-formation rock
+fractions match to a total-variation distance of about ten per cent, and
+marginal distributions to a median Kolmogorov–Smirnov distance of about 0.12. A
+self-supervised Joint-Embedding Predictive Architecture (JEPA) encoder groups
+synthetic boreholes by stratigraphic position, reaching silhouette scores of
+about +0.71 (rock type) and +0.52 (formation) over the central half of the
+column, modestly ahead of a reconstruction-autoencoder baseline. Although
+trained only on synthetic data, it transfers to Dutch wells it never saw, where
+a linear probe reads the dominant rock at about 0.75. The frozen encoder is the
+observation model for the downstream reinforcement-learning drilling agent.
+
+Code requires **Python 3.13**; install dependencies with
+`pip install -r requirements.txt` and run every script from the repo root.
+Reproducibility is controlled per script via `--seed` / `np.random.default_rng`
+(no `PYTHONHASHSEED` is set); `42` and `0` are the common defaults.
+
 ## Quick start
 
 Artifacts are already fitted in `data/clean/` and `checkpoints/`. To
@@ -79,20 +109,21 @@ reassigned, 609 k clay rows pass through, and ~213 k are dropped.
 The bank ends up with 9 fine rock classes (the coarse classes
 `claystone`, `sandstone`, `other` are eliminated).
 
-Plus three analysis scripts that produce thesis-grade plots and reports:
+Then three numbered analysis scripts (steps 6–8, run after their inputs exist)
+produce thesis-grade plots and reports:
 
 ```
-analysis_data.py             EDA on samples.parquet (data census, coverage, design justification)
-analysis_simulation.py       sim-vs-real comparison (uses saved maps if labels present)
-analysis_encoders.py         AE-vs-JEPA evaluation (silhouettes + reconstruction quality)
+6_analysis_data.py           EDA on samples.parquet (data census, coverage, design justification)
+7_analysis_simulation.py     sim-vs-real comparison (uses saved maps if labels present)
+8_analysis_encoders.py       AE-vs-JEPA evaluation (silhouettes + reconstruction quality)
 ```
 
 Outputs land in `plots/<area>/` as a markdown report plus PNGs + CSVs:
 
 ```
-plots/analysis/EDA_REPORT.md            <- analysis_data.py
-plots/simulation/SIMULATION_REPORT.md   <- analysis_simulation.py
-plots/encoders/analysis/ENCODER_REPORT.md  <- analysis_encoders.py
+plots/analysis/EDA_REPORT.md               <- 6_analysis_data.py
+plots/simulation/SIMULATION_REPORT.md      <- 7_analysis_simulation.py
+plots/encoders/analysis/ENCODER_REPORT.md  <- 8_analysis_encoders.py
 ```
 
 ## Pre-generated dataset
@@ -114,7 +145,7 @@ data/dataset/
 ```
 
 `5a_train_jepa.py` and `5b_train_encoder.py` consume `boreholes_*.npy`
-(labels aren't needed for training). `analysis_simulation.py` consumes
+(labels aren't needed for training). `7_analysis_simulation.py` consumes
 the labels to compare per-rock distributions sim-vs-real.
 
 The script is resume-aware: stopping and restarting picks up where it
@@ -246,15 +277,15 @@ python 1_scraper.py            # NLOG: scrape per-well JSON + LAS
 
 python 2_pull_data.py          # → data/clean/samples.parquet
 python 3_save_distributions.py # → the three .pkl files (~5 min)
-python analysis_data.py        # EDA report (optional but useful)
+python 6_analysis_data.py      # EDA report (optional but useful)
 
 python 4_pull_maps.py          # 10 000-map dataset (~2–3 h, 16 workers)
 
 python 5a_train_jepa.py        # JEPA encoder (~1–3 h with early stop)
 python 5b_train_encoder.py     # autoencoder (~1–3 h with early stop)
 
-python analysis_simulation.py  # sim-vs-real comparison
-python analysis_encoders.py    # AE-vs-JEPA evaluation
+python 7_analysis_simulation.py  # sim-vs-real comparison
+python 8_analysis_encoders.py    # AE-vs-JEPA evaluation
 ```
 
 All training entry points default to `--dataset-dir data/dataset`,

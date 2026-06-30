@@ -3,6 +3,13 @@ from __future__ import annotations
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+# thesis-legible default fonts (figures shrink to ~column width on the page)
+plt.rcParams.update({
+    "font.size": 14, "axes.titlesize": 17, "axes.labelsize": 14,
+    "xtick.labelsize": 12, "ytick.labelsize": 12, "legend.fontsize": 12,
+    "savefig.dpi": 400, "savefig.bbox": "tight",
+})
+
 import numpy as np
 import pandas as pd
 
@@ -65,13 +72,13 @@ def _overlay_hist(ax, series_by_label, xlim, xlabel, bins=55,
         c = (colour_map or {}).get(label, None)
         ax.hist(vals, bins=bins_arr, density=True, histtype="step",
                 linewidth=1.7, color=c, label=f"{label} (n={len(vals):,})")
-    ax.set_xlabel(xlabel, fontsize=9)
-    ax.set_ylabel("density", fontsize=9)
+    ax.set_xlabel(xlabel, fontsize=11)
+    ax.set_ylabel("density", fontsize=11)
     ax.set_xlim(xlim)
     if log_x:
         ax.set_xscale("log")
     ax.grid(alpha=0.25)
-    ax.legend(loc="upper right", fontsize=7, framealpha=0.9)
+    ax.legend(loc="upper right", fontsize=11, framealpha=0.9)
 
 
 def _pick_shared_rock_types(df: pd.DataFrame, measurement: str,
@@ -136,7 +143,7 @@ def plot_feature_coverage(df: pd.DataFrame, out_path: Path) -> None:
     fig.suptitle("Feature coverage — rows and wells per measurement",
                  fontweight="bold")
     fig.tight_layout(rect=[0, 0, 1, 0.96])
-    fig.savefig(out_path, dpi=140, bbox_inches="tight")
+    fig.savefig(out_path, dpi=400, bbox_inches="tight")
     plt.close(fig)
     print(f"  wrote {out_path}")
 
@@ -163,7 +170,7 @@ def plot_rock_type_coverage(df: pd.DataFrame, out_path: Path) -> None:
     ax.legend()
     ax.grid(alpha=0.25)
     fig.tight_layout()
-    fig.savefig(out_path, dpi=140, bbox_inches="tight")
+    fig.savefig(out_path, dpi=400, bbox_inches="tight")
     plt.close(fig)
     print(f"  wrote {out_path}")
 
@@ -190,9 +197,9 @@ def plot_depth_distribution(df: pd.DataFrame, out_path: Path) -> None:
         if nlog_min < lily_max:
             ax.axvspan(nlog_min, lily_max, alpha=0.15, color="purple",
                        label=f"overlap {nlog_min:.0f}-{lily_max:.0f} m")
-            ax.legend(loc="upper right", fontsize=8)
+            ax.legend(loc="upper right", fontsize=11)
     fig.tight_layout()
-    fig.savefig(out_path, dpi=140, bbox_inches="tight")
+    fig.savefig(out_path, dpi=400, bbox_inches="tight")
     plt.close(fig)
     print(f"  wrote {out_path}")
 
@@ -226,7 +233,7 @@ def plot_nlog_by_formation(df: pd.DataFrame, out_path: Path) -> None:
         ax.set_title(short, fontweight="bold", fontsize=11)
     fig.suptitle("NLOG — P(log | formation)", fontsize=14, fontweight="bold")
     fig.tight_layout(rect=[0, 0, 1, 0.97])
-    fig.savefig(out_path, dpi=140, bbox_inches="tight")
+    fig.savefig(out_path, dpi=400, bbox_inches="tight")
     plt.close(fig)
     print(f"  wrote {out_path}")
 
@@ -254,7 +261,7 @@ def plot_lily_by_lithology(df: pd.DataFrame, out_path: Path, top_n: int = 8) -> 
     fig.suptitle("LILY — P(measurement | rock type)",
                  fontsize=14, fontweight="bold")
     fig.tight_layout(rect=[0, 0, 1, 0.96])
-    fig.savefig(out_path, dpi=140, bbox_inches="tight")
+    fig.savefig(out_path, dpi=400, bbox_inches="tight")
     plt.close(fig)
     print(f"  wrote {out_path}")
 
@@ -287,13 +294,13 @@ def plot_per_feature_violin(df: pd.DataFrame, out_path: Path,
             pos += 1.0
         pos += 0.5
     ax.set_xticks(positions)
-    ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
+    ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=11)
     ax.set_ylabel(MEASUREMENT_LABELS.get(measurement, measurement))
     ax.set_title(f"{measurement} by rock type — LILY (blue) vs NLOG (red)",
                  fontweight="bold")
     ax.grid(alpha=0.25, axis="y")
     fig.tight_layout()
-    fig.savefig(out_path, dpi=140, bbox_inches="tight")
+    fig.savefig(out_path, dpi=400, bbox_inches="tight")
     plt.close(fig)
     print(f"  wrote {out_path}")
 
@@ -328,11 +335,11 @@ def plot_lily_vs_nlog_native(df: pd.DataFrame, out_path: Path) -> None:
             if i == 0: ax.set_title(rt, fontweight="bold")
             if i == 1: ax.set_xlabel(MEASUREMENT_LABELS[meas])
             if j == 0: ax.set_ylabel("density")
-            ax.legend(fontsize=7); ax.grid(alpha=0.25)
+            ax.legend(fontsize=11); ax.grid(alpha=0.25)
     fig.suptitle("LILY vs NLOG — shared rock types, all depths",
                  fontsize=13, fontweight="bold")
     fig.tight_layout(rect=[0, 0, 1, 0.94])
-    fig.savefig(out_path, dpi=140, bbox_inches="tight")
+    fig.savefig(out_path, dpi=400, bbox_inches="tight")
     plt.close(fig)
     print(f"  wrote {out_path}")
 
@@ -371,11 +378,11 @@ def plot_lily_vs_nlog_zscore(df: pd.DataFrame, out_path: Path) -> None:
         ax.set_title(rt, fontweight="bold")
         ax.set_xlabel("z-score within dataset")
         if j == 0: ax.set_ylabel("density")
-        ax.legend(fontsize=7); ax.grid(alpha=0.25)
+        ax.legend(fontsize=11); ax.grid(alpha=0.25)
     fig.suptitle("LILY NGR (cps) vs NLOG GR (API) — z-scored shape comparison",
                  fontsize=12, fontweight="bold")
     fig.tight_layout(rect=[0, 0, 1, 0.91])
-    fig.savefig(out_path, dpi=140, bbox_inches="tight")
+    fig.savefig(out_path, dpi=400, bbox_inches="tight")
     plt.close(fig)
     print(f"  wrote {out_path}")
 
@@ -417,11 +424,11 @@ def plot_compaction_trends(df: pd.DataFrame, out_path: Path) -> None:
             if i == 0: ax.set_title(rt, fontweight="bold")
             ax.set_xlabel(MEASUREMENT_LABELS[meas])
             if j == 0: ax.set_ylabel("depth (m)")
-            ax.invert_yaxis(); ax.grid(alpha=0.25); ax.legend(fontsize=7)
+            ax.invert_yaxis(); ax.grid(alpha=0.25); ax.legend(fontsize=11)
     fig.suptitle("Compaction trends — median (line) + IQR (band) per depth bin",
                  fontsize=13, fontweight="bold")
     fig.tight_layout(rect=[0, 0, 1, 0.95])
-    fig.savefig(out_path, dpi=140, bbox_inches="tight")
+    fig.savefig(out_path, dpi=400, bbox_inches="tight")
     plt.close(fig)
     print(f"  wrote {out_path}")
 
@@ -486,22 +493,22 @@ def plot_depth_matched_comparison(df: pd.DataFrame, out_path: Path) -> None:
                              f"L={sample_counts.get('LILY', 0)}\n"
                              f"N={sample_counts.get('NLOG', 0)}",
                              transform=ax.transAxes, ha="center", va="center",
-                             fontsize=7, color="grey")
+                             fontsize=11, color="grey")
                 else:
                     ax.text(0.97, 0.95,
                             f"L={sample_counts['LILY']}\nN={sample_counts['NLOG']}",
                             transform=ax.transAxes, ha="right", va="top",
-                            fontsize=6)
+                            fontsize=11)
                 ax.set_xlim(xlim)
                 ax.set_xticks([])
                 ax.set_yticks([])
                 if ri == 0 and mi == 0:
-                    ax.set_title(dbin, fontsize=9, fontweight="bold")
+                    ax.set_title(dbin, fontsize=11, fontweight="bold")
                 if ci == 0:
                     meas_short = "RHOB" if meas == "rhob" else "DT"
                     ax.set_ylabel(f"{rt}\n{meas_short}",
                                    rotation=0, labelpad=30,
-                                   fontsize=8, fontweight="bold",
+                                   fontsize=11, fontweight="bold",
                                    va="center", ha="right")
             # restore x-ticks on the bottom row of each measurement-block
             if ri == n_rt - 1:
@@ -517,14 +524,14 @@ def plot_depth_matched_comparison(df: pd.DataFrame, out_path: Path) -> None:
         Line2D([0], [0], color=DATASET_COLOURS["NLOG"], linewidth=2, label="NLOG"),
     ]
     fig.legend(handles=legend_handles, loc="upper right",
-               bbox_to_anchor=(0.99, 0.995), fontsize=9)
+               bbox_to_anchor=(0.99, 0.995), fontsize=11)
 
     fig.suptitle("LILY vs NLOG — matched rock type × depth bin\n"
                  f"top block: RHOB (g/cc)     bottom block: DT (µs/ft)\n"
                  "L / N = LILY / NLOG sample counts per panel",
                  fontsize=12, fontweight="bold")
     fig.tight_layout(rect=[0.03, 0, 1, 0.94])
-    fig.savefig(out_path, dpi=140, bbox_inches="tight")
+    fig.savefig(out_path, dpi=400, bbox_inches="tight")
     plt.close(fig)
     print(f"  wrote {out_path}")
 
@@ -581,25 +588,25 @@ def plot_depth_matched_gamma(df: pd.DataFrame, out_path: Path) -> None:
                         linewidth=1.4, color=DATASET_COLOURS["NLOG"])
                 ax.axvline(0, color="grey", linewidth=0.3)
                 ax.text(0.97, 0.95, f"L={len(lv)}\nN={len(nv)}",
-                        transform=ax.transAxes, ha="right", va="top", fontsize=6)
+                        transform=ax.transAxes, ha="right", va="top", fontsize=11)
             else:
                 ax.set_facecolor("#f5f5f5")
                 ax.text(0.5, 0.5, f"L={len(lv)}\nN={len(nv)}",
                         transform=ax.transAxes, ha="center", va="center",
-                        fontsize=7, color="grey")
+                        fontsize=11, color="grey")
             ax.set_xticks([])
             ax.set_yticks([])
             if ri == 0:
-                ax.set_title(dbin, fontsize=9, fontweight="bold")
+                ax.set_title(dbin, fontsize=11, fontweight="bold")
             if ci == 0:
                 ax.set_ylabel(rt, rotation=0, labelpad=30,
-                              fontsize=9, fontweight="bold",
+                              fontsize=11, fontweight="bold",
                               va="center", ha="right")
         if ri == n_rt - 1:
             for ci in range(n_bins):
                 axes[ri, ci].set_xticks([-2, 0, 2, 4])
                 axes[ri, ci].tick_params(labelsize=7)
-                axes[ri, ci].set_xlabel("z-score", fontsize=7)
+                axes[ri, ci].set_xlabel("z-score", fontsize=11)
 
     from matplotlib.lines import Line2D
     legend_handles = [
@@ -607,13 +614,13 @@ def plot_depth_matched_gamma(df: pd.DataFrame, out_path: Path) -> None:
         Line2D([0], [0], color=DATASET_COLOURS["NLOG"], linewidth=2, label="NLOG GR"),
     ]
     fig.legend(handles=legend_handles, loc="upper right",
-               bbox_to_anchor=(0.99, 0.99), fontsize=9)
+               bbox_to_anchor=(0.99, 0.99), fontsize=11)
 
     fig.suptitle("Gamma — matched rock type × depth bin, z-scored within dataset\n"
                  "L / N = LILY / NLOG sample counts per panel",
                  fontsize=12, fontweight="bold")
     fig.tight_layout(rect=[0.03, 0, 1, 0.92])
-    fig.savefig(out_path, dpi=140, bbox_inches="tight")
+    fig.savefig(out_path, dpi=400, bbox_inches="tight")
     plt.close(fig)
     print(f"  wrote {out_path}")
 
@@ -649,11 +656,11 @@ def plot_gardner(df: pd.DataFrame, out_path: Path) -> None:
     axes[0].set_ylabel("RHOB (g/cc)"); axes[4].set_ylabel("RHOB (g/cc)")
     for ax in axes[-4:]:
         ax.set_xlabel("Vp (m/s)")
-    axes[0].legend(loc="lower right", fontsize=8)
+    axes[0].legend(loc="lower right", fontsize=11)
     fig.suptitle("Gardner's relation sanity check — RHOB vs Vp per formation",
                  fontweight="bold")
     fig.tight_layout(rect=[0, 0, 1, 0.95])
-    fig.savefig(out_path, dpi=140, bbox_inches="tight")
+    fig.savefig(out_path, dpi=400, bbox_inches="tight")
     plt.close(fig)
     print(f"  wrote {out_path}")
 
@@ -683,10 +690,10 @@ def plot_rhob_vs_gr(df: pd.DataFrame, out_path: Path) -> None:
     ax.set_xlabel("GR (API)"); ax.set_ylabel("RHOB (g/cc)")
     ax.set_xlim(0, 200); ax.set_ylim(1.5, 3.2)
     ax.set_title("GR vs RHOB — NLOG by formation", fontweight="bold")
-    ax.legend(markerscale=4, fontsize=9, loc="upper right")
+    ax.legend(markerscale=4, fontsize=11, loc="upper right")
     ax.grid(alpha=0.25)
     fig.tight_layout()
-    fig.savefig(out_path, dpi=140, bbox_inches="tight")
+    fig.savefig(out_path, dpi=400, bbox_inches="tight")
     plt.close(fig)
     print(f"  wrote {out_path}")
 
@@ -719,7 +726,7 @@ def plot_resistivity_vs_porosity(df: pd.DataFrame, out_path: Path) -> None:
     fig.suptitle("Resistivity vs porosity — NLOG by formation",
                  fontweight="bold")
     fig.tight_layout(rect=[0, 0, 1, 0.95])
-    fig.savefig(out_path, dpi=140, bbox_inches="tight")
+    fig.savefig(out_path, dpi=400, bbox_inches="tight")
     plt.close(fig)
     print(f"  wrote {out_path}")
 
@@ -805,10 +812,10 @@ def plot_joint_support_by_rock_fine(df: pd.DataFrame, out_path: Path,
         ax.axvline(p95, color="black", linestyle=":", linewidth=0.9)
         ax.set_title(f"{rt}", fontweight="bold")
         ax.set_xlabel(MEASUREMENT_LABELS.get(measurement, measurement),
-                      fontsize=9)
+                      fontsize=11)
         if i % n_cols == 0:
-            ax.set_ylabel("density", fontsize=9)
-        ax.legend(fontsize=7, loc="upper right")
+            ax.set_ylabel("density", fontsize=11)
+        ax.legend(fontsize=11, loc="upper right")
         ax.grid(alpha=0.25)
 
     # hide unused cells
@@ -820,7 +827,7 @@ def plot_joint_support_by_rock_fine(df: pd.DataFrame, out_path: Path,
                  "dashed verticals = P5 / P95 of the combined support",
                  fontsize=12, fontweight="bold")
     fig.tight_layout(rect=[0, 0, 1, 0.94])
-    fig.savefig(out_path, dpi=140, bbox_inches="tight")
+    fig.savefig(out_path, dpi=400, bbox_inches="tight")
     plt.close(fig)
     print(f"  wrote {out_path}")
 
@@ -871,9 +878,9 @@ def plot_fine_vs_coarse_distributions(df: pd.DataFrame, out_path: Path,
         ax_l.set_title(f"{formation} — coarse label ({coarse_label})",
                         fontsize=10, fontweight="bold")
         ax_l.set_xlabel(MEASUREMENT_LABELS.get(measurement, measurement),
-                         fontsize=9)
+                         fontsize=11)
         ax_l.set_ylabel("density"); ax_l.grid(alpha=0.25)
-        ax_l.legend(fontsize=8)
+        ax_l.legend(fontsize=11)
 
         # right panel: fine (multiple overlays)
         ax_r = axes[i][1]
@@ -892,15 +899,15 @@ def plot_fine_vs_coarse_distributions(df: pd.DataFrame, out_path: Path,
         ax_r.set_title(f"{formation} — fine split (by strat_unit)",
                         fontsize=10, fontweight="bold")
         ax_r.set_xlabel(MEASUREMENT_LABELS.get(measurement, measurement),
-                         fontsize=9)
+                         fontsize=11)
         ax_r.grid(alpha=0.25)
-        ax_r.legend(fontsize=8)
+        ax_r.legend(fontsize=11)
 
     fig.suptitle(f"Fine rock-type split within formation — {measurement}\n"
                  "left: coarse single-label distribution     right: split by stratUnitId sub-member",
-                 fontsize=12, fontweight="bold")
+                 fontsize=18, fontweight="bold")
     fig.tight_layout(rect=[0, 0, 1, 0.96])
-    fig.savefig(out_path, dpi=140, bbox_inches="tight")
+    fig.savefig(out_path, dpi=400, bbox_inches="tight")
     plt.close(fig)
     print(f"  wrote {out_path}")
 
@@ -965,14 +972,14 @@ def plot_nonlinear_compaction_fit(df: pd.DataFrame, out_path: Path,
 
         ax.set_title(rt, fontweight="bold")
         ax.set_xlabel(MEASUREMENT_LABELS.get(measurement, measurement),
-                       fontsize=9)
+                       fontsize=11)
         if i % n_cols == 0:
-            ax.set_ylabel("depth (m)", fontsize=9)
+            ax.set_ylabel("depth (m)", fontsize=11)
         ax.set_xlim(ylim); ax.set_ylim(5, 5000)
         ax.set_yscale("log")
         ax.invert_yaxis()
         ax.grid(alpha=0.25, which="both")
-        ax.legend(fontsize=7, loc="lower right" if measurement == "rhob" else "upper right")
+        ax.legend(fontsize=11, loc="lower right" if measurement == "rhob" else "upper right")
 
     for j in range(len(rts), n_rows * n_cols):
         axes[j // n_cols][j % n_cols].axis("off")
@@ -980,7 +987,7 @@ def plot_nonlinear_compaction_fit(df: pd.DataFrame, out_path: Path,
     fig.suptitle(f"Non-linear {measurement}–depth relation revealed by pooling LILY + NLOG\n",
                  fontsize=12, fontweight="bold")
     fig.tight_layout(rect=[0, 0, 1, 0.95])
-    fig.savefig(out_path, dpi=140, bbox_inches="tight")
+    fig.savefig(out_path, dpi=400, bbox_inches="tight")
     plt.close(fig)
     print(f"  wrote {out_path}")
 
@@ -1030,7 +1037,7 @@ def plot_depth_hexbin_by_rock_fine(df: pd.DataFrame, out_path: Path,
     fig.suptitle(f"{measurement} × depth density per fine rock type (hexbin)",
                  fontsize=12, fontweight="bold")
     fig.tight_layout(rect=[0, 0, 1, 0.96])
-    fig.savefig(out_path, dpi=140, bbox_inches="tight")
+    fig.savefig(out_path, dpi=400, bbox_inches="tight")
     plt.close(fig)
     print(f"  wrote {out_path}")
 
@@ -1082,11 +1089,11 @@ def plot_support_bounds_matrix(df: pd.DataFrame, out_path: Path) -> None:
             txt = f"{v:.2f}" if not np.isnan(v) else "-"
             if mat_lily_expands[i, j]:
                 txt = "★" + txt
-            ax.text(j, i, txt, ha="center", va="center", fontsize=8,
+            ax.text(j, i, txt, ha="center", va="center", fontsize=11,
                     color="white" if v and v > np.nanmean(mat_range) else "black")
     fig.colorbar(im, ax=ax, label="support width (P95-P5)")
     fig.tight_layout()
-    fig.savefig(out_path, dpi=140, bbox_inches="tight")
+    fig.savefig(out_path, dpi=400, bbox_inches="tight")
     plt.close(fig)
     print(f"  wrote {out_path}")
 
@@ -1128,10 +1135,10 @@ def plot_onshore_vs_offshore(df: pd.DataFrame, out_path: Path,
                     linewidth=1.8, color=loc_colours[loc],
                     label=f"{loc} (n={len(vals):,})")
         ax.set_title(rt, fontweight="bold")
-        ax.set_xlabel(MEASUREMENT_LABELS.get(measurement, measurement), fontsize=9)
+        ax.set_xlabel(MEASUREMENT_LABELS.get(measurement, measurement), fontsize=11)
         if i % n_cols == 0:
-            ax.set_ylabel("density", fontsize=9)
-        ax.legend(fontsize=7)
+            ax.set_ylabel("density", fontsize=11)
+        ax.legend(fontsize=11)
         ax.grid(alpha=0.25)
 
     for j in range(len(rts), n_rows * n_cols):
@@ -1140,7 +1147,7 @@ def plot_onshore_vs_offshore(df: pd.DataFrame, out_path: Path,
     fig.suptitle(f"Onshore vs offshore — NLOG {measurement} per rock_type_fine",
                  fontsize=12, fontweight="bold")
     fig.tight_layout(rect=[0, 0, 1, 0.95])
-    fig.savefig(out_path, dpi=140, bbox_inches="tight")
+    fig.savefig(out_path, dpi=400, bbox_inches="tight")
     plt.close(fig)
     print(f"  wrote {out_path}")
 
@@ -1189,7 +1196,7 @@ def plot_nphi_by_rock_fine(df: pd.DataFrame, out_path: Path) -> None:
     ax1.set_ylabel("density")
     ax1.set_title("NPHI distributions per rock_type_fine (NLOG)",
                    fontweight="bold")
-    ax1.legend(fontsize=8, loc="upper right")
+    ax1.legend(fontsize=11, loc="upper right")
     ax1.grid(alpha=0.25)
 
     # panel 2 — NPHI vs depth hexbin for top 4 rock types combined
@@ -1229,21 +1236,21 @@ def plot_nphi_by_rock_fine(df: pd.DataFrame, out_path: Path) -> None:
         # reference lines — classic fluid-substitution indicators
         ax3.axhline(2.65, color="grey", linewidth=0.4, linestyle="--")
         ax3.axhline(2.95, color="grey", linewidth=0.4, linestyle="--")
-        ax3.text(0.55, 2.66, "quartz (2.65)", fontsize=7, color="grey")
-        ax3.text(0.55, 2.96, "anhydrite (2.95)", fontsize=7, color="grey")
+        ax3.text(0.55, 2.66, "quartz (2.65)", fontsize=11, color="grey")
+        ax3.text(0.55, 2.96, "anhydrite (2.95)", fontsize=11, color="grey")
     ax3.set_xlim(xlim); ax3.set_ylim(1.5, 3.2)
     ax3.invert_yaxis()
     ax3.set_xlabel(MEASUREMENT_LABELS["nphi"])
     ax3.set_ylabel(MEASUREMENT_LABELS["rhob"])
     ax3.set_title("NPHI × RHOB crossplot (NLOG) — lithology discriminator",
                    fontweight="bold")
-    ax3.legend(markerscale=4, fontsize=8, loc="lower right")
+    ax3.legend(markerscale=4, fontsize=11, loc="lower right")
     ax3.grid(alpha=0.25)
 
     fig.suptitle("NPHI diagnostic plots (NLOG wireline)",
                  fontsize=13, fontweight="bold")
     fig.tight_layout(rect=[0, 0, 1, 0.96])
-    fig.savefig(out_path, dpi=140, bbox_inches="tight")
+    fig.savefig(out_path, dpi=400, bbox_inches="tight")
     plt.close(fig)
     print(f"  wrote {out_path}")
 
@@ -1288,7 +1295,7 @@ def plot_msus_by_rock_type_lily(df: pd.DataFrame, out_path: Path) -> None:
     ax1.set_xlim(xlim)
     ax1.set_title("Magnetic susceptibility per LILY rock_type_fine",
                    fontweight="bold")
-    ax1.legend(fontsize=8, loc="upper left")
+    ax1.legend(fontsize=11, loc="upper left")
     ax1.grid(alpha=0.25, which="both")
 
     # panel 2 — susceptibility vs depth, coloured by rock type
@@ -1310,13 +1317,13 @@ def plot_msus_by_rock_type_lily(df: pd.DataFrame, out_path: Path) -> None:
     ax2.set_ylabel("depth (m)")
     ax2.set_title("Susceptibility × depth",
                    fontweight="bold")
-    ax2.legend(markerscale=1.5, fontsize=8, loc="lower right")
+    ax2.legend(markerscale=1.5, fontsize=11, loc="lower right")
     ax2.grid(alpha=0.25, which="both")
 
     fig.suptitle("Magnetic susceptibility — LILY-only measurement",
                  fontsize=13, fontweight="bold")
     fig.tight_layout(rect=[0, 0, 1, 0.95])
-    fig.savefig(out_path, dpi=140, bbox_inches="tight")
+    fig.savefig(out_path, dpi=400, bbox_inches="tight")
     plt.close(fig)
     print(f"  wrote {out_path}")
 
@@ -1338,7 +1345,7 @@ def plot_nlog_well_map(df: pd.DataFrame, out_path: Path,
         print(f"  skip {out_path.name} — no NLOG coords")
         return
 
-    fig, ax = plt.subplots(figsize=(8, 9))
+    fig, ax = plt.subplots(figsize=(6.2, 6.6))
 
     basin_labels = None
     if geometry_pkl is not None and Path(geometry_pkl).exists():
@@ -1357,8 +1364,8 @@ def plot_nlog_well_map(df: pd.DataFrame, out_path: Path,
         for lab in labels:
             sub = n[basin_labels == lab]
             ax.scatter(sub["x_rd"] / 1000, sub["y_rd"] / 1000,
-                       s=14, alpha=0.75, color=cmap(lab % 10),
-                       edgecolor="black", linewidth=0.2,
+                       s=44, alpha=0.8, color=cmap(lab % 10),
+                       edgecolor="black", linewidth=0.35,
                        label=f"basin {lab}  (n={len(sub)})")
         title_tail = f"by k-means basin (k={len(labels)})"
     else:
@@ -1366,26 +1373,27 @@ def plot_nlog_well_map(df: pd.DataFrame, out_path: Path,
             sub = n[n["location_type"] == lt]
             if len(sub):
                 ax.scatter(sub["x_rd"] / 1000, sub["y_rd"] / 1000,
-                           s=14, alpha=0.75, color=col,
-                           edgecolor="black", linewidth=0.2,
+                           s=44, alpha=0.8, color=col,
+                           edgecolor="black", linewidth=0.35,
                            label=f"{lt}  (n={len(sub)})")
         unset = n[n["location_type"].isna()]
         if len(unset):
             ax.scatter(unset["x_rd"] / 1000, unset["y_rd"] / 1000,
-                       s=14, alpha=0.55, color="#999999",
-                       edgecolor="black", linewidth=0.2,
+                       s=44, alpha=0.6, color="#999999",
+                       edgecolor="black", linewidth=0.35,
                        label=f"unset  (n={len(unset)})")
         title_tail = "by location type"
 
-    ax.set_xlabel("x_RD (km)")
-    ax.set_ylabel("y_RD (km)")
-    ax.set_title(f"NLOG well locations — {len(n):,} wells, {title_tail}",
-                 fontweight="bold")
+    ax.set_xlabel("x_RD (km)", fontsize=17)
+    ax.set_ylabel("y_RD (km)", fontsize=17)
+    ax.set_title(f"NLOG well locations — {len(n):,} wells\n{title_tail}",
+                 fontweight="bold", fontsize=17)
     ax.set_aspect("equal", adjustable="datalim")
+    ax.tick_params(labelsize=14)
     ax.grid(alpha=0.25)
-    ax.legend(fontsize=8, loc="best")
+    ax.legend(fontsize=15, loc="best", markerscale=1.6, framealpha=0.9)
     fig.tight_layout()
-    fig.savefig(out_path, dpi=140, bbox_inches="tight")
+    fig.savefig(out_path, dpi=400, bbox_inches="tight")
     plt.close(fig)
     print(f"  wrote {out_path}")
 
@@ -1436,7 +1444,7 @@ def plot_lily_expeditions(df: pd.DataFrame, out_path: Path) -> None:
                  f"{len(agg)} IODP expeditions",
                  fontweight="bold")
     fig.tight_layout(rect=[0, 0, 1, 0.95])
-    fig.savefig(out_path, dpi=140, bbox_inches="tight")
+    fig.savefig(out_path, dpi=400, bbox_inches="tight")
     plt.close(fig)
     print(f"  wrote {out_path}")
 
@@ -1475,13 +1483,13 @@ def plot_variable_availability(df: pd.DataFrame, out_path: Path,
                 label=f"{ds}  ({len(sub)} wells)")
         for j, p in enumerate(pct):
             ax1.text(bar_x[j] + (i - 0.5) * width, p + 1.5, f"{p:.0f}%",
-                     ha="center", fontsize=8)
+                     ha="center", fontsize=11)
     ax1.set_xticks(bar_x)
     ax1.set_xticklabels(target, rotation=30, ha="right")
     ax1.set_ylabel("wells with variable (%)")
     ax1.set_ylim(0, 110)
     ax1.set_title("Per-well variable availability", fontweight="bold")
-    ax1.legend(fontsize=9)
+    ax1.legend(fontsize=11)
     ax1.grid(alpha=0.25, axis="y")
     ax1.axhline(50, color="grey", lw=0.7, ls=":")
     ax1.axhline(10, color="red", lw=0.7, ls=":")
@@ -1493,7 +1501,7 @@ def plot_variable_availability(df: pd.DataFrame, out_path: Path,
     ax2.bar(ks, pcts, color="#b2182b", alpha=0.8,
             edgecolor="black", linewidth=0.3)
     for k, p in zip(ks, pcts):
-        ax2.text(k, p + 1.5, f"{p:.0f}%", ha="center", fontsize=8)
+        ax2.text(k, p + 1.5, f"{p:.0f}%", ha="center", fontsize=11)
     ax2.set_xticks(ks)
     ax2.set_xlabel("≥ k target variables")
     ax2.set_ylabel("NLOG wells (%)")
@@ -1503,8 +1511,8 @@ def plot_variable_availability(df: pd.DataFrame, out_path: Path,
     ax2.grid(alpha=0.25, axis="y")
 
     fig.suptitle("Variable availability — justifies dropping PEF (in only ~6% of NLOG wells)",
-                 fontsize=12)
+                 fontsize=18)
     fig.tight_layout(rect=[0, 0, 1, 0.95])
-    fig.savefig(out_path, dpi=140, bbox_inches="tight")
+    fig.savefig(out_path, dpi=400, bbox_inches="tight")
     plt.close(fig)
     print(f"  wrote {out_path}")

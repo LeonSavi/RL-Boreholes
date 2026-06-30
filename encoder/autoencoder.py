@@ -35,6 +35,10 @@ class AEConfig:
     # so the encoder learns to produce consistent embeddings even when only
     # a subset is observed.  This is the bridge to Task 2's POMDP setting.
     mask_prob: float = 0.3
+    # when True the input carries a 6th normalised-depth channel (matching the
+    # JEPA encoder), so n_variables already includes it.  Eval code appends the
+    # depth row by reading this flag off the saved config.
+    include_depth: bool = False
 
 
 class BoreholeEncoder(nn.Module):

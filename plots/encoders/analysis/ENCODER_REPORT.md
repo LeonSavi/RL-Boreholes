@@ -33,10 +33,10 @@ Per-label-set silhouette:
 
 | label set | AE | JEPA | AE_formation | JEPA_formation |
 |---|---|---|---|---|
-| formation (deepest) | +0.051 | +0.030 | +0.078 | -0.085 |
-| formation (middle 50%) | +0.477 | +0.495 | +0.471 | +0.393 |
-| rock (bottom 25%) | +0.070 | +0.018 | +0.094 | -0.144 |
-| rock (middle 50%) | +0.616 | +0.629 | +0.570 | +0.454 |
+| formation (deepest) | +0.020 | -0.030 | +0.063 | -0.080 |
+| formation (middle 50%) | +0.497 | +0.544 | +0.476 | +0.375 |
+| rock (bottom 25%) | +0.027 | +0.012 | +0.091 | -0.068 |
+| rock (middle 50%) | +0.627 | +0.703 | +0.574 | +0.579 |
 
 ## 3. Autoencoder reconstruction quality
 
@@ -46,11 +46,11 @@ Per-label-set silhouette:
 
 | variable | R² | SmoothL1 | n cells |
 |---|---|---|---|
-| rhob | 0.402 | 0.2570 | 1,320,000 |
-| gr_api | 0.190 | 0.4518 | 1,320,000 |
-| dt_us_ft | 0.488 | 0.1425 | 1,320,000 |
-| nphi | 0.453 | 0.2624 | 1,320,000 |
-| res_deep_log | 0.247 | 0.3246 | 1,320,000 |
+| rhob | 0.461 | 0.2389 | 1,320,000 |
+| gr_api | 0.385 | 0.3223 | 1,320,000 |
+| dt_us_ft | 0.546 | 0.1558 | 1,320,000 |
+| nphi | 0.535 | 0.2091 | 1,320,000 |
+| res_deep_log | 0.465 | 0.2329 | 1,320,000 |
 
 ### AE_formation
 
@@ -58,11 +58,11 @@ Per-label-set silhouette:
 
 | variable | R² | SmoothL1 | n cells |
 |---|---|---|---|
-| rhob | 0.385 | 0.3319 | 1,320,000 |
-| gr_api | 0.009 | 0.4949 | 1,320,000 |
-| dt_us_ft | 0.438 | 0.1987 | 1,320,000 |
-| nphi | 0.320 | 0.3352 | 1,320,000 |
-| res_deep_log | 0.135 | 0.3979 | 1,320,000 |
+| rhob | 0.391 | 0.3238 | 1,320,000 |
+| gr_api | -0.005 | 0.5014 | 1,320,000 |
+| dt_us_ft | 0.465 | 0.1917 | 1,320,000 |
+| nphi | 0.304 | 0.3362 | 1,320,000 |
+| res_deep_log | 0.102 | 0.3999 | 1,320,000 |
 
 R² ≈ 1 and SmoothL1 ≪ 1 indicate the autoencoder can reconstruct each channel from the latent. Drops on a specific variable point to information loss in the bottleneck.
 

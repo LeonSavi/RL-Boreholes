@@ -256,7 +256,8 @@ def write_eda_report(df: pd.DataFrame,
                      fine_vs_coarse: pd.DataFrame,
                      depth_matched: pd.DataFrame,
                      support: pd.DataFrame,
-                     out_path: Path) -> None:
+                     out_path: Path,
+                     has_lily: bool = False) -> None:
     """Markdown report aggregating headline numbers and design decisions."""
     L = []
     add = L.append
@@ -276,19 +277,19 @@ def write_eda_report(df: pd.DataFrame,
     add(f"- **{n_total:,}** rows total · **{n_wells:,}** unique wells")
     add(f"- **NLOG**: {n_nlog:,} wells "
         f"(Dutch onshore + Dutch sector of the North Sea)")
-    add(f"- **LILY**: {n_lily:,} wells "
-        "(IODP scientific drilling, global)")
+    if has_lily:
+        add(f"- **LILY**: {n_lily:,} wells "
+            "(IODP scientific drilling, global)")
     add("")
     add("![Coverage matrix](01_data_census.png)")
     add("")
-    add("**Figure 1** combines (a) total samples per measurement per "
-        "dataset, (b) row counts per rock-type label, and (c) the depth "
-        "histogram for each corpus.  LILY skews shallow (ocean-floor "
-        "cores, < 1 km below seafloor) and NLOG covers depth ~0-6 km.")
+    add("**Figure 1** combines (a) total samples per measurement, (b) row "
+        "counts per rock-type label, and (c) the depth histogram of the "
+        "corpus (NLOG covers depth ~0-6 km).")
     add("")
     add("![Depth distribution](02_depth_distribution.png)")
     add("")
-    add("**Figure 2** — LILY and NLOG depth histograms side by side.")
+    add("**Figure 2** — NLOG depth histogram.")
     add("")
     add("## 2. Geographic coverage")
     add("")
@@ -300,14 +301,15 @@ def write_eda_report(df: pd.DataFrame,
         "doesn't over-sample whichever region has the most logged "
         "wells.")
     add("")
-    add("![LILY expeditions](06_lily_expeditions.png)")
-    add("")
-    add("**Figure 6** — LILY samples and wells broken down by IODP "
-        "expedition number.  Expeditions are coherent regional sets "
-        "(318 = Wilkes Land, 329 = South Pacific Gyre, 336 = North "
-        "Atlantic, etc.) and stand in for a regional split since LILY "
-        "lacks RD coordinates.")
-    add("")
+    if has_lily:
+        add("![LILY expeditions](06_lily_expeditions.png)")
+        add("")
+        add("**Figure 6** — LILY samples and wells broken down by IODP "
+            "expedition number.  Expeditions are coherent regional sets "
+            "(318 = Wilkes Land, 329 = South Pacific Gyre, 336 = North "
+            "Atlantic, etc.) and stand in for a regional split since LILY "
+            "lacks RD coordinates.")
+        add("")
     add("## 3. Lithology")
     add("")
     add("![Rock-type coverage](04_rock_type_coverage.png)")
@@ -370,11 +372,11 @@ def write_eda_report(df: pd.DataFrame,
         f"`{list(FINAL_VARS)}` is what the simulator generates and the "
         "encoder consumes.")
     add("")
-    add("### 5.2 LILY ⊕ NLOG pooling")
-    add("")
-    add("![LILY vs NLOG depth-matched](12_lily_vs_nlog_calibration.png)")
-    add("")
-    if len(depth_matched):
+    if has_lily and len(depth_matched):
+        add("### 5.2 LILY ⊕ NLOG pooling")
+        add("")
+        add("![LILY vs NLOG depth-matched](12_lily_vs_nlog_calibration.png)")
+        add("")
         n_disagree = (depth_matched["disagreement_flag"] == "YES").sum()
         add(f"- {len(depth_matched)} (rock × measurement × depth-bin) "
             f"cells have both corpora; **{n_disagree}** flag as "
@@ -384,7 +386,7 @@ def write_eda_report(df: pd.DataFrame,
             "would bias absolute values where the two disagree.  The "
             "simulator therefore samples from rock-stratified pools, "
             "not the marginal.")
-    add("")
+        add("")
     add("### 5.3 Empirical clipping bounds")
     add("")
     add("![Support bounds](11_support_bounds.png)")
@@ -432,6 +434,15 @@ def main() -> None:
     print(f"  {len(df):,} rows · {df['borehole'].nunique()} wells · "
           f"{df['measurement'].nunique()} measurements")
 
+    # LILY (IODP ocean cores) is pulled for EDA cross-checks only; it is not
+    # used to fit any simulator component (FormationGeometry filters to NLOG,
+    # and the bank/prior drop LILY for want of Dutch formation labels and hc
+    # flags). Restrict the whole analysis to NLOG so every figure and table is
+    # NLOG-only.
+    df = df[df["dataset"] == "NLOG"].copy()
+    has_lily = bool((df["dataset"] == "LILY").any())
+    print(f"  NLOG-only: {len(df):,} rows · {df['borehole'].nunique()} wells")
+
     # ── tables ─────────────────────────────────────────────────────────
     print("\n[1/3] tables ...")
     coverage = table_coverage_matrix(df)
@@ -446,7 +457,8 @@ def main() -> None:
     compaction.to_csv(args.out / "compaction_trends.csv", index=False)
     print(f"  wrote compaction_trends.csv  ({len(compaction)} rows)")
 
-    depth_matched = table_depth_matched_summary(df)
+    depth_matched = (table_depth_matched_summary(df) if has_lily
+                     else pd.DataFrame())
     depth_matched.to_csv(args.out / "depth_matched_summary.csv", index=False)
     print(f"  wrote depth_matched_summary.csv  ({len(depth_matched)} rows)")
 
@@ -472,7 +484,8 @@ def main() -> None:
                               geometry_pkl=args.geometry)
     plots.plot_rock_type_coverage(df,      p / "04_rock_type_coverage.png")
     plots.plot_nlog_by_formation(df,       p / "05_nlog_formation_breakdown.png")
-    plots.plot_lily_expeditions(df,        p / "06_lily_expeditions.png")
+    if has_lily:
+        plots.plot_lily_expeditions(df,    p / "06_lily_expeditions.png")
     plots.plot_per_feature_violin(df,      p / "07_violin_rhob.png", "rhob")
     plots.plot_compaction_trends(df,       p / "08_compaction_trends.png")
     if "rock_type_fine" in df.columns:
@@ -482,13 +495,14 @@ def main() -> None:
                                       target_vars=TARGET_VARS)
     if "rock_type_fine" in df.columns:
         plots.plot_support_bounds_matrix(df, p / "11_support_bounds.png")
-    plots.plot_depth_matched_comparison(df,
-                                         p / "12_lily_vs_nlog_calibration.png")
+    if has_lily:
+        plots.plot_depth_matched_comparison(df,
+                                             p / "12_lily_vs_nlog_calibration.png")
 
     # ── report ─────────────────────────────────────────────────────────
     print("\n[3/3] EDA_REPORT.md ...")
     write_eda_report(df, coverage, fine_vs_coarse, depth_matched,
-                      support, p / "EDA_REPORT.md")
+                      support, p / "EDA_REPORT.md", has_lily=has_lily)
 
     print(f"\n→ done. outputs in {args.out}/")
 

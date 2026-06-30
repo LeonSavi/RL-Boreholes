@@ -458,6 +458,7 @@ def train(
     profile: bool = False,
     dataset_dir: Path | None = None,
     min_maps_warmup: int | None = None,
+    include_depth: bool = False,
 ) -> None:
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     print(f"device: {device}")
@@ -506,13 +507,21 @@ def train(
             gen, variables, stats, batch_size, device, maps_per_refill=8,
         )
 
-    # model
+    # model.  When include_depth is set, the encoder takes a 6th normalised
+    # depth channel (matching the JEPA encoder), so n_variables grows by one
+    # and a 0..1 depth row is appended to every batch below.
     ae_cfg = AEConfig(
-        n_variables=len(variables),
+        n_variables=len(variables) + (1 if include_depth else 0),
         n_depth=sim_cfg.n_depth,
         latent_dim=latent_dim,
         mask_prob=mask_prob,
+        include_depth=include_depth,
     )
+    depth_row = (
+        torch.linspace(0.0, 1.0, sim_cfg.n_depth, device=device).view(1, 1, -1)
+        if include_depth else None
+    )
+    print(f"include_depth: {include_depth}  (n_variables={ae_cfg.n_variables})")
     model = BoreholeAutoencoder(ae_cfg).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-5)
     if compile_model and on_cuda:
@@ -571,6 +580,8 @@ def train(
     for step in range(1, steps + 1):
         last_step = step
         x = next(batches)
+        if include_depth:
+            x = torch.cat([x, depth_row.expand(x.size(0), 1, -1)], dim=1)
         with torch.autocast(device_type="cuda" if use_amp else "cpu",
                             dtype=amp_dtype, enabled=use_amp):
             recon, z = model(x)
@@ -684,6 +695,9 @@ def main():
                    help="pin the early-stop warmup to the number of "
                         "optimiser steps needed to consume this many maps "
                         "(overrides the default steps//10 heuristic).")
+    p.add_argument("--include-depth", action="store_true",
+                   help="append a 6th normalised-depth channel to the input "
+                        "(matches the JEPA encoder for a fair comparison).")
     args = p.parse_args()
     # Resolve --dataset-dir: empty string = online generation, missing
     # directory = warn and fall back to online so a fresh checkout still works.
@@ -709,6 +723,7 @@ def main():
         profile=args.profile,
         dataset_dir=dataset_dir,
         min_maps_warmup=args.min_maps_warmup,
+        include_depth=args.include_depth,
     )
 
 

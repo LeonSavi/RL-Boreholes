@@ -28,6 +28,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+plt.rcParams.update({
+    "font.size": 14, "axes.titlesize": 17, "axes.labelsize": 14,
+    "xtick.labelsize": 12, "ytick.labelsize": 12, "legend.fontsize": 12,
+    "savefig.dpi": 400, "savefig.bbox": "tight",
+})
 
 PARQUET = Path("data/clean/samples.parquet")
 OUT_TRADEOFF = Path("plots/bank_bin_width_tradeoff.png")
@@ -112,7 +117,7 @@ def heatmap_for_width(wide: pd.DataFrame, width: float, out: Path) -> None:
                levels=[contour_val], colors="white", linewidths=1.0, alpha=0.6)
     fig.tight_layout()
     out.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out, dpi=140, bbox_inches="tight")
+    fig.savefig(out, dpi=400, bbox_inches="tight")
     print(f"wrote {out}")
 
 
@@ -126,7 +131,7 @@ def plot_tradeoff(rows: list[dict], chosen: float, out: Path) -> None:
     ax1.text(chosen + 8, df["coverage_pct"].min(),
              f"chosen: {int(chosen)} m", color="#d6604d", fontsize=9)
     ax1.set_xlabel("bin width [m]")
-    ax1.set_ylabel("% of (rock × bin) cells with ≥30 samples")
+    ax1.set_ylabel("% of (rock × bin) cells\nwith ≥30 samples")
     ax1.set_title("Coverage")
     ax1.grid(alpha=0.3)
     for _, r in df.iterrows():
@@ -145,12 +150,12 @@ def plot_tradeoff(rows: list[dict], chosen: float, out: Path) -> None:
     ax2.set_yscale("log")
     ax2.grid(alpha=0.3, which="both")
 
-    fig.suptitle("DistributionBank bin-width tradeoff "
-                 "(empty cells fall back to nearest populated bin at sample time)",
-                 fontsize=11, y=1.03)
+    fig.suptitle("DistributionBank bin-width tradeoff\n"
+                 "(empty cells fall back to the nearest populated bin at sample time)",
+                 fontsize=18, y=1.06)
     fig.tight_layout()
     out.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out, dpi=140, bbox_inches="tight")
+    fig.savefig(out, dpi=400, bbox_inches="tight")
     print(f"wrote {out}")
 
 
@@ -167,16 +172,15 @@ def main() -> None:
               f"coverage={r['coverage_pct']:>5.1f}%  "
               f"median-n={r['median_n_populated']:>7.0f}")
 
-    # Decision rule (v3): pick the smallest width where median samples
-    # per populated cell stays >= 100 (KDE bandwidth comfort) AND
-    # coverage >= 30% (the rest of the cells fall through the nearest-
-    # populated-cell fallback in DistributionBank._resolve_cell).
+    # Decision: the bank actually uses 10 m bins (3_save_distributions.py).
+    # 10 m matches the encoder's cell grid exactly and is comfortably viable
+    # here (median samples per populated cell >= 100 for KDE bandwidth
+    # comfort, coverage >= 30%, with the rest falling through the nearest-
+    # populated-cell fallback in DistributionBank._resolve_cell). We mark
+    # 10 m rather than the smallest auto-viable width so the figure agrees
+    # with the bank and the thesis text.
     df = pd.DataFrame(rows).sort_values("width_m")
-    viable = df[(df["median_n_populated"] >= 100) & (df["coverage_pct"] >= 30)]
-    if len(viable):
-        chosen = float(viable["width_m"].min())
-    else:
-        chosen = float(df["width_m"].min())
+    chosen = 10.0
     base = df[df["width_m"] == 400]["coverage_pct"].iloc[0]
     crow = df[df["width_m"] == chosen].iloc[0]
     print(f"\nchosen bin width: {int(chosen)} m  "

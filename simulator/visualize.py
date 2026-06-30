@@ -31,28 +31,30 @@ import numpy as np
 from matplotlib.colors import ListedColormap
 
 
-# colours for rock types — chosen to be visually distinct
+# colours for rock types — single canonical palette shared by ALL poster
+# figures (the 9 fine rock classes are the ones that matter; keep them
+# identical everywhere). Matches analysis_simulation.ROCK_COLOURS.
 ROCK_COLOURS = {
-    "clay":            "#b3a380",
-    "claystone":       "#6b5544",
-    "claystone_cool":  "#8a7359",
-    "claystone_hot":   "#3d2e1f",
-    "sandstone":       "#d4a85a",
-    "sandstone_clean": "#e8c474",
-    "sandstone_shaly": "#a87f3d",
-    "chalk":           "#f5f0dc",
-    "halite":          "#ff99cc",
-    "halite_pure":     "#ff66aa",
-    "anhydrite":       "#8a6fb0",
+    "chalk":           "#a6d96a",
+    "sandstone_clean": "#b15928",
+    "sandstone_shaly": "#fb9a99",
+    "sandstone":       "#cccc99",
+    "claystone_hot":   "#762a83",
+    "claystone_cool":  "#9970ab",
+    "claystone":       "#8073ac",
+    "clay":            "#ef8a62",
+    "halite_pure":     "#fdbf6f",
+    "halite":          "#ffd700",
+    "anhydrite":       "#ff7f00",
+    "dolomite":        "#33a02c",
+    "limestone":       "#73c476",
+    "siltstone":       "#fdae61",
+    "mudstone":        "#b2abd2",
     "carbonate":       "#70c2a8",
-    "dolomite":        "#509070",
-    "limestone":       "#a0d8c0",
-    "mudstone":        "#7a6650",
-    "siltstone":       "#c0b090",
-    "basalt":          "#404040",
-    "diatom_ooze":     "#dadada",
-    "nanno_ooze":      "#e8e8e8",
-    "other":           "#cccccc",
+    "basalt":          "#4d4d4d",
+    "diatom_ooze":     "#2166ac",
+    "nanno_ooze":      "#67a9cf",
+    "other":           "#bbbbbb",
 }
 
 

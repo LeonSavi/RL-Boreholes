@@ -28,7 +28,7 @@ Outputs (plots/simulation/):
   09_metric_summary.png                   (heatmap of all distances)
 
 Run:
-    python analysis_simulation.py
+    python 7_analysis_simulation.py
 """
 from __future__ import annotations
 
@@ -47,6 +47,13 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+# poster-legible default fonts
+plt.rcParams.update({
+    "font.size": 14, "axes.titlesize": 17, "axes.labelsize": 14,
+    "xtick.labelsize": 12, "ytick.labelsize": 12, "legend.fontsize": 12,
+    "savefig.dpi": 400, "savefig.bbox": "tight",
+})
+
 import matplotlib.colors as mcolors
 import numpy as np
 import pandas as pd
@@ -567,6 +574,8 @@ def plot_distribution_bank_overview(bank: DistributionBank,
     simulator draws from."""
     # v3.1: probes are (rock, formation, bin_idx) -- 10 m bins.
     # bin = depth // 10 (e.g. 220 == 2200 m).
+    # Poster: 8 representative cells in a 2x4 (wide) grid, full box width below
+    # the text; big fonts so each KDE stays readable.
     key_cells = [
         ("claystone_hot",   "DC", 220),
         ("claystone_cool",  "KN", 180),
@@ -577,9 +586,10 @@ def plot_distribution_bank_overview(bank: DistributionBank,
         ("chalk",           "CK", 180),
         ("dolomite",        "ZE", 220),
     ]
-    fig, axes = plt.subplots(2, 4, figsize=(18, 8))
+    n_cols = 4
+    fig, axes = plt.subplots(2, n_cols, figsize=(9.5, 4.4))
     axes = axes.flatten()
-    for ax, key in zip(axes, key_cells):
+    for idx, (ax, key) in enumerate(zip(axes, key_cells)):
         cell = bank.cells.get(key)
         # backward-compat: legacy 2-tuple key for older rock-only banks
         if cell is None and len(key) == 3:
@@ -600,18 +610,19 @@ def plot_distribution_bank_overview(bank: DistributionBank,
             continue
         c = ROCK_COLOURS.get(key[0], "#2166ac")
         ax.fill_between(x, 0, y, alpha=0.45, color=c)
-        ax.plot(x, y, color=c, lw=1.4)
-        ax.set_title(f"{key[0]} in {key[1]}  "
-                     f"({cell.depth_lo:.0f}-{cell.depth_hi:.0f} m)\n"
-                     f"n={cell.n_samples:,}", fontsize=10)
-        ax.set_xlabel(variable)
-        ax.set_ylabel("density")
+        ax.plot(x, y, color=c, lw=2.4)
+        ax.set_title(f"{key[0]}\n{key[1]} · {cell.depth_lo:.0f}–{cell.depth_hi:.0f} m",
+                     fontsize=10, fontweight="bold")
+        ax.set_xlabel(variable, fontsize=10)
+        ax.tick_params(labelsize=8.5)
+        if idx % n_cols == 0:
+            ax.set_ylabel("density", fontsize=10)
         ax.grid(alpha=0.25)
-    fig.suptitle(f"DistributionBank — empirical {variable} KDE for "
+    fig.suptitle(f"DistributionBank: empirical {variable} KDE, "
                  "8 representative (rock × depth) cells",
-                 fontweight="bold", fontsize=13)
-    fig.tight_layout(rect=[0, 0, 1, 0.95])
-    fig.savefig(out_path, dpi=140, bbox_inches="tight")
+                 fontweight="bold", fontsize=12)
+    fig.tight_layout(rect=[0, 0, 1, 0.93])
+    fig.savefig(out_path, bbox_inches="tight")
     plt.close(fig)
     print(f"  wrote {out_path}")
 
@@ -626,7 +637,7 @@ def plot_marginal_sim_vs_real(sim: dict[str, dict[str, np.ndarray]],
         target_rocks = ["claystone_hot", "claystone_cool",
                          "sandstone_clean", "sandstone_shaly",
                          "halite_pure",     "chalk"]
-    fig, axes = plt.subplots(2, 3, figsize=(15, 8))
+    fig, axes = plt.subplots(2, 3, figsize=(15, 7))
     axes = axes.flatten()
     for ax, rock in zip(axes, target_rocks):
         sv = sim.get(rock, {}).get(variable)
@@ -640,22 +651,23 @@ def plot_marginal_sim_vs_real(sim: dict[str, dict[str, np.ndarray]],
         lo, hi = np.percentile(all_vals, [1, 99])
         bins = np.linspace(lo, hi, 60)
         ax.hist(rv, bins=bins, density=True, alpha=0.55,
-                color="#b2182b", label=f"real (n={len(rv):,})",
+                color="#b2182b", label="real",
                 edgecolor="black", linewidth=0.3)
         ax.hist(sv, bins=bins, density=True, histtype="step",
-                color="#2166ac", lw=1.8, ls="--",
-                label=f"sim (n={len(sv):,})")
+                color="#2166ac", lw=2.2, ls="--", label="sim")
         ks_stat, _ = stats.ks_2samp(sv, rv)
-        ax.set_title(f"{rock}\nKS = {ks_stat:.3f}",
-                      fontsize=10)
-        ax.set_xlabel(variable)
-        ax.set_ylabel("density")
-        ax.legend(fontsize=8)
+        ax.set_title(f"{rock}  (KS {ks_stat:.2f})", fontsize=15,
+                     fontweight="bold")
+        ax.set_xlabel(variable, fontsize=14)
+        ax.tick_params(labelsize=12)
+        ax.legend(fontsize=13)
         ax.grid(alpha=0.25)
-    fig.suptitle(f"Simulator vs real — per-rock {variable} marginals",
-                 fontweight="bold", fontsize=13)
-    fig.tight_layout(rect=[0, 0, 1, 0.95])
-    fig.savefig(out_path, dpi=140, bbox_inches="tight")
+    axes[0].set_ylabel("density", fontsize=14)
+    axes[3].set_ylabel("density", fontsize=14)
+    fig.suptitle(f"Simulator vs real: per-rock {variable} marginals",
+                 fontweight="bold", fontsize=19)
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
+    fig.savefig(out_path, dpi=400, bbox_inches="tight")
     plt.close(fig)
     print(f"  wrote {out_path}")
 
@@ -682,10 +694,11 @@ def plot_formation_composition(sim_by_fm: dict[str, Counter],
         {r for fm in formations
          for r in set(sim_fine[fm]) | set(real_fine[fm])})
 
-    fig, ax = plt.subplots(figsize=(max(10, 1.0 * len(formations)),
-                                     6))
+    # Right-side colour legend, and a hatch on the sim bars so real vs sim is
+    # obvious at a glance.
+    fig, ax = plt.subplots(figsize=(9.0, 4.2))
     positions = np.arange(len(formations))
-    width = 0.4
+    width = 0.42
     bottom_real = np.zeros(len(formations))
     bottom_sim = np.zeros(len(formations))
     for r in all_rocks:
@@ -698,29 +711,31 @@ def plot_formation_composition(sim_by_fm: dict[str, Counter],
             real_heights.append(real_fine[fm].get(r, 0) / real_total)
             sim_heights.append(sim_fine[fm].get(r, 0) / sim_total)
         ax.bar(positions - width/2, real_heights, width,
-                bottom=bottom_real, color=c, alpha=0.85,
-                edgecolor="black", linewidth=0.3,
-                label=r if r in all_rocks[:8] else None)
+                bottom=bottom_real, color=c,
+                edgecolor="black", linewidth=0.4)
         ax.bar(positions + width/2, sim_heights, width,
-                bottom=bottom_sim, color=c, alpha=0.65,
-                edgecolor="black", linewidth=0.3)
-        bottom_real += real_heights
-        bottom_sim += sim_heights
+                bottom=bottom_sim, color=c, hatch="////",
+                edgecolor="black", linewidth=0.4)
+        bottom_real += np.array(real_heights)
+        bottom_sim += np.array(sim_heights)
     ax.set_xticks(positions)
-    ax.set_xticklabels(formations)
-    ax.set_ylabel("rock fraction")
-    ax.set_title("Per-formation rock composition — left bar real, right bar sim",
-                  fontweight="bold")
+    ax.set_xticklabels(formations, fontsize=9.5)
+    ax.tick_params(axis="y", labelsize=9)
+    ax.set_ylabel("rock fraction", fontsize=11)
+    ax.set_title("Rock composition per formation: left bar = real, "
+                 "right bar = sim (hatched)", fontweight="bold", fontsize=12)
+    # rock-type colour legend (vertical, on the right)
     handles = [plt.Rectangle((0, 0), 1, 1,
                               color=ROCK_COLOURS.get(r, "#999999"))
                 for r in all_rocks]
-    ax.legend(handles, all_rocks, fontsize=8,
-                ncol=min(len(all_rocks), 5),
-                loc="upper center", bbox_to_anchor=(0.5, -0.06))
+    ax.legend(handles, all_rocks, fontsize=8.5, loc="center left",
+                bbox_to_anchor=(1.01, 0.5), handlelength=1.5,
+                labelspacing=0.4, frameon=False, title="rock type",
+                title_fontsize=9)
     ax.grid(alpha=0.25, axis="y")
     ax.set_ylim(0, 1.05)
     fig.tight_layout()
-    fig.savefig(out_path, dpi=140, bbox_inches="tight")
+    fig.savefig(out_path, bbox_inches="tight")
     plt.close(fig)
     print(f"  wrote {out_path}")
 
@@ -733,45 +748,67 @@ def plot_transition_matrices(transitions_by_fm: dict[str, Counter],
     formations. `transitions_by_fm` is pre-computed by
     streaming_aggregate."""
     if formations is None:
-        # 3 multi-rock, geologically distinct formations: keeps the
-        # figure compact so it does not crowd the slide narrative.
-        formations = ["ZE", "RO", "KN"]
-    n = len(formations)
-    fig, axes = plt.subplots(n, 2, figsize=(11, 3.2 * n))
-    for i, fm in enumerate(formations):
+        # Two multi-rock, geologically distinct formations: a wide single row
+        # of (real, sim) pairs keeps each heatmap big and the rock labels +
+        # cell values clearly readable on the poster.
+        formations = ["ZE", "RO"]
+    # Build the (matrix, rock-union, title) panels: real then sim per formation.
+    panels = []
+    for fm in formations:
         sim_pairs = transitions_by_fm.get(fm, Counter())
-        if not sim_pairs:
-            s_rocks, S = [], np.zeros((0, 0))
-        else:
+        if sim_pairs:
             s_rocks, S = transition_matrix_from_counts(sim_pairs)
+        else:
+            s_rocks, S = [], np.zeros((0, 0))
         r_rocks, R = transition_matrix_from_real(real_df, fm)
         union = sorted(set(s_rocks) | set(r_rocks))
         if not union:
-            for ax in axes[i]:
-                ax.set_visible(False)
             continue
         idx_s = {r: s_rocks.index(r) if r in s_rocks else None for r in union}
         idx_r = {r: r_rocks.index(r) if r in r_rocks else None for r in union}
         m_s = np.zeros((len(union), len(union)))
         m_r = np.zeros((len(union), len(union)))
-        for a, b in [(a, b) for a in union for b in union]:
-            ai, bi = union.index(a), union.index(b)
-            if idx_s[a] is not None and idx_s[b] is not None:
-                m_s[ai, bi] = S[idx_s[a], idx_s[b]]
-            if idx_r[a] is not None and idx_r[b] is not None:
-                m_r[ai, bi] = R[idx_r[a], idx_r[b]]
-        for ax, mat, title in zip(axes[i], [m_r, m_s], ["real", "sim"]):
-            im = ax.imshow(mat, cmap="viridis", vmin=0, vmax=1, aspect="auto")
-            ax.set_xticks(range(len(union)))
-            ax.set_yticks(range(len(union)))
-            ax.set_xticklabels(union, rotation=45, ha="right", fontsize=7)
-            ax.set_yticklabels(union, fontsize=7)
-            ax.set_title(f"{fm} — {title}", fontsize=10)
-        plt.colorbar(im, ax=axes[i].tolist(), fraction=0.03, pad=0.02)
-    fig.suptitle("Markov transition matrices — real (left) vs simulator (right)",
-                 fontweight="bold", fontsize=13)
-    fig.tight_layout(rect=[0, 0, 1, 0.97])
-    fig.savefig(out_path, dpi=140, bbox_inches="tight")
+        for a in union:
+            for b in union:
+                ai, bi = union.index(a), union.index(b)
+                if idx_r[a] is not None and idx_r[b] is not None:
+                    m_r[ai, bi] = R[idx_r[a], idx_r[b]]
+                if idx_s[a] is not None and idx_s[b] is not None:
+                    m_s[ai, bi] = S[idx_s[a], idx_s[b]]
+        panels.append((m_r, union, f"{fm}: real"))
+        panels.append((m_s, union, f"{fm}: simulator"))
+
+    n = len(panels)
+    # 2x2 grid (real | simulator per formation) so each heatmap is large and
+    # the rock labels and cell values are clearly readable.
+    ncols = 2
+    nrows = (n + ncols - 1) // ncols
+    fig, axes = plt.subplots(nrows, ncols, figsize=(4.7 * ncols, 4.4 * nrows),
+                             constrained_layout=True)
+    axes = np.atleast_1d(axes).ravel()
+    im = None
+    for k, (ax, (mat, union, title)) in enumerate(zip(axes, panels)):
+        im = ax.imshow(mat, cmap="viridis", vmin=0, vmax=1, aspect="auto")
+        ax.set_xticks(range(len(union)))
+        ax.set_yticks(range(len(union)))
+        ax.set_xticklabels(union, rotation=40, ha="right", fontsize=13)
+        if k % 2 == 0:
+            ax.set_yticklabels(union, fontsize=13)
+        else:
+            ax.set_yticklabels([])
+        ax.set_title(title, fontsize=17, fontweight="bold")
+        for (i, j2), v in np.ndenumerate(mat):
+            if v >= 0.01:
+                ax.text(j2, i, f"{v:.2f}", ha="center", va="center",
+                        fontsize=14, color="white" if v < 0.6 else "black")
+    for ax in axes[n:]:
+        ax.set_visible(False)
+    if im is not None:
+        cbar = fig.colorbar(im, ax=list(axes), fraction=0.045, pad=0.02)
+        cbar.ax.tick_params(labelsize=12)
+    fig.suptitle("Markov transition matrices: simulator vs real "
+                 "(rows sum to 1)", fontweight="bold", fontsize=20)
+    fig.savefig(out_path, dpi=400, bbox_inches="tight")
     plt.close(fig)
     print(f"  wrote {out_path}")
 
@@ -808,7 +845,7 @@ def plot_run_lengths(sim_runs: dict[str, list],
         if isinstance(cur, str):
             real_runs[cur].append(run)
 
-    fig, axes = plt.subplots(2, 3, figsize=(15, 8))
+    fig, axes = plt.subplots(2, 3, figsize=(9.0, 5.2))
     axes = axes.flatten()
     for ax, rock in zip(axes, target_rocks):
         sr = np.array(sim_runs.get(rock, []), dtype=float)
@@ -832,12 +869,12 @@ def plot_run_lengths(sim_runs: dict[str, list],
         ax.set_title(f"{rock}\nWasserstein = {w:.2f}", fontsize=10)
         ax.set_xlabel("run length (cells, 10m each)")
         ax.set_ylabel("density")
-        ax.legend(fontsize=8)
+        ax.legend(fontsize=11)
         ax.grid(alpha=0.25)
     fig.suptitle("Run-length distributions — simulator vs real NLOG",
                  fontweight="bold", fontsize=13)
     fig.tight_layout(rect=[0, 0, 1, 0.95])
-    fig.savefig(out_path, dpi=140, bbox_inches="tight")
+    fig.savefig(out_path, dpi=400, bbox_inches="tight")
     plt.close(fig)
     print(f"  wrote {out_path}")
 
@@ -871,7 +908,7 @@ def plot_sample_map_cross_section(maps: list[dict],
     handles = [plt.Rectangle((0, 0), 1, 1,
                               color=ROCK_COLOURS.get(r, "#dddddd"))
                 for r in seen]
-    ax_rock.legend(handles, seen, fontsize=7,
+    ax_rock.legend(handles, seen, fontsize=11,
                     loc="upper right", bbox_to_anchor=(0, 1))
 
     for ax, var in zip(axes[1:], ["rhob", "gr_api", "dt_us_ft"]):
@@ -887,7 +924,7 @@ def plot_sample_map_cross_section(maps: list[dict],
     fig.suptitle(f"Sample simulated column ({ix}, {iy})",
                  fontweight="bold", fontsize=13)
     fig.tight_layout(rect=[0, 0, 1, 0.97])
-    fig.savefig(out_path, dpi=140, bbox_inches="tight")
+    fig.savefig(out_path, dpi=400, bbox_inches="tight")
     plt.close(fig)
     print(f"  wrote {out_path}")
 
@@ -916,7 +953,7 @@ def plot_lateral_coherence(maps: list[dict], out_path: Path,
     ax.set_title("Lateral coherence — one simulated map at fixed y",
                  fontweight="bold")
     fig.tight_layout()
-    fig.savefig(out_path, dpi=140, bbox_inches="tight")
+    fig.savefig(out_path, dpi=400, bbox_inches="tight")
     plt.close(fig)
     print(f"  wrote {out_path}")
 
@@ -926,44 +963,35 @@ def plot_metric_summary(marginal: pd.DataFrame,
                          out_path: Path) -> None:
     """Heatmap-style summary of KS + Wasserstein per (rock × variable),
     plus transition Frobenius per formation as a side panel."""
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6),
-                                    gridspec_kw=dict(width_ratios=[3, 1]))
-
+    # Poster: a single wide KS heatmap (transition distances now live in their
+    # own figure), with large cell annotations + axis labels. Channels are the
+    # rows and rocks the columns so the grid is wide (spans the full box width
+    # at a short height).
+    # Smaller native size + larger cell/axis fonts so the in-cell numbers render
+    # near the body-text size when the figure is displayed (~19 cm wide).
+    fig, ax1 = plt.subplots(figsize=(8.0, 3.2))
     if len(marginal):
-        piv = marginal.pivot(index="rock", columns="variable", values="ks_stat")
-        rocks = piv.index.tolist()
-        variables = piv.columns.tolist()
+        piv = marginal.pivot(index="variable", columns="rock", values="ks_stat")
+        variables = piv.index.tolist()
+        rocks = piv.columns.tolist()
         im = ax1.imshow(piv.values, aspect="auto", cmap="RdYlGn_r",
                          vmin=0, vmax=0.5)
-        ax1.set_xticks(range(len(variables)))
-        ax1.set_xticklabels(variables, rotation=20, ha="right")
-        ax1.set_yticks(range(len(rocks)))
-        ax1.set_yticklabels(rocks)
+        ax1.set_xticks(range(len(rocks)))
+        ax1.set_xticklabels(rocks, rotation=25, ha="right", fontsize=9)
+        ax1.set_yticks(range(len(variables)))
+        ax1.set_yticklabels(variables, fontsize=9.5)
         for (i, j), val in np.ndenumerate(piv.values):
             if not np.isnan(val):
                 ax1.text(j, i, f"{val:.2f}", ha="center", va="center",
-                          fontsize=8, color="black" if val < 0.3 else "white")
-        ax1.set_title("KS statistic — sim vs real per (rock × variable)\n"
-                       "(lower = better)", fontweight="bold")
-        plt.colorbar(im, ax=ax1, fraction=0.04)
-
-    if len(transitions):
-        t = transitions.sort_values("frobenius")
-        ax2.barh(range(len(t)), t["frobenius"].values,
-                  color="#2166ac", alpha=0.75,
-                  edgecolor="black", linewidth=0.3)
-        ax2.set_yticks(range(len(t)))
-        ax2.set_yticklabels(t["formation"].tolist())
-        ax2.set_xlabel("Frobenius distance")
-        ax2.set_title("Transition-matrix distance per formation",
-                       fontweight="bold")
-        ax2.grid(alpha=0.25, axis="x")
-        ax2.invert_yaxis()
-
-    fig.suptitle("Simulator-vs-real distance summary",
-                 fontweight="bold", fontsize=13)
-    fig.tight_layout(rect=[0, 0, 1, 0.95])
-    fig.savefig(out_path, dpi=140, bbox_inches="tight")
+                          fontsize=8, fontweight="bold",
+                          color="black" if val < 0.3 else "white")
+        ax1.set_title("KS distance: simulator vs real "
+                      "(lower = greener = closer)",
+                      fontweight="bold", fontsize=11)
+        cbar = plt.colorbar(im, ax=ax1, fraction=0.026, pad=0.015)
+        cbar.ax.tick_params(labelsize=8.5)
+    fig.tight_layout()
+    fig.savefig(out_path, bbox_inches="tight")
     plt.close(fig)
     print(f"  wrote {out_path}")
 

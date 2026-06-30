@@ -30,6 +30,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+plt.rcParams.update({
+    "font.size": 14, "axes.titlesize": 17, "axes.labelsize": 14,
+    "xtick.labelsize": 12, "ytick.labelsize": 12, "legend.fontsize": 12,
+    "savefig.dpi": 400, "savefig.bbox": "tight",
+})
 
 NLOG_DIR = Path("data/nlog/nlog_scrape")
 OUT_PNG  = Path("plots/depth_datum_audit.png")
@@ -143,11 +148,11 @@ def main() -> None:
         f"NLOG depth-datum offset audit "
         f"(KB elevation = lower bound for offshore; "
         f"sim bin width = 10 m)",
-        fontsize=11, y=1.02,
+        fontsize=18, y=1.02,
     )
     fig.tight_layout()
     OUT_PNG.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(OUT_PNG, dpi=140, bbox_inches="tight")
+    fig.savefig(OUT_PNG, dpi=400, bbox_inches="tight")
     print(f"wrote {OUT_PNG}")
 
 

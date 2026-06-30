@@ -21,6 +21,13 @@ from pathlib import Path
 
 import numpy as np
 import matplotlib.pyplot as plt
+# poster-legible default fonts
+plt.rcParams.update({
+    "font.size": 11, "axes.titlesize": 12, "axes.labelsize": 11,
+    "xtick.labelsize": 9.5, "ytick.labelsize": 9.5, "legend.fontsize": 9,
+    "savefig.dpi": 300, "savefig.bbox": "tight",
+})
+
 from matplotlib.colors import ListedColormap
 from matplotlib.patches import Patch
 
@@ -88,36 +95,33 @@ def main() -> None:
     base_int = _to_idx(base_rocks)
     cross_int = _to_idx(cross)
 
-    fig, (axL, axR) = plt.subplots(1, 2, figsize=(11, 5.5),
-                                   gridspec_kw={"width_ratios": [1, 4]})
+    fig, (axL, axR) = plt.subplots(1, 2, figsize=(8.5, 4.0),
+                                   gridspec_kw={"width_ratios": [1, 5]})
 
     axL.imshow(base_int.reshape(-1, 1), aspect="auto", cmap=cmap,
                extent=(0, 1, z_axis[-1], z_axis[0]),
                interpolation="nearest")
     axL.set_xticks([])
     axL.set_ylabel("depth [m]")
-    axL.set_title("Base column\n(FormationGeometry +\ncalibrated Markov sampler)",
-                  fontsize=10)
+    axL.set_title("Base\ncolumn", fontsize=11, fontweight="bold")
 
     axR.imshow(cross_int, aspect="auto", cmap=cmap,
                extent=(0, rock_field.shape[0] * 0.1,
                        z_axis_m[-1], z_axis_m[0]),
                interpolation="nearest")
     axR.set_xlabel("lateral distance [km]")
-    axR.set_title("2-D cross-section through generated map\n"
-                  "(layer boundaries perturbed by anisotropic 2-D GRF, "
-                  "gstools)",
-                  fontsize=10)
+    axR.set_title("2-D cross-section (boundaries perturbed by an "
+                  "anisotropic GRF)", fontsize=11, fontweight="bold")
     axR.set_yticklabels([])
 
     handles = [Patch(facecolor=ROCK_COLOURS.get(r, "#888"), label=r)
                for r in all_rocks]
-    axR.legend(handles=handles, loc="upper right", fontsize=7,
-               framealpha=0.9, ncol=2)
+    axR.legend(handles=handles, loc="center left", bbox_to_anchor=(1.01, 0.5),
+               fontsize=8.5, framealpha=0.9, title="rock type", title_fontsize=9)
 
     fig.tight_layout()
     OUT.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(OUT, dpi=140, bbox_inches="tight")
+    fig.savefig(OUT, bbox_inches="tight")
     print(f"wrote {OUT}")
 
 

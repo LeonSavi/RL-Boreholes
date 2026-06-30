@@ -20,7 +20,7 @@ set so silhouette comparisons are apples-to-apples.  Both checkpoints are
 optional; the script reports on whichever ones it finds.
 
 Run after training:
-    python analysis_encoders.py
+    python 8_analysis_encoders.py
 """
 from __future__ import annotations
 
@@ -30,6 +30,15 @@ from collections import Counter
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+# Thesis-legible defaults: figures are shrunk to ~column width on the page, so
+# native figsizes are kept close to the display width with modest fonts (text
+# renders near body size, ~11 pt) and figures are saved at 300 dpi.
+plt.rcParams.update({
+    "font.size": 14, "axes.titlesize": 17, "axes.labelsize": 14,
+    "xtick.labelsize": 12, "ytick.labelsize": 12, "legend.fontsize": 12,
+    "savefig.dpi": 400, "savefig.bbox": "tight",
+})
+
 import numpy as np
 import pandas as pd
 import torch
@@ -71,30 +80,52 @@ ENCODER_COLOURS = {
 # ─── encoder loading + encoding ──────────────────────────────────────────
 
 def encode_with_ae(model, values: np.ndarray, stats, variables, device,
-                   batch_size: int = 256) -> np.ndarray:
-    """Pass (N, V, D) → AE encoder, return (N, latent_dim) array."""
+                   batch_size: int = 256, noise_sd: float = 0.0,
+                   seed: int = 0) -> np.ndarray:
+    """Pass (N, V, D) → AE encoder, return (N, latent_dim) array.
+
+    Appends a normalised absolute-depth row when the checkpoint was trained
+    with `include_depth=True`, matching the encoder's channel count (so a
+    6-channel AE is compared to JEPA on equal footing).  `noise_sd` adds
+    Gaussian noise to the standardised input (for the robustness test)."""
     std = standardise(values, stats, variables)
     std = np.nan_to_num(std, nan=0.0).astype(np.float32)
+    if noise_sd:
+        std = (std + np.random.default_rng(seed)
+               .normal(0.0, noise_sd, std.shape)).astype(np.float32)
+    include_depth = getattr(model.cfg, "include_depth", False)
+    if include_depth:
+        depth_row = (
+            torch.linspace(0.0, 1.0, model.cfg.n_depth, device=device)
+            .view(1, 1, -1)
+        )
     latents = []
     model.eval()
     with torch.no_grad():
         for i in range(0, len(std), batch_size):
             x = torch.from_numpy(std[i:i + batch_size]).to(device)
+            if include_depth:
+                x = torch.cat([x, depth_row.expand(x.size(0), 1, -1)], dim=1)
             z = model.encoder(x).cpu().numpy()
             latents.append(z)
     return np.concatenate(latents, axis=0)
 
 
 def encode_with_jepa(model, values: np.ndarray, stats, variables, device,
-                     batch_size: int = 256) -> np.ndarray:
+                     batch_size: int = 256, noise_sd: float = 0.0,
+                     seed: int = 0) -> np.ndarray:
     """Pass (N, V, D) → JEPA target-encoder mean-pooled, return (N, dim).
 
     Appends a normalised absolute-depth row when the checkpoint was
     trained with `include_depth=True` so the input matches the encoder's
-    expected channel count.
+    expected channel count.  `noise_sd` adds Gaussian noise to the
+    standardised input (for the robustness test).
     """
     std = standardise(values, stats, variables)
     std = np.nan_to_num(std, nan=0.0).astype(np.float32)
+    if noise_sd:
+        std = (std + np.random.default_rng(seed)
+               .normal(0.0, noise_sd, std.shape)).astype(np.float32)
     include_depth = getattr(model.cfg, "include_depth", False)
     if include_depth:
         depth_row = (
@@ -122,13 +153,24 @@ def reconstruct_with_ae(model, values: np.ndarray, stats, variables, device,
     std = standardise(values, stats, variables)
     std = np.nan_to_num(std, nan=0.0).astype(np.float32)
     truth = std.copy()
+    n_var = std.shape[1]
+    include_depth = getattr(model.cfg, "include_depth", False)
+    if include_depth:
+        depth_row = (
+            torch.linspace(0.0, 1.0, model.cfg.n_depth, device=device)
+            .view(1, 1, -1)
+        )
     recon_chunks = []
     model.eval()
     with torch.no_grad():
         for i in range(0, len(std), batch_size):
             x = torch.from_numpy(std[i:i + batch_size]).to(device)
+            if include_depth:
+                x = torch.cat([x, depth_row.expand(x.size(0), 1, -1)], dim=1)
             r, _ = model(x)
-            recon_chunks.append(r.cpu().numpy())
+            # drop the reconstructed depth channel so per-variable errors
+            # compare the 5 wireline channels against `truth`.
+            recon_chunks.append(r[:, :n_var, :].cpu().numpy())
     return truth, np.concatenate(recon_chunks, axis=0)
 
 
@@ -158,13 +200,98 @@ def silhouette_table(Z: np.ndarray, label_sets: dict[str, list[str]]
     return result
 
 
+def _filter_for_probe(Z: np.ndarray, labels: list[str]):
+    """Keep classes with >=15 members, drop mixed/other/rare. Returns
+    (sub_Z, integer-encoded y) or (None, None) if <2 usable classes."""
+    counts = Counter(labels)
+    keep = [i for i, l in enumerate(labels)
+            if counts[l] >= 15 and l not in ("mixed", "other", "rare")]
+    if len(set(labels[i] for i in keep)) < 2:
+        return None, None
+    classes = sorted(set(labels[i] for i in keep))
+    enc = {c: k for k, c in enumerate(classes)}
+    sub_Z = Z[keep]
+    y = np.array([enc[labels[i]] for i in keep])
+    return sub_Z, y
+
+
+def knn_label_accuracy(Z: np.ndarray, labels: list[str], k: int = 5,
+                       cv: int = 5) -> float:
+    """Stratified k-fold k-NN classification accuracy of labels from latents.
+    A direct read of 'do nearest neighbours in latent space share geology?'."""
+    from sklearn.neighbors import KNeighborsClassifier
+    from sklearn.model_selection import cross_val_score, StratifiedKFold
+    sub_Z, y = _filter_for_probe(Z, labels)
+    if sub_Z is None:
+        return float("nan")
+    skf = StratifiedKFold(n_splits=cv, shuffle=True, random_state=42)
+    clf = KNeighborsClassifier(n_neighbors=k)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        scores = cross_val_score(clf, sub_Z, y, cv=skf, scoring="accuracy")
+    return float(scores.mean())
+
+
+def probe_accuracy(Z: np.ndarray, labels: list[str], cv: int = 5) -> float:
+    """Stratified k-fold linear (logistic-regression) probe accuracy: tests
+    how linearly separable the labels are in latent space."""
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.pipeline import make_pipeline
+    from sklearn.model_selection import cross_val_score, StratifiedKFold
+    sub_Z, y = _filter_for_probe(Z, labels)
+    if sub_Z is None:
+        return float("nan")
+    skf = StratifiedKFold(n_splits=cv, shuffle=True, random_state=42)
+    clf = make_pipeline(StandardScaler(),
+                        LogisticRegression(max_iter=2000, C=1.0))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        scores = cross_val_score(clf, sub_Z, y, cv=skf, scoring="accuracy")
+    return float(scores.mean())
+
+
+def few_shot_probe(Z: np.ndarray, labels: list[str], n_per_class: int = 3,
+                   repeats: int = 30, seed: int = 42) -> float:
+    """Low-label logistic-probe accuracy: train on only `n_per_class` labelled
+    boreholes per class, test on the rest, averaged over `repeats` random
+    draws. A latent that organises geology well needs fewer labels, so this
+    exposes representation-quality gaps that full-data accuracy (saturated near
+    1.0) hides."""
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.pipeline import make_pipeline
+    sub_Z, y = _filter_for_probe(Z, labels)
+    if sub_Z is None:
+        return float("nan")
+    rng = np.random.default_rng(seed)
+    classes = np.unique(y)
+    if min((y == c).sum() for c in classes) <= n_per_class:
+        return float("nan")
+    accs = []
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        for _ in range(repeats):
+            tr = np.concatenate([rng.choice(np.where(y == c)[0],
+                                            size=n_per_class, replace=False)
+                                 for c in classes])
+            mask = np.ones(len(y), bool); mask[tr] = False
+            clf = make_pipeline(StandardScaler(),
+                                LogisticRegression(max_iter=2000))
+            clf.fit(sub_Z[tr], y[tr])
+            accs.append(clf.score(sub_Z[mask], y[mask]))
+    return float(np.mean(accs))
+
+
 # ─── plots ────────────────────────────────────────────────────────────────
 
 def _plot_one_panel(ax, Z2: np.ndarray, labels: list[str], title: str,
-                     skip_labels: set[str]) -> None:
+                     skip_labels: set[str], show_legend: bool = True,
+                     title_fs: int = 12, point_s: int = 8) -> None:
     """Scatter the 2D embedding coloured by `labels`.  Repurposed from
     latent_validation.plot_four_panels but kept inline so we can call it
-    independently per encoder."""
+    independently per encoder.  `show_legend=False` suppresses the per-panel
+    legend (for a single shared legend); `title_fs`/`point_s` tune sizes."""
     classes = sorted(set(labels) - skip_labels)
     cmap = plt.get_cmap("tab20")
     colour_map = {c: cmap(i % 20) for i, c in enumerate(classes)}
@@ -173,41 +300,76 @@ def _plot_one_panel(ax, Z2: np.ndarray, labels: list[str], title: str,
         mask = np.array([l == c for l in labels])
         if not mask.any():
             continue
-        ax.scatter(Z2[mask, 0], Z2[mask, 1], s=6, alpha=0.7,
+        ax.scatter(Z2[mask, 0], Z2[mask, 1], s=point_s, alpha=0.75,
                     color=colour_map[c], edgecolor="none", label=c)
     if any(l in skip_labels for l in labels):
         mask = np.array([l in skip_labels for l in labels])
-        ax.scatter(Z2[mask, 0], Z2[mask, 1], s=4, alpha=0.25,
+        ax.scatter(Z2[mask, 0], Z2[mask, 1], s=max(10, point_s // 2), alpha=0.22,
                     color="#bbbbbb", edgecolor="none")
-    ax.set_title(title, fontsize=11)
+    ax.set_title(title, fontsize=title_fs, fontweight="bold")
     ax.set_xticks([])
     ax.set_yticks([])
     ax.grid(alpha=0.2)
-    if len(classes) <= 12:
-        ax.legend(fontsize=7, markerscale=2, loc="best")
+    if show_legend and len(classes) <= 12:
+        ax.legend(fontsize=8, markerscale=2.0, loc="best", framealpha=0.9)
 
 
 def plot_umap_grid(Z2: np.ndarray, label_sets: dict[str, list[str]],
                     silhouettes: dict[str, tuple[float, int]],
                     out_path: Path, title: str) -> None:
-    fig, axes = plt.subplots(2, 2, figsize=(12, 11))
+    # Show the two strong mid-column panels large and legible; the deep-cut
+    # behaviour is conveyed quantitatively by the per-quintile silhouette
+    # figure instead of cramped extra UMAP panels.
+    fig, axes = plt.subplots(1, 2, figsize=(7.0, 3.7))
     axes = axes.flatten()
-    panel_order = ["rock (middle 50%)", "formation (middle 50%)",
-                    "formation (deepest)", "rock (bottom 25%)"]
+    panel_order = ["rock (middle 50%)", "formation (middle 50%)"]
     skip = {"mixed", "other", "rare"}
     for ax, name in zip(axes, panel_order):
         if name not in label_sets:
             ax.set_visible(False)
             continue
         score, n = silhouettes.get(name, (float("nan"), 0))
-        sub_title = (f"{name}\n"
-                     f"silhouette = {score:+.3f}  (n={n})"
+        sub_title = (f"{name}\nsilhouette = {score:+.2f}"
                      if not np.isnan(score) else
                      f"{name}\n(not enough labels)")
         _plot_one_panel(ax, Z2, label_sets[name], sub_title, skip_labels=skip)
-    fig.suptitle(title, fontweight="bold", fontsize=13)
-    fig.tight_layout(rect=[0, 0, 1, 0.97])
-    fig.savefig(out_path, dpi=140, bbox_inches="tight")
+    fig.suptitle(title, fontweight="bold", fontsize=12)
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  wrote {out_path}")
+
+
+def plot_jepa_vs_ae_umap(z2_jepa: np.ndarray, z2_ae: np.ndarray,
+                         labels_rock: list[str],
+                         sil_jepa: float, sil_ae: float,
+                         out_path: Path,
+                         suptitle: str = "Same boreholes, two encoders, "
+                                         "coloured by rock (middle 50%)") -> None:
+    """Side-by-side UMAP of the SAME boreholes under each encoder, coloured by
+    rock. JEPA and the AE baseline separate the lithologies about equally;
+    `suptitle` lets callers relabel it (e.g. for the real-well version)."""
+    from matplotlib.lines import Line2D
+    skip = {"mixed", "other", "rare"}
+    # One shared legend on the right instead of a legend inside each panel.
+    fig, axes = plt.subplots(1, 2, figsize=(7.2, 3.4))
+    # Panel titles carry no per-run silhouette: that number is noisy run-to-run
+    # (JEPA and AE are tied); the averaged comparison lives in the table.
+    _plot_one_panel(axes[0], z2_jepa, labels_rock, "JEPA", skip,
+                    show_legend=False, title_fs=12, point_s=7)
+    _plot_one_panel(axes[1], z2_ae, labels_rock, "AE baseline", skip,
+                    show_legend=False, title_fs=12, point_s=7)
+    classes = sorted(set(labels_rock) - skip)
+    cmap = plt.get_cmap("tab20")
+    handles = [Line2D([0], [0], marker="o", linestyle="", markersize=7,
+                      color=cmap(i % 20), label=c)
+               for i, c in enumerate(classes)]
+    fig.legend(handles, classes, loc="center left", bbox_to_anchor=(0.83, 0.5),
+               fontsize=8.5, frameon=True, framealpha=0.9, handletextpad=0.3,
+               borderpad=0.4, labelspacing=0.35)
+    fig.suptitle(suptitle, fontweight="bold", fontsize=12)
+    fig.subplots_adjust(left=0.02, right=0.82, top=0.85, bottom=0.04, wspace=0.05)
+    fig.savefig(out_path, bbox_inches="tight")
     plt.close(fig)
     print(f"  wrote {out_path}")
 
@@ -227,35 +389,41 @@ def plot_silhouette_comparison(table: pd.DataFrame, out_path: Path) -> None:
     n_enc = len(encoders)
     width = 0.8 / max(n_enc, 1)
     x = np.arange(len(labelsets))
-    fig, ax = plt.subplots(figsize=(12, 5.8))
+    has_sd = "silhouette_sd" in table.columns
+    fig, ax = plt.subplots(figsize=(7.0, 4.2))
     for i, enc in enumerate(encoders):
         sub = table[table["encoder"] == enc].set_index("label_set")\
                 .reindex(labelsets)
         heights = sub["silhouette"].values
+        errs = (sub["silhouette_sd"].values if has_sd
+                else np.zeros(len(labelsets)))
         offset = (i - (n_enc - 1) / 2) * width
         ax.bar(x + offset, heights, width,
+                yerr=errs, capsize=2.5, ecolor="#333",
+                error_kw={"linewidth": 0.9},
                 color=ENCODER_COLOURS.get(enc, "#888888"),
                 alpha=0.85, edgecolor="black", linewidth=0.3,
                 label=enc.replace("_", " "))
         for j, h in enumerate(heights):
             if np.isnan(h):
                 continue
+            e = errs[j] if has_sd and not np.isnan(errs[j]) else 0.0
+            top = (h + e) if h >= 0 else (h - e)
             ax.text(x[j] + offset,
-                     h + (0.005 if h >= 0 else -0.015),
+                     top + (0.008 if h >= 0 else -0.018),
                      f"{h:+.2f}", ha="center",
-                     fontsize=7,
+                     fontsize=8, fontweight="bold",
                      va="bottom" if h >= 0 else "top")
     ax.set_xticks(x)
     ax.set_xticklabels(labelsets, rotation=20, ha="right")
     ax.set_ylabel("silhouette score")
     ax.axhline(0, color="black", lw=0.5)
-    ax.set_title("Encoder silhouette comparison — "
-                  "higher = labels separate better in latent space",
+    ax.set_title("Encoder silhouette by label set (higher = better separation)",
                   fontweight="bold")
     ax.legend()
     ax.grid(alpha=0.25, axis="y")
     fig.tight_layout()
-    fig.savefig(out_path, dpi=140, bbox_inches="tight")
+    fig.savefig(out_path, bbox_inches="tight")
     plt.close(fig)
     print(f"  wrote {out_path}")
 
@@ -268,8 +436,9 @@ def plot_ae_reconstruction(truth: np.ndarray, recon: np.ndarray,
     rng = np.random.default_rng(0)
     n, V, D = truth.shape
     idx = rng.choice(n * D, size=min(n_points, n * D), replace=False)
-    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
-    axes = axes.flatten()
+    # One row of V panels, sized to the text column.
+    fig, axes = plt.subplots(1, V, figsize=(2.4 * V, 3.6))
+    axes = np.atleast_1d(axes).ravel()
     for ax, var, i in zip(axes, variables, range(V)):
         t = truth[:, i, :].ravel()[idx]
         r = recon[:, i, :].ravel()[idx]
@@ -280,26 +449,50 @@ def plot_ae_reconstruction(truth: np.ndarray, recon: np.ndarray,
             continue
         ax.scatter(t, r, s=4, alpha=0.3, color="#2166ac")
         lo, hi = np.percentile(np.concatenate([t, r]), [1, 99])
-        ax.plot([lo, hi], [lo, hi], color="grey", ls="--", lw=1)
+        ax.plot([lo, hi], [lo, hi], color="grey", ls="--", lw=1.2)
         ss_res = float(np.sum((t - r) ** 2))
         ss_tot = float(np.sum((t - np.mean(t)) ** 2)) or 1
         r2 = 1 - ss_res / ss_tot
-        smoothl1 = float(np.mean(np.where(np.abs(t - r) < 1.0,
-                                            0.5 * (t - r) ** 2,
-                                            np.abs(t - r) - 0.5)))
-        ax.set_title(f"{var}\nR² = {r2:.3f}, SmoothL1 = {smoothl1:.4f}",
-                      fontsize=10)
-        ax.set_xlabel("truth (standardised)")
-        ax.set_ylabel("recon (standardised)")
+        ax.set_title(f"{var}\n$R^2$ = {r2:.2f}", fontsize=15, fontweight="bold")
+        ax.set_xlabel("truth", fontsize=14)
         ax.grid(alpha=0.25)
+        ax.tick_params(labelsize=12)
         ax.set_xlim(lo, hi); ax.set_ylim(lo, hi)
-    if V < 6:
-        for ax in axes[V:]:
-            ax.set_visible(False)
-    fig.suptitle("Autoencoder reconstruction — per-variable truth vs recon",
-                 fontweight="bold", fontsize=13)
-    fig.tight_layout(rect=[0, 0, 1, 0.96])
-    fig.savefig(out_path, dpi=140, bbox_inches="tight")
+    axes[0].set_ylabel("reconstruction", fontsize=14)
+    fig.suptitle("Autoencoder reconstruction: truth vs recon per channel "
+                 "(standardised)", fontweight="bold", fontsize=18)
+    fig.tight_layout(rect=[0, 0, 1, 0.92])
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  wrote {out_path}")
+
+
+def plot_noise_robustness(rows: list[dict], out_path: Path) -> None:
+    """Mid-column rock silhouette vs input-noise level, one line per encoder.
+    A representation that degrades more slowly under noisy logs is the more
+    robust (and the more useful for real, noisy wells)."""
+    df = pd.DataFrame(rows)
+    colours = {"JEPA": "#4C72B0", "AE": "#dd8452"}
+    has_sd = "silhouette_sd" in df.columns
+    fig, ax = plt.subplots(figsize=(6.5, 4.0))
+    for enc in ("JEPA", "AE"):
+        sub = df[df["encoder"] == enc].sort_values("sigma")
+        if sub.empty:
+            continue
+        ax.plot(sub["sigma"], sub["silhouette"], marker="o", ms=6, lw=2.0,
+                color=colours.get(enc, "#888"), label=enc)
+        if has_sd:
+            ax.fill_between(sub["sigma"],
+                            sub["silhouette"] - sub["silhouette_sd"],
+                            sub["silhouette"] + sub["silhouette_sd"],
+                            color=colours.get(enc, "#888"), alpha=0.18)
+    ax.set_xlabel(r"input-noise level  $\sigma$  (standardised units)")
+    ax.set_ylabel("rock silhouette (middle 50%)")
+    ax.set_title("Robustness to input noise: JEPA vs AE", fontweight="bold")
+    ax.grid(alpha=0.3)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(out_path, bbox_inches="tight")
     plt.close(fig)
     print(f"  wrote {out_path}")
 
@@ -495,6 +688,9 @@ def main() -> None:
 
     summary_rows: list[dict] = []
     ae_recon_by_encoder: dict[str, list[dict]] = {}
+    z2_by_encoder: dict[str, np.ndarray] = {}
+    sil_by_encoder: dict[str, dict] = {}
+    model_by_encoder: dict[str, tuple] = {}
 
     for display_name, family, panel_idx, ckpt_path in present:
         print(f"\n── {display_name} ──  loading {ckpt_path}")
@@ -504,12 +700,29 @@ def main() -> None:
         else:
             model, stats, vars_ = load_jepa_checkpoint(ckpt_path, device=device)
             Z = encode_with_jepa(model, values, stats, vars_, device)
+        model_by_encoder[display_name] = (model, stats, vars_, family)
         print(f"  latents: {Z.shape}  variables: {vars_}")
         Z2 = reduce_to_2d(Z, method="umap")
         sil = silhouette_table(Z, label_sets)
+        z2_by_encoder[display_name] = Z2
+        sil_by_encoder[display_name] = sil
+        knn = {name: knn_label_accuracy(Z, labels)
+               for name, labels in label_sets.items()}
+        probe = {name: probe_accuracy(Z, labels)
+                 for name, labels in label_sets.items()}
+        fewshot = {name: few_shot_probe(Z, labels)
+                   for name, labels in label_sets.items()}
         for name, (score, n) in sil.items():
             summary_rows.append({"encoder": display_name, "label_set": name,
-                                  "silhouette": score, "n_used": n})
+                                  "silhouette": score,
+                                  "knn_acc": knn.get(name, float("nan")),
+                                  "probe_acc": probe.get(name, float("nan")),
+                                  "fewshot_acc": fewshot.get(name, float("nan")),
+                                  "n_used": n})
+        for nm in ("rock (middle 50%)", "formation (middle 50%)"):
+            print(f"    {nm:24s}  knn={knn.get(nm, float('nan')):.3f}  "
+                  f"probe={probe.get(nm, float('nan')):.3f}  "
+                  f"fewshot(3)={fewshot.get(nm, float('nan')):.3f}")
 
         umap_path = args.out / f"{panel_idx:02d}_{display_name.lower()}_umap.png"
         plot_umap_grid(Z2, label_sets, sil,
@@ -548,6 +761,37 @@ def main() -> None:
 
     plot_silhouette_comparison(summary, args.out
                                 / "03_silhouette_comparison.png")
+
+    # Side-by-side JEPA vs AE latent maps (same boreholes, rock-coloured).
+    if "JEPA" in z2_by_encoder and "AE" in z2_by_encoder:
+        rock_key = "rock (middle 50%)"
+        sj = sil_by_encoder["JEPA"].get(rock_key, (float("nan"), 0))[0]
+        sa = sil_by_encoder["AE"].get(rock_key, (float("nan"), 0))[0]
+        plot_jepa_vs_ae_umap(z2_by_encoder["JEPA"], z2_by_encoder["AE"],
+                             label_sets[rock_key], sj, sa,
+                             args.out / "jepa_vs_ae_umap.png")
+
+    # Robustness to input noise: degrade the standardised logs and watch the
+    # mid-column rock silhouette of each encoder fall.
+    if "JEPA" in model_by_encoder and "AE" in model_by_encoder:
+        rock_key = "rock (middle 50%)"
+        rock_labels = label_sets[rock_key]
+        sigmas = [0.0, 0.1, 0.2, 0.3, 0.5]
+        noise_rows = []
+        print("\nnoise-robustness sweep (rock-mid silhouette) ...")
+        for enc in ("JEPA", "AE"):
+            model, stats, vars_, family = model_by_encoder[enc]
+            enc_fn = encode_with_jepa if family == "jepa" else encode_with_ae
+            for sd in sigmas:
+                Zn = enc_fn(model, values, stats, vars_, device,
+                            noise_sd=sd, seed=0)
+                s = silhouette_table(Zn, {rock_key: rock_labels})[rock_key][0]
+                noise_rows.append({"encoder": enc, "sigma": sd,
+                                   "silhouette": s})
+                print(f"  {enc:5s}  sigma={sd:.2f}  silhouette={s:+.3f}")
+        pd.DataFrame(noise_rows).to_csv(args.out / "noise_robustness.csv",
+                                        index=False)
+        plot_noise_robustness(noise_rows, args.out / "noise_robustness.png")
 
     print("\nwriting ENCODER_REPORT.md ...")
     write_encoder_report(
